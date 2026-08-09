@@ -32,6 +32,7 @@ from .fact_claim_ledger import (
     IssueStatus,
 )
 from .models import Actor, Role
+from .request_context import current_request_id
 from .transaction_ledger import (
     ClassificationOrigin,
     ClassificationStatus,
@@ -1830,7 +1831,7 @@ def _finish_command(
         raise VersionConflict("matter changed before this ledger command could be persisted")
     next_version = updated["version"]
     audit_event_id = str(uuid4())
-    request_id = str(uuid4())
+    request_id = current_request_id() or str(uuid4())
     connection.execute(
         """
         INSERT INTO audit_events (

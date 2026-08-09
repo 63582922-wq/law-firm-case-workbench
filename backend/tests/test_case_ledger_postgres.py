@@ -11,6 +11,7 @@ from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
 from case_kernel.evidence_refs import EvidenceLink
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.models import Actor, Role
+from case_kernel.request_context import reset_request_id, set_request_id
 from case_kernel.transaction_ledger import DatePrecision, TransactionChannel, TransactionDirection
 from case_kernel.transaction_ledger import ClassificationOrigin, ObligationAllocation, PaymentNature
 
@@ -140,6 +141,29 @@ class PostgresCaseLedgerStoreTests(unittest.TestCase):
         self.assertIn("INSERT INTO outbox_events", sql)
         self.assertIn("INSERT INTO command_idempotency", sql)
         self.assertLess(sql.index("SELECT set_config"), sql.index("INSERT INTO case_facts"))
+
+    def test_api_request_id_is_bound_into_the_same_audit_transaction(self) -> None:
+        connection = FakeConnection()
+        request_id = str(uuid4())
+        token = set_request_id(request_id)
+        try:
+            with patch(
+                "case_kernel.case_ledger_postgres.psycopg.connect",
+                return_value=FakeConnectionContext(connection),
+            ):
+                self.store.create_fact_candidate(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="fact-request-context-001",
+                    original_text="[合成] 审计请求上下文。",
+                    origin=AssertionOrigin.ASSISTANT_ENTRY,
+                    evidence_links=evidence(),
+                )
+        finally:
+            reset_request_id(token)
+        audit_params = next(params for sql, params in connection.executed if "INSERT INTO audit_events" in sql)
+        self.assertEqual(audit_params[7], request_id)
 
     def test_fact_decision_revokes_dependent_objects_and_stales_submission(self) -> None:
         connection = FakeConnection()

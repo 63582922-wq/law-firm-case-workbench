@@ -246,3 +246,90 @@ class PersistentFactResponse(BaseModel):
     status: str
     evidence_count: int
     decision_hash: str | None
+
+
+class PersistentClaimCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    original_claim_text: str = Field(min_length=1, max_length=10_000)
+    claimed_amount: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    evidence_links: list[OriginalEvidenceLinkRequest] = Field(min_length=1, max_length=30)
+
+    @field_validator("currency")
+    @classmethod
+    def claim_currency_matches_amount(cls, value: str | None, info):
+        amount = info.data.get("claimed_amount")
+        if (amount is None) != (value is None):
+            raise ValueError("claimed_amount and currency must be supplied together")
+        return value
+
+
+class PersistentApprovalRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentClaimResponseRequest(PersistentApprovalRequest):
+    position: Literal["ADMIT", "PARTIALLY_ADMIT", "DISPUTE", "OUTSIDE_SCOPE"]
+    confirmed_fact_ids: list[UUID] = Field(min_length=1, max_length=200)
+    partial_amount: Decimal | None = Field(default=None, ge=0, max_digits=18, decimal_places=2)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+
+
+class PersistentDisputeIssueCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    question: str = Field(min_length=1, max_length=2_000)
+    claim_ids: list[UUID] = Field(min_length=1, max_length=100)
+    confirmed_fact_ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+class PersistentTransactionCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    local_date: date | None = None
+    date_precision: Literal["EXACT_DATE", "MONTH_ONLY", "YEAR_ONLY", "UNKNOWN"]
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    direction: Literal["OUTGOING", "INCOMING", "UNKNOWN"]
+    payer_label: str | None = Field(default=None, max_length=500)
+    payee_label: str | None = Field(default=None, max_length=500)
+    channel: Literal["WECHAT", "BANK", "CASH", "CHAT_RECORD", "LOAN_INSTRUMENT", "OTHER"]
+    transaction_reference: str | None = Field(default=None, max_length=500)
+    evidence_links: list[OriginalEvidenceLinkRequest] = Field(min_length=1, max_length=30)
+
+
+class PersistentConfirmationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    confirmation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentObligationAllocationRequest(BaseModel):
+    obligation_id: str = Field(min_length=1, max_length=160)
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+
+class PersistentPaymentClassificationCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    origin: Literal["PLAINTIFF_PLEADING", "DEFENDANT_STATEMENT", "AGENT_CANDIDATE", "ASSISTANT_ENTRY"]
+    nature: Literal[
+        "DISBURSEMENT",
+        "REPAYMENT_UNSPECIFIED",
+        "INTEREST_PAYMENT",
+        "PRINCIPAL_REPAYMENT",
+        "REFUND",
+        "FEE",
+        "UNRELATED",
+    ]
+    allocations: list[PersistentObligationAllocationRequest] = Field(default_factory=list, max_length=100)
+    same_day_sequence: int | None = Field(default=None, ge=1)
+    evidence_links: list[OriginalEvidenceLinkRequest] = Field(min_length=1, max_length=30)
+
+
+class PersistentDuplicateGroupCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    transaction_ids: list[UUID] = Field(min_length=2, max_length=100)
+
+
+class PersistentDuplicateGroupResolutionRequest(PersistentApprovalRequest):
+    same_economic_event: bool
+    canonical_transaction_id: UUID | None = None

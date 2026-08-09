@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 import unittest
 
 from fastapi.testclient import TestClient
@@ -57,6 +57,30 @@ class FakePersistentFactStore:
         self.calls.append(("list", {"matter_id": matter_id, "actor": actor}))
         return ()
 
+    def create_transaction_candidate(self, **kwargs):
+        self.calls.append(("create_transaction", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CREATE_TRANSACTION_CANDIDATE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="TRANSACTION",
+            object_id=str(uuid4()),
+        )
+
+    def create_payment_classification_candidate(self, **kwargs):
+        self.calls.append(("create_classification", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CREATE_PAYMENT_CLASSIFICATION_CANDIDATE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="PAYMENT_CLASSIFICATION",
+            object_id=str(uuid4()),
+        )
+
 
 class PersistentApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -110,6 +134,7 @@ class PersistentApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 201, response.text)
+        UUID(response.headers["X-Request-ID"])
         self.assertEqual(store.calls[0][1]["actor"].actor_id, self.actor_id)
 
     def test_expired_server_identity_is_rejected_before_store_call(self) -> None:
@@ -133,7 +158,76 @@ class PersistentApiTests(unittest.TestCase):
         )
         response = client.get(f"/v1/matters/{self.matter_id}/facts")
         self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "AUTHENTICATION_REQUIRED")
+        self.assertEqual(response.json()["request_id"], response.headers["X-Request-ID"])
         self.assertEqual(store.calls, [])
+
+    def test_transaction_and_payment_classification_routes_keep_currency_and_application_explicit(self) -> None:
+        store = FakePersistentFactStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=store,
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        transaction = client.post(
+            f"/v1/matters/{self.matter_id}/transactions",
+            headers={"Idempotency-Key": "persistent-transaction-001"},
+            json={
+                "expected_version": 1,
+                "local_date": "2020-08-20",
+                "date_precision": "EXACT_DATE",
+                "amount": "1000.00",
+                "currency": "CNY",
+                "direction": "OUTGOING",
+                "payer_label": "[合成] 被告",
+                "payee_label": "[合成] 原告",
+                "channel": "WECHAT",
+                "transaction_reference": "synthetic-reference",
+                "evidence_links": [
+                    {
+                        "evidence_id": "synthetic-transaction-evidence",
+                        "original_file_sha256": "b" * 64,
+                        "page_number": 2,
+                        "region_id": "synthetic-transaction-region",
+                        "original_label": "[合成] 微信流水第2页",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(transaction.status_code, 201, transaction.text)
+        transaction_id = transaction.json()["object_id"]
+        classification = client.post(
+            f"/v1/matters/{self.matter_id}/transactions/{transaction_id}/payment-classifications",
+            headers={"Idempotency-Key": "persistent-classification-001"},
+            json={
+                "expected_version": 2,
+                "origin": "DEFENDANT_STATEMENT",
+                "nature": "INTEREST_PAYMENT",
+                "allocations": [
+                    {"obligation_id": "synthetic-obligation", "amount": "1000.00", "currency": "CNY"}
+                ],
+                "same_day_sequence": 1,
+                "evidence_links": [
+                    {
+                        "evidence_id": "synthetic-transaction-evidence",
+                        "original_file_sha256": "b" * 64,
+                        "page_number": 2,
+                        "region_id": "synthetic-transaction-region",
+                        "original_label": "[合成] 微信流水第2页",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(classification.status_code, 201, classification.text)
+        transaction_call = next(call for call in store.calls if call[0] == "create_transaction")[1]
+        classification_call = next(call for call in store.calls if call[0] == "create_classification")[1]
+        self.assertEqual(transaction_call["currency"], "CNY")
+        self.assertEqual(classification_call["nature"].value, "INTEREST_PAYMENT")
+        self.assertEqual(classification_call["allocations"][0].currency, "CNY")
 
 
 if __name__ == "__main__":
