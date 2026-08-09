@@ -43,6 +43,10 @@ from case_kernel.legal_source_postgres import (
     PersistentLegalReviewSnapshot,
     PostgresLegalSourceStore,
 )
+from case_kernel.official_source_capture_postgres import (
+    PersistentOfficialSourceCaptureSnapshot,
+    PostgresOfficialSourceCaptureStore,
+)
 from case_kernel.models import Actor
 from case_kernel.local_access_grants import LocalSessionProof
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
@@ -109,6 +113,9 @@ from .schemas import (
     PersistentLegalRuleVersionRequest,
     PersistentLegalReviewSnapshotResponse,
     PersistentOfficialLegalSourceSnapshotRequest,
+    PersistentOfficialSourceCaptureRequest,
+    PersistentOfficialSourceCaptureReviewRequest,
+    PersistentOfficialSourceCaptureSnapshotResponse,
     PersistentSubmissionLockRequest,
     PersistentSubmissionAccessResponse,
     PersistentSubmissionQaRequest,
@@ -227,6 +234,16 @@ class PersistentSubmissionPort(Protocol):
     def get_verified_export_locator(self, **kwargs): ...
 
 
+class PersistentOfficialSourceCapturePort(Protocol):
+    def queue_capture(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def review_capture(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentOfficialSourceCaptureSnapshot: ...
+
+
 class PersistentRequestBlocked(ValueError):
     pass
 
@@ -255,6 +272,7 @@ class PersistentApiDependencies:
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
     formal_calculation_store: PersistentFormalCalculationPort | None = None
     legal_source_store: PersistentLegalSourcePort | None = None
+    official_source_capture_store: PersistentOfficialSourceCapturePort | None = None
     submission_store: PersistentSubmissionPort | None = None
     submission_access_broker: SubmissionExportAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
@@ -283,6 +301,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.legal_source_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL legal source store")
+        if self.official_source_capture_store is not None and not isinstance(
+            self.official_source_capture_store, PostgresOfficialSourceCaptureStore
+        ):
+            if not getattr(self.official_source_capture_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL official source capture store")
         if self.submission_store is not None and not isinstance(
             self.submission_store, PostgresSubmissionStore
         ):
@@ -336,6 +359,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
             "formal_calculation": "configured" if dependencies.formal_calculation_store else "not-configured",
             "legal_source": "configured" if dependencies.legal_source_store else "not-configured",
+            "official_source_capture": "configured" if dependencies.official_source_capture_store else "not-configured",
             "submission": "configured" if dependencies.submission_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
@@ -374,6 +398,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "official legal source persistence is not configured"
             )
         return dependencies.legal_source_store
+
+    def get_official_source_capture_store() -> PersistentOfficialSourceCapturePort:
+        if dependencies.official_source_capture_store is None:
+            raise PersistentLegalSourceServiceUnavailable(
+                "official source capture persistence is not configured"
+            )
+        return dependencies.official_source_capture_store
 
     def get_submission_store() -> PersistentSubmissionPort:
         if dependencies.submission_store is None:
@@ -643,6 +674,78 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             matter_id=str(matter_id), actor=identity.actor
         )
         return PersistentLegalReviewSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/official-source-captures",
+        response_model=PersistentOfficialSourceCaptureSnapshotResponse,
+        tags=["legal-sources"],
+    )
+    async def get_official_source_capture_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        capture_store: Annotated[
+            PersistentOfficialSourceCapturePort, Depends(get_official_source_capture_store)
+        ],
+    ) -> PersistentOfficialSourceCaptureSnapshotResponse:
+        snapshot = capture_store.get_snapshot(matter_id=str(matter_id), actor=identity.actor)
+        return PersistentOfficialSourceCaptureSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/official-source-captures",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def queue_official_source_capture(
+        matter_id: UUID,
+        body: PersistentOfficialSourceCaptureRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        capture_store: Annotated[
+            PersistentOfficialSourceCapturePort, Depends(get_official_source_capture_store)
+        ],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            capture_store.queue_capture(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                source_id=body.source_id,
+                target_url=body.target_url,
+                query_sha256=body.query_sha256,
+                authorization_hash=body.authorization_hash,
+                max_response_bytes=body.max_response_bytes,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/official-source-captures/{run_id}/review",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["legal-sources"],
+    )
+    async def review_official_source_capture(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentOfficialSourceCaptureReviewRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        capture_store: Annotated[
+            PersistentOfficialSourceCapturePort, Depends(get_official_source_capture_store)
+        ],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            capture_store.review_capture(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                decision=body.decision,
+                provision_locator=body.provision_locator,
+                review_hash=body.review_hash,
+            )
+        )
 
     @app.post(
         "/v1/matters/{matter_id}/legal-rule-versions",

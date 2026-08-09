@@ -200,6 +200,55 @@
 .legalTimeline article small { color: var(--ink-faint); font-size: 10px; }
 .legalTimeline article em { color: var(--red); font: 600 15px var(--font-serif); font-style: normal; text-align: right; }
 .legalEmpty { padding: 20px 17px; color: var(--ink-soft); background: var(--sheet-muted); font-size: 11px; line-height: 1.65; }
+.legalCaptureButton { margin-top: 4px; padding: 6px 8px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: inherit; font-size: 9px; cursor: pointer; }
+.legalCaptureButton:disabled { opacity: .42; cursor: not-allowed; }
+.legalCaptureBlocked, .legalCaptureProbe, .legalCapturePersistent { padding: 13px 16px; display: grid; grid-template-columns: 145px minmax(0, 1fr) auto; gap: 12px; align-items: center; border-bottom: 1px solid #d7b7ae; color: var(--ink-soft); background: var(--red-soft); font-size: 11px; line-height: 1.6; }
+.legalCaptureBlocked strong { color: var(--red); }
+.legalCaptureBlocked small { grid-column: 2 / -1; color: var(--ink-faint); }
+.legalCaptureProbe { border-color: #ddc99f; background: var(--ochre-soft); }
+.legalCaptureProbe strong { color: var(--ochre); }
+.legalCapturePersistent { border-color: var(--line-strong); background: var(--sheet-muted); }
+.legalCaptureProbe code, .legalCapturePersistent code { color: var(--ink-faint); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.legalCaptureConsent { margin: 15px 16px 0; padding: 13px 14px; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start; border: 1px solid var(--line-strong); background: var(--sheet-muted); cursor: pointer; }
+.legalCaptureConsent input { width: 15px; height: 15px; margin-top: 2px; accent-color: var(--ink); }
+.legalCaptureConsent span { display: grid; gap: 4px; }
+.legalCaptureConsent strong { font-size: 11px; }
+.legalCaptureConsent small { color: var(--ink-faint); font-size: 10px; line-height: 1.55; }
+.legalCaptureRuns { padding: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.legalCaptureRun { min-width: 0; padding: 15px; display: grid; align-content: start; gap: 11px; border: 1px solid var(--line); background: var(--sheet); }
+.legalCaptureRunHeading { display: flex; justify-content: space-between; gap: 14px; align-items: start; }
+.legalCaptureRunHeading > div { min-width: 0; display: grid; gap: 4px; }
+.legalCaptureRunHeading strong { font-size: 12px; line-height: 1.45; }
+.legalCaptureRunHeading small { overflow-wrap: anywhere; color: var(--ink-faint); font-size: 9px; line-height: 1.5; }
+.legalCaptureRunHeading > span { padding: 5px 7px; border: 1px solid var(--line-strong); font-size: 9px; font-weight: 700; white-space: nowrap; }
+.legalCaptureReady, .legalCapturePending, .legalCaptureProbeState { color: var(--ochre); background: var(--ochre-soft); }
+.legalCaptureProbeState { color: var(--ink-soft); background: var(--sheet-muted); }
+.legalCaptureFailed { color: var(--red); border-color: #d7b7ae !important; background: var(--red-soft); }
+.legalCaptureMeta { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 12px; color: var(--ink-faint); font-size: 9px; }
+.legalCaptureMeta a { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; text-underline-offset: 3px; }
+.legalCaptureMeta span:nth-child(even) { text-align: right; }
+.legalCaptureHashes { padding: 9px 10px; display: grid; gap: 5px; background: var(--sheet-muted); }
+.legalCaptureHashes code { overflow-wrap: anywhere; color: var(--ink-faint); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.legalParsedSummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
+.legalParsedSummary div { min-width: 0; padding: 8px 9px; display: grid; gap: 4px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.legalParsedSummary dt { color: var(--ink-faint); font-size: 9px; }
+.legalParsedSummary dd { overflow-wrap: anywhere; color: var(--ink); font-size: 10px; line-height: 1.5; }
+.legalCaptureFailure { padding: 9px 10px; color: var(--red); background: var(--red-soft); font-size: 9px; line-height: 1.55; }
+.legalCapturedReview { padding: 10px; display: grid; gap: 5px; border: 1px solid #c7d6cc; background: var(--green-soft); }
+.legalCapturedReview strong { color: var(--green); font-size: 10px; }
+.legalCapturedReview span { color: var(--ink-soft); font-size: 9px; line-height: 1.5; }
+.legalCapturedReview code { color: var(--ink-faint); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.legalCapturedReviewRejected { border-color: #d7b7ae; background: var(--red-soft); }
+.legalCapturedReviewRejected strong { color: var(--red); }
+.legalReviewActions { padding-top: 11px; display: grid; gap: 8px; border-top: 1px solid var(--line-strong); }
+.legalReviewActions label { color: var(--ink); font-size: 10px; font-weight: 650; }
+.legalReviewActions input { width: 100%; padding: 8px 9px; border: 1px solid var(--line-strong); border-radius: 0; color: var(--ink); background: var(--sheet); font: inherit; font-size: 10px; }
+.legalReviewActions > div { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.legalReviewActions button { padding: 8px 9px; border: 1px solid var(--ink); color: var(--ink); background: var(--sheet); font: inherit; font-size: 9px; cursor: pointer; }
+.legalReviewActions button:last-child { color: var(--sheet); background: var(--ink); }
+.legalReviewActions button:disabled { opacity: .5; cursor: wait; }
+.legalReviewActions small { color: var(--ink-faint); font-size: 9px; line-height: 1.55; }
+.legalCaptureNotice { margin: 0 16px 16px; padding: 10px 12px; border: 1px solid var(--line-strong); color: var(--ink-soft); background: var(--sheet-muted); font-size: 10px; line-height: 1.6; }
 
 .submissionArea { min-width: 0; padding: 29px 28px 52px; }
 .submissionBlockedNotice, .submissionReviewNotice { margin-top: 18px; padding: 13px 15px; display: grid; grid-template-columns: 145px minmax(0, 1fr); gap: 14px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 11px; line-height: 1.65; }
@@ -255,6 +304,6 @@
 @media (max-width: 1360px) {
   .topbar, .caseHeader, .footer { padding-right: 24px; padding-left: 24px; }.caseSubline { max-width: 615px; }.content { padding-right: 28px; padding-left: 28px; }.evidenceArea { padding-right: 20px; padding-left: 20px; }.evidenceColumns { grid-template-columns: 194px minmax(410px,1fr) 252px; }.documentStage { padding-right: 17px; padding-left: 17px; }.documentPaper { padding-right: 32px; padding-left: 32px; }.topbarMeta span:first-child { display: none; }
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }
-  .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }
+  .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
 }

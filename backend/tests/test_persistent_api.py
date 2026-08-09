@@ -19,6 +19,7 @@ from case_kernel.formal_calculation_postgres import PersistentFormalCalculationS
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
+from case_kernel.official_source_capture_postgres import PersistentOfficialSourceCaptureSnapshot
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 from case_kernel.submission_postgres import PersistentSubmissionSnapshot
 from case_kernel.submission_access import (
@@ -334,6 +335,50 @@ class FakePersistentSubmissionStore:
         if self.locator is None:
             raise KeyError(kwargs["export_id"])
         return self.locator
+
+
+class FakePersistentOfficialSourceCaptureStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.run_id = str(uuid4())
+
+    def _receipt(self, name: str, kwargs: dict, object_type: str):
+        self.calls.append((name, kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name=name.upper(),
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type=object_type,
+            object_id=self.run_id if object_type == "OFFICIAL_SOURCE_CAPTURE_RUN" else str(uuid4()),
+        )
+
+    def queue_capture(self, **kwargs):
+        return self._receipt("queue_capture", kwargs, "OFFICIAL_SOURCE_CAPTURE_RUN")
+
+    def review_capture(self, **kwargs):
+        return self._receipt("review_capture", kwargs, "OFFICIAL_SOURCE_CAPTURE_REVIEW")
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentOfficialSourceCaptureSnapshot(
+            matter_id=matter_id,
+            matter_version=8,
+            runs=(
+                {
+                    "run_id": self.run_id,
+                    "source_id": "CFETS-LPR-HISTORY",
+                    "status": "REVIEW_REQUIRED",
+                    "content_sha256": "a" * 64,
+                    "parsed_output_hash": "b" * 64,
+                },
+            ),
+            reviews=(),
+            snapshot_hash="c" * 64,
+        )
 
 class PersistentApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -857,6 +902,67 @@ class PersistentApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
         self.assertEqual(legal_store.calls, [])
+
+    def test_official_source_capture_routes_fail_closed_when_capture_store_is_not_configured(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/official-source-captures")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "LEGAL_SOURCE_SERVICE_UNAVAILABLE")
+
+    def test_official_source_capture_snapshot_queue_and_review_routes_map_server_identity(self) -> None:
+        capture_store = FakePersistentOfficialSourceCaptureStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    official_source_capture_store=capture_store,
+                )
+            )
+        )
+        snapshot = client.get(f"/v1/matters/{self.matter_id}/official-source-captures")
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertEqual(snapshot.json()["runs"][0]["status"], "REVIEW_REQUIRED")
+
+        queued = client.post(
+            f"/v1/matters/{self.matter_id}/official-source-captures",
+            headers={"Idempotency-Key": "source-capture-api-001"},
+            json={
+                "expected_version": 8,
+                "source_id": "CFETS-LPR-HISTORY",
+                "target_url": "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN",
+                "query_sha256": "a" * 64,
+                "authorization_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(queued.status_code, 201, queued.text)
+        queue_call = next(call for name, call in capture_store.calls if name == "queue_capture")
+        self.assertEqual(queue_call["actor"], self.identity.actor)
+        self.assertEqual(queue_call["expected_version"], 8)
+
+        reviewed = client.post(
+            f"/v1/matters/{self.matter_id}/official-source-captures/{capture_store.run_id}/review",
+            headers={"Idempotency-Key": "source-review-api-001"},
+            json={
+                "expected_version": 9,
+                "decision": "APPROVE_FOR_REGISTRATION",
+                "provision_locator": "一年期LPR records[0]",
+                "review_hash": "c" * 64,
+            },
+        )
+        self.assertEqual(reviewed.status_code, 200, reviewed.text)
+        review_call = next(call for name, call in capture_store.calls if name == "review_capture")
+        self.assertEqual(review_call["run_id"], capture_store.run_id)
+        self.assertEqual(review_call["actor"], self.identity.actor)
 
     def test_submission_routes_fail_closed_when_submission_store_is_not_configured(self) -> None:
         client = TestClient(

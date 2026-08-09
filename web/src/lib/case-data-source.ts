@@ -165,6 +165,55 @@ export type LegalReviewView = {
   }[];
 };
 
+export type OfficialSourceCaptureView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  status: "probe-only" | "persistent";
+  statusReason: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  runs: {
+    runId: string;
+    sourceId: string;
+    publisher: string;
+    sourceTier: string;
+    targetUrl: string;
+    status: string;
+    attemptCount: number;
+    authorizedAt: string | null;
+    authorizationExpiresAt: string | null;
+    finalUrl: string | null;
+    retrievedAt: string | null;
+    peerIp: string | null;
+    contentMediaType: string | null;
+    contentSha256: string | null;
+    contentBytes: number | null;
+    captureVerificationHash: string | null;
+    parserKind: string | null;
+    parsedOutputHash: string | null;
+    parsedSummary: Record<string, unknown> | null;
+    failureCode: string | null;
+    completedAt: string | null;
+    staleReason: string | null;
+  }[];
+  reviews: {
+    reviewId: string;
+    runId: string;
+    decision: string;
+    provisionLocator: string;
+    reviewHash: string;
+    reviewedBy: string;
+    reviewedAt: string;
+  }[];
+};
+
+export type OfficialSourceCaptureReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -380,6 +429,45 @@ type PersistentLegalReviewSnapshot = {
   }[];
 };
 
+type PersistentOfficialSourceCaptureSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  runs: {
+    run_id: string;
+    source_id: string;
+    publisher?: string;
+    source_tier?: string;
+    target_url?: string;
+    status: string;
+    attempt_count?: number;
+    authorized_at?: string | null;
+    authorization_expires_at?: string | null;
+    final_url?: string | null;
+    retrieved_at?: string | null;
+    peer_ip?: string | null;
+    content_media_type?: string | null;
+    content_sha256?: string | null;
+    content_bytes?: number | null;
+    capture_verification_hash?: string | null;
+    parser_kind?: string | null;
+    parsed_output_hash?: string | null;
+    parsed_summary?: Record<string, unknown> | null;
+    failure_code?: string | null;
+    completed_at?: string | null;
+    stale_reason?: string | null;
+  }[];
+  reviews: {
+    review_id: string;
+    run_id: string;
+    decision: string;
+    provision_locator: string;
+    review_hash: string;
+    reviewed_by: string;
+    reviewed_at: string;
+  }[];
+};
+
 type PersistentSubmissionSnapshot = {
   matter_id: string;
   matter_version: number;
@@ -545,6 +633,144 @@ export async function loadLegalReview(
     throw new Error(errorMessage(payload as ErrorEnvelope, "法律依据审查快照不可用"));
   }
   return mapPersistentLegalReview(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function loadOfficialSourceCaptureReview(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OfficialSourceCaptureView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") return syntheticOfficialSourceProbeView();
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/official-source-captures`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const payload = (await response.json()) as PersistentOfficialSourceCaptureSnapshot | ErrorEnvelope;
+  if (!response.ok || !("runs" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "官方法源抓取快照不可用"));
+  }
+  return mapPersistentOfficialSourceCapture(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function queueOfficialSourceCapture(
+  input: { sourceId: string; targetUrl: string; expectedVersion: number },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OfficialSourceCaptureReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以建立正式法源抓取任务。");
+  }
+  const minimizedQuery = officialSourceMinimizedQuery(input.sourceId);
+  const querySha256 = await sha256Text(minimizedQuery);
+  const authorizationHash = await sha256Text([
+    "official-source-capture-authorization-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    input.sourceId,
+    input.targetUrl,
+    querySha256,
+    "PUBLIC_OFFICIAL_SOURCE_ONLY",
+    "NO_CASE_MATERIAL_SENT",
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/official-source-captures`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        source_id: input.sourceId,
+        target_url: input.targetUrl,
+        query_sha256: querySha256,
+        authorization_hash: authorizationHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在法源抓取任务确认前中断。请先刷新状态；系统不会自动重试外部请求。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "官方法源抓取任务未建立"));
+  }
+  if (payload.object_type !== "OFFICIAL_SOURCE_CAPTURE_RUN") {
+    throw new Error("法源抓取回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function reviewOfficialSourceCapture(
+  input: {
+    runId: string;
+    expectedVersion: number;
+    decision: "APPROVE_FOR_REGISTRATION" | "REJECT";
+    provisionLocator: string;
+    contentSha256: string | null;
+    parsedOutputHash: string | null;
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OfficialSourceCaptureReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以复核正式法源抓取结果。");
+  }
+  const provisionLocator = input.provisionLocator.trim();
+  if (!provisionLocator) throw new Error("请填写可以回到官方原文核对的具体条文或记录位置。");
+  const reviewHash = await sha256Text([
+    "official-source-capture-review-v1",
+    config.matterId,
+    input.runId,
+    String(input.expectedVersion),
+    input.decision,
+    provisionLocator,
+    input.contentSha256 ?? "NO_CONTENT_HASH",
+    input.parsedOutputHash ?? "NO_PARSED_OUTPUT_HASH",
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await fetch(
+      `${config.apiBase}/v1/matters/${config.matterId}/official-source-captures/${input.runId}/review`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          expected_version: input.expectedVersion,
+          decision: input.decision,
+          provision_locator: provisionLocator,
+          review_hash: reviewHash,
+        }),
+      },
+    );
+  } catch {
+    throw new Error("连接在法源复核确认前中断。请先刷新状态；系统不会重复提交律师决定。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "官方法源复核未记录"));
+  }
+  if (payload.object_type !== "OFFICIAL_SOURCE_CAPTURE_REVIEW") {
+    throw new Error("法源复核回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
 }
 
 export async function loadSubmissionReview(
@@ -1003,9 +1229,9 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
       {
         ...shared,
         sourceId: "CN-CIVIL-CODE-680",
-        publisher: "国家法律法规数据库",
+        publisher: "最高人民法院（公布民法典全文）",
         authorityLevel: "PRIMARY_LAW",
-        officialUrl: "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
+        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/233181.html",
         provisionLocator: "《中华人民共和国民法典》第六百七十九条至第六百八十条",
       },
       {
@@ -1026,6 +1252,14 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
       },
       {
         ...shared,
+        sourceId: "SPC-PRIVATE-LENDING-2015-ORIGINAL",
+        publisher: "最高人民法院公报",
+        authorityLevel: "JUDICIAL_INTERPRETATION",
+        officialUrl: "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
+        provisionLocator: "法释〔2015〕18号第二十六条、第三十一条",
+      },
+      {
+        ...shared,
         sourceId: "CFETS-LPR-HISTORY",
         publisher: "全国银行间同业拆借中心（中国货币网）",
         authorityLevel: "OFFICIAL_RATE_DATA",
@@ -1039,6 +1273,169 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
     currentBundle: null,
     bundleSegments: [],
   };
+}
+
+function syntheticOfficialSourceProbeView(): OfficialSourceCaptureView {
+  const successfulProbe = (
+    runId: string,
+    sourceId: string,
+    publisher: string,
+    targetUrl: string,
+    parserKind: string,
+    parsedSummary: Record<string, unknown>,
+  ): OfficialSourceCaptureView["runs"][number] => ({
+    runId,
+    sourceId,
+    publisher,
+    sourceTier: sourceId === "CFETS-LPR-HISTORY" ? "OFFICIAL_RATE_DATA" : "JUDICIAL_OR_PRIMARY_SOURCE",
+    targetUrl,
+    status: "PROBE_CAPTURE_AND_PARSE_OK",
+    attemptCount: 1,
+    authorizedAt: "2026-08-10T00:00:00+08:00",
+    authorizationExpiresAt: null,
+    finalUrl: targetUrl,
+    retrievedAt: "2026-08-10T00:00:00+08:00",
+    peerIp: "已验证为公网地址（未保留临时值）",
+    contentMediaType: sourceId === "CFETS-LPR-HISTORY" ? "application/json" : "text/html",
+    contentSha256: null,
+    contentBytes: null,
+    captureVerificationHash: null,
+    parserKind,
+    parsedOutputHash: null,
+    parsedSummary,
+    failureCode: null,
+    completedAt: "2026-08-10T00:00:00+08:00",
+    staleReason: "开发验证完成后临时加密对象已清除，不能登记为案件法源",
+  });
+  return {
+    sourceKind: "synthetic-alpha",
+    sourceLabel: "开发机公开网络验证记录",
+    status: "probe-only",
+    statusReason: "以下是对公开官方网站完成的开发机真实网络冒烟；临时对象已清除，未绑定任何案件、内容哈希或律师复核，不能进入正式规则包。",
+    matterVersion: null,
+    snapshotHash: null,
+    requestId: null,
+    runs: [
+      successfulProbe(
+        "probe-spc-second-revision",
+        "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+        "最高人民法院",
+        "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+        "PRIVATE_LENDING_SECOND_REVISION",
+        { located_articles: [25, 31], result: "精确条文定位通过" },
+      ),
+      successfulProbe(
+        "probe-spc-first-revision",
+        "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+        "最高人民法院",
+        "https://www.court.gov.cn/zixun/xiangqing/249031.html",
+        "PRIVATE_LENDING_FIRST_REVISION",
+        { located_articles: [26, 32], result: "历史版本定位通过" },
+      ),
+      successfulProbe(
+        "probe-civil-code",
+        "CN-CIVIL-CODE-680",
+        "最高人民法院（公布民法典全文）",
+        "https://www.court.gov.cn/zixun/xiangqing/233181.html",
+        "CIVIL_CODE_BORROWING",
+        { located_articles: [679, 680], result: "标题、通过日期与条文顺序核对通过" },
+      ),
+      successfulProbe(
+        "probe-cfets-lpr",
+        "CFETS-LPR-HISTORY",
+        "全国银行间同业拆借中心（中国货币网）",
+        "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN",
+        "CFETS_LPR_JSON",
+        { record_count: 12, period: "2025-08-20 至 2026-07-20", latest_one_year_lpr: "3.00%" },
+      ),
+      {
+        runId: "probe-spc-2015-original",
+        sourceId: "SPC-PRIVATE-LENDING-2015-ORIGINAL",
+        publisher: "最高人民法院公报",
+        sourceTier: "JUDICIAL_INTERPRETATION",
+        targetUrl: "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
+        status: "PROBE_FAILED",
+        attemptCount: 1,
+        authorizedAt: "2026-08-10T00:00:00+08:00",
+        authorizationExpiresAt: null,
+        finalUrl: null,
+        retrievedAt: null,
+        peerIp: null,
+        contentMediaType: null,
+        contentSha256: null,
+        contentBytes: null,
+        captureVerificationHash: null,
+        parserKind: "PRIVATE_LENDING_2015_ORIGINAL",
+        parsedOutputHash: null,
+        parsedSummary: { result: "已发现官方公报条目，但未取得可归档全文" },
+        failureCode: "OFFICIAL_GAZETTE_HTTP_502",
+        completedAt: null,
+        staleReason: "不能使用发布说明或合成解析样本替代正式原文",
+      },
+    ],
+    reviews: [],
+  };
+}
+
+function mapPersistentOfficialSourceCapture(
+  payload: PersistentOfficialSourceCaptureSnapshot,
+  requestId: string | null,
+): OfficialSourceCaptureView {
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "案件正式法源抓取队列",
+    status: "persistent",
+    statusReason: "队列只访问律师明确授权的公开官方 URL，不发送案卷、当事人姓名或检索密钥；抓取和解析完成后仍须律师逐项复核。",
+    matterVersion: payload.matter_version,
+    snapshotHash: payload.snapshot_hash,
+    requestId,
+    runs: payload.runs.map((item) => ({
+      runId: item.run_id,
+      sourceId: item.source_id,
+      publisher: item.publisher ?? item.source_id,
+      sourceTier: item.source_tier ?? "OFFICIAL_SOURCE",
+      targetUrl: item.target_url ?? item.final_url ?? "",
+      status: item.status,
+      attemptCount: item.attempt_count ?? 0,
+      authorizedAt: item.authorized_at ?? null,
+      authorizationExpiresAt: item.authorization_expires_at ?? null,
+      finalUrl: item.final_url ?? null,
+      retrievedAt: item.retrieved_at ?? null,
+      peerIp: item.peer_ip ?? null,
+      contentMediaType: item.content_media_type ?? null,
+      contentSha256: item.content_sha256 ?? null,
+      contentBytes: item.content_bytes ?? null,
+      captureVerificationHash: item.capture_verification_hash ?? null,
+      parserKind: item.parser_kind ?? null,
+      parsedOutputHash: item.parsed_output_hash ?? null,
+      parsedSummary: item.parsed_summary ?? null,
+      failureCode: item.failure_code ?? null,
+      completedAt: item.completed_at ?? null,
+      staleReason: item.stale_reason ?? null,
+    })),
+    reviews: payload.reviews.map((item) => ({
+      reviewId: item.review_id,
+      runId: item.run_id,
+      decision: item.decision,
+      provisionLocator: item.provision_locator,
+      reviewHash: item.review_hash,
+      reviewedBy: item.reviewed_by,
+      reviewedAt: item.reviewed_at,
+    })),
+  };
+}
+
+function officialSourceMinimizedQuery(sourceId: string): string {
+  const queries: Record<string, string> = {
+    "CN-CIVIL-CODE-680": "中华人民共和国民法典 第六百七十九条 第六百八十条",
+    "SPC-PRIVATE-LENDING-2020-SECOND-REVISION": "民间借贷司法解释 2020年第二次修正 第二十五条 第三十一条",
+    "SPC-PRIVATE-LENDING-2020-FIRST-REVISION": "民间借贷司法解释 2020年第一次修正 第二十六条 第三十二条",
+    "SPC-PRIVATE-LENDING-2015-ORIGINAL": "法释2015 18号 第二十六条 第三十一条",
+    "CFETS-LPR-HISTORY": "一年期贷款市场报价利率 历史数据",
+  };
+  const query = queries[sourceId];
+  if (!query) throw new Error("该来源没有登记最小化公开检索模板，已停止外部请求。");
+  return query;
 }
 
 function mapPersistentLegalReview(

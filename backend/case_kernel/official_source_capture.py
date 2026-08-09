@@ -56,6 +56,7 @@ class CapturedOfficialSource:
     requested_url: str
     final_url: str
     retrieved_at: datetime
+    peer_ip: str
     media_type: str
     content_sha256: str
     content_bytes: int
@@ -236,6 +237,7 @@ def capture_authorized_official_source(
         requested_url=request.target_url,
         final_url=response.final_url,
         retrieved_at=current,
+        peer_ip=response.peer_ip,
         media_type=response.media_type,
         content_sha256=content_hash,
         content_bytes=len(response.body),

@@ -871,6 +871,36 @@ class PersistentLegalReviewSnapshotResponse(BaseModel):
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class PersistentOfficialSourceCaptureRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    source_id: Literal[
+        "CN-CIVIL-CODE-680",
+        "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+        "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+        "SPC-PRIVATE-LENDING-2015-ORIGINAL",
+        "CFETS-LPR-HISTORY",
+    ]
+    target_url: str = Field(pattern=r"^https://", max_length=2_000)
+    query_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authorization_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    max_response_bytes: int = Field(default=32 * 1024 * 1024, ge=1, le=64 * 1024 * 1024)
+
+
+class PersistentOfficialSourceCaptureReviewRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    decision: Literal["APPROVE_FOR_REGISTRATION", "REJECT"]
+    provision_locator: str = Field(min_length=1, max_length=1_000)
+    review_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentOfficialSourceCaptureSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    runs: tuple[dict[str, Any], ...]
+    reviews: tuple[dict[str, Any], ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PersistentSubmissionWorkProductRequest(BaseModel):
     expected_version: int = Field(ge=1)
     document_kind: str = Field(min_length=1, max_length=120)
