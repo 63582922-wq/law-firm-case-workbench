@@ -24,6 +24,7 @@ from case_kernel.calculation_engine import (
 )
 from case_kernel.errors import AuthorizationDenied, IdempotencyConflict, InvalidTransition, PreconditionBlocked, VersionConflict
 from case_kernel.legal_rules import InMemoryLegalBundleRegistry, LegalRuleBlocked, synthetic_alpha_legal_bundle
+from case_kernel.fact_claim_ledger import FactLedgerBlocked, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.store import InMemoryMatterStore
 from case_kernel.workflow import MatterWorkflow
@@ -33,6 +34,7 @@ from .alpha_review_state import build_alpha_review_state
 from .schemas import (
     ApprovalRequest,
     AlphaReviewResponse,
+    AlphaFactConfirmationRequest,
     CalculationLineItemResponse,
     CalculationPreviewRequest,
     CalculationPreviewResponse,
@@ -218,6 +220,10 @@ def create_app(
     async def legal_rule_handler(_: Request, exc: LegalRuleBlocked):
         return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
 
+    @app.exception_handler(FactLedgerBlocked)
+    async def fact_ledger_handler(_: Request, exc: FactLedgerBlocked):
+        return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+
     @app.get("/healthz", response_model=HealthResponse, tags=["system"])
     async def healthz() -> HealthResponse:
         return HealthResponse(service="case-api", mode="synthetic-alpha-only", persistence="in-memory")
@@ -303,7 +309,7 @@ def create_app(
         """Read-only synthetic fact/transaction fixture produced through the domain ledgers."""
         if Role.LEAD_LAWYER not in actor.roles:
             raise AuthorizationDenied("only the lead lawyer can inspect the approved synthetic review snapshot")
-        fact_snapshot = alpha_review_state["fact_snapshot"]
+        fact_snapshot = alpha_review_state["fact_ledger"].build_formal_snapshot(actor)
         transaction_snapshot = alpha_review_state["transaction_snapshot"]
         responses_by_claim = {item.claim_id: item for item in fact_snapshot.responses}
         return AlphaReviewResponse(
@@ -341,7 +347,31 @@ def create_app(
                 }
                 for item in transaction_snapshot.events
             ),
+            pending_facts=tuple(
+                {
+                    "fact_id": fact.fact_id,
+                    "original_text": fact.original_text,
+                    "origin": fact.origin.value,
+                    "evidence_count": len(fact.evidence_links),
+                }
+                for fact_id in alpha_review_state["pending_fact_ids"]
+                for fact in (alpha_review_state["fact_ledger"].get_fact(fact_id),)
+                if fact.status.value == "CANDIDATE"
+            ),
         )
+
+    @app.post("/v1/alpha-review/facts/{fact_id}/confirm", response_model=AlphaReviewResponse, tags=["synthetic-review"])
+    async def confirm_alpha_fact(
+        fact_id: str,
+        body: AlphaFactConfirmationRequest,
+        actor: Annotated[Actor, Depends(get_synthetic_actor)],
+    ) -> AlphaReviewResponse:
+        if Role.LEAD_LAWYER not in actor.roles:
+            raise AuthorizationDenied("only the lead lawyer can confirm a synthetic fact candidate")
+        if fact_id not in alpha_review_state["pending_fact_ids"]:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown synthetic fact candidate")
+        alpha_review_state["fact_ledger"].decide_fact(actor, fact_id=fact_id, status=FactStatus.CONFIRMED, decision_hash=body.approval_hash)
+        return await alpha_review(actor)
 
     return app
 

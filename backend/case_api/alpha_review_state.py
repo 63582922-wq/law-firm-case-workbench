@@ -39,6 +39,12 @@ def build_alpha_review_state() -> dict[str, object]:
         evidence_links=(payment_evidence,),
     )
     fact = fact_ledger.decide_fact(lead, fact_id=fact.fact_id, status=FactStatus.CONFIRMED, decision_hash="alpha-fact-approved")
+    pending_fact = fact_ledger.add_fact_candidate(
+        assistant,
+        original_text="合成候选：付款备注是否足以说明付款性质，仍待律师核验。",
+        origin=AssertionOrigin.AGENT_CANDIDATE,
+        evidence_links=(payment_evidence,),
+    )
     claim = fact_ledger.add_claim_candidate(
         assistant,
         original_claim_text="原告主张合成本金10,000.00元及相应利息。",
@@ -88,7 +94,12 @@ def build_alpha_review_state() -> dict[str, object]:
         )
         transactions.approve_payment_classification(lead, proposal_id=proposal.proposal_id, approval_hash=f"{proposal.proposal_id}-approved")
     transaction_snapshot = transactions.build_calculation_snapshot(lead, obligation_id="alpha_obligation_001")
-    return {"fact_snapshot": fact_snapshot, "transaction_snapshot": transaction_snapshot}
+    return {
+        "fact_ledger": fact_ledger,
+        "pending_fact_ids": (pending_fact.fact_id,),
+        "transaction_snapshot": transaction_snapshot,
+        "initial_fact_snapshot": fact_snapshot,
+    }
 
 
 def _transaction(

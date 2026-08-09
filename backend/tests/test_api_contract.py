@@ -197,7 +197,17 @@ class SyntheticAlphaApiTests(unittest.TestCase):
         self.assertEqual(payload["claims"][0]["currency"], "CNY")
         self.assertEqual(payload["claims"][0]["response_position"], "PARTIALLY_ADMIT")
         self.assertEqual(payload["transactions"][1]["payment_application"], "INTEREST_ONLY")
+        self.assertEqual(len(payload["pending_facts"]), 1)
         self.assertEqual(len(payload["fact_snapshot_hash"]), 64)
+
+        confirmed = self.client.post(
+            f"/v1/alpha-review/facts/{payload['pending_facts'][0]['fact_id']}/confirm",
+            headers=self.lead_headers,
+            json={"approval_hash": "candidate-fact-approved"},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        self.assertEqual(len(confirmed.json()["facts"]), 2)
+        self.assertEqual(confirmed.json()["pending_facts"], [])
 
 
 if __name__ == "__main__":

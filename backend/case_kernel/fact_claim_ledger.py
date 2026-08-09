@@ -126,6 +126,12 @@ class FactClaimLedger:
     def version(self) -> int:
         return self._version
 
+    def get_fact(self, fact_id: str) -> FactAssertion:
+        fact = self._facts.get(fact_id)
+        if fact is None:
+            raise FactLedgerBlocked("unknown fact")
+        return fact
+
     def add_fact_candidate(
         self,
         actor: Actor,

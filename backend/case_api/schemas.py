@@ -193,3 +193,15 @@ class AlphaReviewResponse(BaseModel):
     claims: tuple[ClaimReviewResponse, ...]
     issues: tuple[IssueReviewResponse, ...]
     transactions: tuple[TransactionReviewResponse, ...]
+    pending_facts: tuple[AlphaFactCandidateResponse, ...]
+
+
+class AlphaFactCandidateResponse(BaseModel):
+    fact_id: str
+    original_text: str
+    origin: str
+    evidence_count: int
+
+
+class AlphaFactConfirmationRequest(SyntheticGuardedModel):
+    approval_hash: str = Field(min_length=8, max_length=128)
