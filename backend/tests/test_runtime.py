@@ -1,4 +1,6 @@
 from unittest.mock import patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
@@ -6,6 +8,7 @@ from case_kernel.formal_calculation_postgres import PostgresFormalCalculationSto
 from case_kernel.legal_source_postgres import PostgresLegalSourceStore
 from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.official_source_capture_postgres import PostgresOfficialSourceCaptureStore
+from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.submission_postgres import PostgresSubmissionStore
 from case_kernel.runtime import (
     RuntimeConfigurationBlocked,
@@ -30,6 +33,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNone(services.legal_source_store)
         self.assertIsNone(services.official_source_capture_store)
         self.assertIsNone(services.submission_store)
+        self.assertIsNone(services.artifact_store)
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()
 
@@ -74,9 +78,39 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsInstance(services.legal_source_store, PostgresLegalSourceStore)
         self.assertIsInstance(services.official_source_capture_store, PostgresOfficialSourceCaptureStore)
         self.assertIsInstance(services.submission_store, PostgresSubmissionStore)
+        self.assertIsNone(services.artifact_store)
         self.assertNotIn("synthetic-password", repr(settings))
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()
+
+    def test_persistent_runtime_can_bind_one_keychain_backed_store_to_all_object_verifiers(self) -> None:
+        settings = RuntimeSettings(
+            mode=RuntimeMode.POSTGRES_INTERNAL_PREVIEW,
+            _postgres_dsn="postgresql://localhost/lawcase_preview",
+        )
+        with TemporaryDirectory(prefix="runtime-artifact-store-test-") as temporary:
+            store = LocalEncryptedArtifactStore(
+                Path(temporary) / "managed",
+                key_id="synthetic-runtime-key-v1",
+                encryption_key=b"r" * 32,
+            )
+            services = build_runtime_services(settings, artifact_store=store)
+        self.assertIs(services.artifact_store, store)
+        self.assertIsNotNone(services.legal_source_store._official_source_reader)
+        self.assertIsNotNone(services.official_source_capture_store._artifact_reader)
+        self.assertIsNotNone(services.submission_store._artifact_reader)
+
+    def test_synthetic_runtime_rejects_a_persistent_artifact_store(self) -> None:
+        with TemporaryDirectory(prefix="runtime-synthetic-store-test-") as temporary:
+            store = LocalEncryptedArtifactStore(
+                Path(temporary) / "managed",
+                key_id="synthetic-runtime-key-v1",
+                encryption_key=b"r" * 32,
+            )
+            with self.assertRaisesRegex(RuntimeConfigurationBlocked, "cannot receive"):
+                build_runtime_services(
+                    RuntimeSettings(mode=RuntimeMode.SYNTHETIC_ALPHA), artifact_store=store
+                )
 
 
 if __name__ == "__main__":

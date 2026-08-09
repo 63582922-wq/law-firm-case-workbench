@@ -762,7 +762,16 @@ class PersistentOfficialLegalSourceSnapshotRequest(BaseModel):
     content_media_type: str = Field(min_length=1, max_length=160)
     storage_object_key: str = Field(pattern=r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca$")
     verification_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    license_basis: str = Field(min_length=1, max_length=2_000)
+    license_review_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     supersedes_snapshot_id: UUID | None = None
+
+
+class PersistentReviewedCaptureRegistrationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    license_basis: str = Field(min_length=1, max_length=2_000)
+    license_review_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    registration_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class PersistentLegalRuleVersionRequest(BaseModel):

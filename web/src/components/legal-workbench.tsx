@@ -6,6 +6,7 @@ import {
   loadLegalReview,
   loadOfficialSourceCaptureReview,
   queueOfficialSourceCapture,
+  registerReviewedOfficialSourceCapture,
   reviewOfficialSourceCapture,
   type LegalReviewView,
   type OfficialSourceCaptureView,
@@ -21,6 +22,7 @@ export function LegalWorkbench() {
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [publicSourceConfirmed, setPublicSourceConfirmed] = useState(false);
   const [provisionLocators, setProvisionLocators] = useState<Record<string, string>>({});
+  const [licenseBases, setLicenseBases] = useState<Record<string, string>>({});
 
   useEffect(() => {
     let active = true;
@@ -60,7 +62,10 @@ export function LegalWorkbench() {
   }
 
   const readySources = review.sources.filter(
-    (source) => source.verificationStatus === "VERIFIED" && source.licenseStatus === "ACTIVE",
+    (source) => source.verificationStatus === "VERIFIED"
+      && source.licenseStatus === "ACTIVE"
+      && source.licenseBasis
+      && source.licenseReviewHash,
   ).length;
   const approvedBindings = review.factBindings.filter((item) => item.status === "APPROVED").length;
 
@@ -120,6 +125,33 @@ export function LegalWorkbench() {
     }
   }
 
+  async function registerCapture(run: OfficialSourceCaptureView["runs"][number], captureReviewHash: string) {
+    if (!captureReview || captureReview.matterVersion === null || !run.contentSha256 || !run.parsedOutputHash) return;
+    setCaptureBusy(`register:${run.runId}`);
+    setCaptureNotice(null);
+    try {
+      const receipt = await registerReviewedOfficialSourceCapture({
+        runId: run.runId,
+        expectedVersion: captureReview.matterVersion,
+        contentSha256: run.contentSha256,
+        parsedOutputHash: run.parsedOutputHash,
+        captureReviewHash,
+        licenseBasis: licenseBases[run.runId] ?? "",
+      });
+      const [refreshedCapture, refreshedLegal] = await Promise.all([
+        loadOfficialSourceCaptureReview(),
+        loadLegalReview(),
+      ]);
+      setCaptureReview(refreshedCapture);
+      setReview(refreshedLegal);
+      setCaptureNotice(`正式法源快照已登记；案件版本更新为 ${receipt.matterVersion}。规则和利率仍须在后续独立审批中建立。`);
+    } catch (reason: unknown) {
+      setCaptureNotice(reason instanceof Error ? reason.message : "正式法源快照未登记");
+    } finally {
+      setCaptureBusy(null);
+    }
+  }
+
   return (
     <section className={styles.legalArea} aria-label="法律规则">
       <header className={styles.calculationHeading}>
@@ -162,7 +194,9 @@ export function LegalWorkbench() {
                   <a href={source.officialUrl} rel="noreferrer" target="_blank">打开官方原文</a>
                 </div>
                 <div className={styles.legalSourceState}>
-                  <span className={source.verificationStatus === "VERIFIED" ? styles.verified : styles.pending}>{source.verificationStatus === "VERIFIED" ? "已核验" : "待正式捕获"}</span>
+                  <span className={source.verificationStatus === "VERIFIED" && source.licenseBasis && source.licenseReviewHash ? styles.verified : styles.pending}>
+                    {source.verificationStatus !== "VERIFIED" ? "待正式捕获" : source.licenseBasis && source.licenseReviewHash ? "来源与许可已核验" : "许可依据待补核"}
+                  </span>
                   <small>{source.contentSha256 ? shortHash(source.contentSha256) : "无内容哈希"}</small>
                   {captureReview?.status === "persistent" && source.verificationStatus !== "VERIFIED" && (
                     <button
@@ -230,6 +264,9 @@ export function LegalWorkbench() {
               <div className={styles.legalCaptureRuns}>
                 {captureReview.runs.map((run) => {
                   const recordedReview = captureReview.reviews.find((item) => item.runId === run.runId);
+                  const registeredSource = review.sources.find(
+                    (source) => source.captureRunId === run.runId,
+                  ) ?? null;
                   return (
                     <article key={run.runId} className={styles.legalCaptureRun}>
                       <div className={styles.legalCaptureRunHeading}>
@@ -255,11 +292,28 @@ export function LegalWorkbench() {
                         <p className={styles.legalCaptureFailure}>{run.failureCode ? `${run.failureCode}：` : ""}{run.staleReason}</p>
                       )}
                       {recordedReview ? (
-                        <div className={`${styles.legalCapturedReview} ${recordedReview.decision === "REJECT" ? styles.legalCapturedReviewRejected : ""}`}>
-                          <strong>{recordedReview.decision === "REJECT" ? "律师已驳回" : "律师已批准进入登记步骤"}</strong>
-                          <span>{recordedReview.provisionLocator}</span>
-                          <code>{shortHash(recordedReview.reviewHash)}</code>
-                        </div>
+                        <>
+                          <div className={`${styles.legalCapturedReview} ${recordedReview.decision === "REJECT" ? styles.legalCapturedReviewRejected : ""}`}>
+                            <strong>{recordedReview.decision === "REJECT" ? "律师已驳回" : registeredSource ? "已登记为正式法源快照" : "律师已批准进入登记步骤"}</strong>
+                            <span>{recordedReview.provisionLocator}</span>
+                            <code>{registeredSource?.contentSha256 ? `正式内容 ${shortHash(registeredSource.contentSha256)}` : `复核 ${shortHash(recordedReview.reviewHash)}`}</code>
+                          </div>
+                          {recordedReview.decision === "APPROVE_FOR_REGISTRATION" && !registeredSource && captureReview.status === "persistent" && (
+                            <div className={styles.legalRegistrationActions}>
+                              <label htmlFor={`license-${run.runId}`}>公开访问与案内使用依据</label>
+                              <textarea
+                                id={`license-${run.runId}`}
+                                onChange={(event) => setLicenseBases((prior) => ({ ...prior, [run.runId]: event.target.value }))}
+                                placeholder="记录官方网站公开访问、加密保存范围、律所内部研究/诉讼引用用途及禁止再分发等核验结论"
+                                value={licenseBases[run.runId] ?? ""}
+                              />
+                              <button disabled={captureBusy !== null} onClick={() => registerCapture(run, recordedReview.reviewHash)} type="button">
+                                {captureBusy === `register:${run.runId}` ? "正在核验并登记…" : "登记为正式法源快照"}
+                              </button>
+                              <small>系统会重新解密并核对原字节哈希；登记后仍不会自动建立规则、选取 LPR 或启动计算。</small>
+                            </div>
+                          )}
+                        </>
                       ) : run.status === "REVIEW_REQUIRED" && captureReview.status === "persistent" ? (
                         <div className={styles.legalReviewActions}>
                           <label htmlFor={`locator-${run.runId}`}>官方原文定位</label>

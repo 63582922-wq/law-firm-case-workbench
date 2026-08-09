@@ -248,6 +248,12 @@
 .legalReviewActions button:last-child { color: var(--sheet); background: var(--ink); }
 .legalReviewActions button:disabled { opacity: .5; cursor: wait; }
 .legalReviewActions small { color: var(--ink-faint); font-size: 9px; line-height: 1.55; }
+.legalRegistrationActions { padding: 11px; display: grid; gap: 8px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.legalRegistrationActions label { color: var(--ink); font-size: 10px; font-weight: 650; }
+.legalRegistrationActions textarea { min-height: 72px; width: 100%; padding: 8px 9px; resize: vertical; border: 1px solid var(--line-strong); border-radius: 0; color: var(--ink); background: var(--sheet); font: inherit; font-size: 10px; line-height: 1.55; }
+.legalRegistrationActions button { padding: 9px 10px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: inherit; font-size: 9px; cursor: pointer; }
+.legalRegistrationActions button:disabled { opacity: .5; cursor: wait; }
+.legalRegistrationActions small { color: var(--ink-faint); font-size: 9px; line-height: 1.55; }
 .legalCaptureNotice { margin: 0 16px 16px; padding: 10px 12px; border: 1px solid var(--line-strong); color: var(--ink-soft); background: var(--sheet-muted); font-size: 10px; line-height: 1.6; }
 
 .submissionArea { min-width: 0; padding: 29px 28px 52px; }

@@ -18,6 +18,7 @@ from .case_ledger_postgres import PostgresCaseLedgerStore
 from .evidence_manifest_postgres import PostgresEvidenceManifestStore
 from .formal_calculation_postgres import PostgresFormalCalculationStore
 from .legal_source_postgres import PostgresLegalSourceStore
+from .managed_artifact_store import LocalEncryptedArtifactStore
 from .official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from .postgres_store import PostgresMatterStore
 from .submission_postgres import PostgresSubmissionStore
@@ -86,6 +87,7 @@ class RuntimeServices:
     legal_source_store: PostgresLegalSourceStore | None
     official_source_capture_store: PostgresOfficialSourceCaptureStore | None
     submission_store: PostgresSubmissionStore | None
+    artifact_store: LocalEncryptedArtifactStore | None
     persistence_label: str
 
 
@@ -94,8 +96,16 @@ def load_runtime_settings() -> RuntimeSettings:
     return RuntimeSettings.from_environment(os.environ)
 
 
-def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
+def build_runtime_services(
+    settings: RuntimeSettings,
+    *,
+    artifact_store: LocalEncryptedArtifactStore | None = None,
+) -> RuntimeServices:
     if settings.mode is RuntimeMode.SYNTHETIC_ALPHA:
+        if artifact_store is not None:
+            raise RuntimeConfigurationBlocked(
+                "synthetic-alpha cannot receive the persistent encrypted artifact store"
+            )
         return RuntimeServices(
             settings=settings,
             matter_store=InMemoryMatterStore(),
@@ -105,19 +115,32 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
             legal_source_store=None,
             official_source_capture_store=None,
             submission_store=None,
+            artifact_store=None,
             persistence_label="in-memory-synthetic-only",
         )
     dsn = settings.postgres_dsn
     if dsn is None:
         raise RuntimeConfigurationBlocked("persistent runtime settings lost their PostgreSQL DSN")
+    artifact_reader = (
+        (lambda object_key, expected_hash: artifact_store.read_bytes(
+            object_key, expected_sha256=expected_hash
+        ))
+        if artifact_store is not None
+        else None
+    )
     return RuntimeServices(
         settings=settings,
         matter_store=PostgresMatterStore(dsn),
         case_ledger_store=PostgresCaseLedgerStore(dsn),
         evidence_manifest_store=PostgresEvidenceManifestStore(dsn),
         formal_calculation_store=PostgresFormalCalculationStore(dsn),
-        legal_source_store=PostgresLegalSourceStore(dsn),
-        official_source_capture_store=PostgresOfficialSourceCaptureStore(dsn),
-        submission_store=PostgresSubmissionStore(dsn),
+        legal_source_store=PostgresLegalSourceStore(
+            dsn, official_source_reader=artifact_reader
+        ),
+        official_source_capture_store=PostgresOfficialSourceCaptureStore(
+            dsn, artifact_reader=artifact_reader
+        ),
+        submission_store=PostgresSubmissionStore(dsn, artifact_reader=artifact_reader),
+        artifact_store=artifact_store,
         persistence_label="postgres-internal-preview",
     )

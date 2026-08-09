@@ -124,6 +124,8 @@ class PostgresLegalSourceStore:
         content_media_type: str,
         storage_object_key: str,
         verification_hash: str,
+        license_basis: str,
+        license_review_hash: str,
         supersedes_snapshot_id: str | None = None,
     ) -> CaseLedgerCommandReceipt:
         self._validate_command(matter_id, actor, expected_version, idempotency_key, self._SOURCE_REVIEW_ROLES)
@@ -132,11 +134,13 @@ class PostgresLegalSourceStore:
             (publisher, "publisher"),
             (provision_locator, "provision_locator"),
             (content_media_type, "content_media_type"),
+            (license_basis, "license_basis"),
         ):
             _require_text(value, name)
         _validate_official_url(official_url)
         _validate_sha256("content_sha256", content_sha256)
         _validate_sha256("verification_hash", verification_hash)
+        _validate_sha256("license_review_hash", license_review_hash)
         object_match = _OBJECT_KEY.fullmatch(storage_object_key)
         if object_match is None or object_match.group(1) != content_sha256:
             raise CaseLedgerPersistenceBlocked(
@@ -175,6 +179,8 @@ class PostgresLegalSourceStore:
             "content_media_type": content_media_type.strip(),
             "storage_object_key": storage_object_key,
             "verification_hash": verification_hash,
+            "license_basis": license_basis.strip(),
+            "license_review_hash": license_review_hash,
             "supersedes_snapshot_id": supersedes_snapshot_id,
         }
         payload_hash = _payload_hash(payload)
@@ -247,9 +253,10 @@ class PostgresLegalSourceStore:
                     snapshot_id, firm_id, source_id, publisher, authority_level,
                     official_url, provision_locator, retrieved_at, content_sha256,
                     content_media_type, storage_object_key, verification_status,
-                    license_status, verified_by, verification_hash, supersedes_snapshot_id
+                    license_status, license_basis, license_review_hash,
+                    verified_by, verification_hash, supersedes_snapshot_id
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          'VERIFIED', 'ACTIVE', %s, %s, %s)
+                          'VERIFIED', 'ACTIVE', %s, %s, %s, %s, %s)
                 """,
                 (
                     snapshot_id,
@@ -263,6 +270,8 @@ class PostgresLegalSourceStore:
                     content_sha256,
                     content_media_type.strip(),
                     storage_object_key,
+                    license_basis.strip(),
+                    license_review_hash,
                     actor.actor_id,
                     verification_hash,
                     supersedes_snapshot_id,
@@ -285,6 +294,195 @@ class PostgresLegalSourceStore:
                     "official_url": official_url,
                     "content_sha256": content_sha256,
                     "verification_hash": verification_hash,
+                    "license_review_hash": license_review_hash,
+                },
+                stale_submission=True,
+            )
+
+    def register_reviewed_capture_snapshot(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        license_basis: str,
+        license_review_hash: str,
+        registration_hash: str,
+    ) -> CaseLedgerCommandReceipt:
+        """Register a separately approved capture without exposing its object key to the client."""
+
+        self._validate_command(
+            matter_id,
+            actor,
+            expected_version,
+            idempotency_key,
+            self._SOURCE_REVIEW_ROLES,
+        )
+        _validate_uuid("run_id", run_id)
+        _require_text(license_basis, "license_basis")
+        _validate_sha256("license_review_hash", license_review_hash)
+        _validate_sha256("registration_hash", registration_hash)
+        if self._official_source_reader is None:
+            raise CaseLedgerPersistenceBlocked(
+                "reviewed capture registration requires a configured encrypted-object verifier"
+            )
+        command_name = "REGISTER_REVIEWED_OFFICIAL_SOURCE_CAPTURE"
+        payload = {
+            "matter_id": matter_id,
+            "expected_version": expected_version,
+            "run_id": run_id,
+            "license_basis": license_basis.strip(),
+            "license_review_hash": license_review_hash,
+            "registration_hash": registration_hash,
+        }
+        payload_hash = _payload_hash(payload)
+        snapshot_id = str(uuid4())
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin(
+                connection,
+                matter_id=matter_id,
+                actor=actor,
+                expected_version=expected_version,
+                idempotency_key=idempotency_key,
+                command_name=command_name,
+                payload_hash=payload_hash,
+                allowed_roles=self._SOURCE_REVIEW_ROLES,
+            )
+            if prior is not None:
+                return prior
+            capture = connection.execute(
+                """
+                SELECT capture.run_id, capture.source_id, capture.publisher,
+                       capture.source_tier, capture.final_url, capture.retrieved_at,
+                       capture.content_media_type, capture.content_sha256,
+                       capture.storage_object_key, capture.capture_verification_hash,
+                       capture.parsed_output_hash, review.review_id,
+                       review.decision, review.provision_locator, review.review_hash
+                FROM official_source_capture_runs capture
+                JOIN official_source_capture_reviews review
+                  ON review.run_id = capture.run_id
+                 AND review.firm_id = capture.firm_id
+                 AND review.matter_id = capture.matter_id
+                WHERE capture.run_id = %s AND capture.matter_id = %s
+                  AND capture.firm_id = %s AND capture.status = 'REVIEW_REQUIRED'
+                FOR UPDATE OF capture
+                """,
+                (run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if capture is None:
+                raise CaseLedgerPersistenceBlocked(
+                    "official source capture is not ready for formal registration"
+                )
+            if capture["decision"] != "APPROVE_FOR_REGISTRATION":
+                raise CaseLedgerPersistenceBlocked(
+                    "official source capture was not approved for formal registration"
+                )
+            already_registered = connection.execute(
+                """
+                SELECT snapshot_id
+                FROM official_legal_source_snapshots
+                WHERE capture_run_id = %s AND firm_id = %s
+                """,
+                (run_id, actor.firm_id),
+            ).fetchone()
+            if already_registered is not None:
+                raise CaseLedgerPersistenceBlocked(
+                    "official source capture already has a formal snapshot"
+                )
+            try:
+                authority_level = LegalAuthorityLevel(capture["source_tier"])
+            except ValueError as error:
+                raise CaseLedgerPersistenceBlocked(
+                    "official source capture tier cannot become a formal legal source"
+                ) from error
+            _validate_official_url(capture["final_url"])
+            _validate_sha256("content_sha256", capture["content_sha256"])
+            _validate_sha256("capture_verification_hash", capture["capture_verification_hash"])
+            _validate_sha256("parsed_output_hash", capture["parsed_output_hash"])
+            object_match = _OBJECT_KEY.fullmatch(capture["storage_object_key"] or "")
+            if object_match is None or object_match.group(1) != capture["content_sha256"]:
+                raise CaseLedgerPersistenceBlocked(
+                    "reviewed capture lost its encrypted content-addressed object binding"
+                )
+            try:
+                source_bytes = self._official_source_reader(
+                    capture["storage_object_key"], capture["content_sha256"]
+                )
+            except Exception as error:
+                raise CaseLedgerPersistenceBlocked(
+                    "reviewed capture encrypted object could not be authenticated"
+                ) from error
+            if not source_bytes or sha256(source_bytes).hexdigest() != capture["content_sha256"]:
+                raise CaseLedgerPersistenceBlocked(
+                    "reviewed capture encrypted object does not match its plaintext hash"
+                )
+            verification_hash = _payload_hash(
+                {
+                    "schema_version": "reviewed-official-source-registration-v1",
+                    "matter_id": matter_id,
+                    "run_id": run_id,
+                    "review_id": str(capture["review_id"]),
+                    "source_id": capture["source_id"],
+                    "content_sha256": capture["content_sha256"],
+                    "capture_verification_hash": capture["capture_verification_hash"],
+                    "parsed_output_hash": capture["parsed_output_hash"],
+                    "review_hash": capture["review_hash"],
+                    "license_review_hash": license_review_hash,
+                    "registration_hash": registration_hash,
+                }
+            )
+            connection.execute(
+                """
+                INSERT INTO official_legal_source_snapshots (
+                    snapshot_id, firm_id, source_id, publisher, authority_level,
+                    official_url, provision_locator, retrieved_at, content_sha256,
+                    content_media_type, storage_object_key, verification_status,
+                    license_status, license_basis, license_review_hash,
+                    verified_by, verification_hash, supersedes_snapshot_id,
+                    capture_run_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          'VERIFIED', 'ACTIVE', %s, %s, %s, %s, NULL, %s)
+                """,
+                (
+                    snapshot_id,
+                    actor.firm_id,
+                    capture["source_id"],
+                    capture["publisher"],
+                    authority_level.value,
+                    capture["final_url"],
+                    capture["provision_locator"],
+                    capture["retrieved_at"],
+                    capture["content_sha256"],
+                    capture["content_media_type"],
+                    capture["storage_object_key"],
+                    license_basis.strip(),
+                    license_review_hash,
+                    actor.actor_id,
+                    verification_hash,
+                    run_id,
+                ),
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="REVIEWED_OFFICIAL_SOURCE_CAPTURE_REGISTERED",
+                object_type="OFFICIAL_LEGAL_SOURCE_SNAPSHOT",
+                object_id=snapshot_id,
+                audit_payload={
+                    "snapshot_id": snapshot_id,
+                    "capture_run_id": run_id,
+                    "review_id": str(capture["review_id"]),
+                    "source_id": capture["source_id"],
+                    "content_sha256": capture["content_sha256"],
+                    "verification_hash": verification_hash,
+                    "license_review_hash": license_review_hash,
                 },
                 stale_submission=True,
             )
@@ -383,7 +581,8 @@ class PostgresLegalSourceStore:
                 return prior
             source = connection.execute(
                 """
-                SELECT content_sha256, verification_status, license_status, authority_level
+                SELECT content_sha256, verification_status, license_status, authority_level,
+                       license_basis, license_review_hash
                 FROM official_legal_source_snapshots
                 WHERE snapshot_id = %s AND firm_id = %s FOR SHARE
                 """,
@@ -391,8 +590,15 @@ class PostgresLegalSourceStore:
             ).fetchone()
             if source is None:
                 raise KeyError(source_snapshot_id)
-            if source["verification_status"] != "VERIFIED" or source["license_status"] != "ACTIVE":
-                raise CaseLedgerPersistenceBlocked("legal rule requires a verified active official source snapshot")
+            if (
+                source["verification_status"] != "VERIFIED"
+                or source["license_status"] != "ACTIVE"
+                or not source["license_basis"]
+                or not source["license_review_hash"]
+            ):
+                raise CaseLedgerPersistenceBlocked(
+                    "legal rule requires a verified official source with explicit license review"
+                )
             if formula_kind is LegalRateFormulaKind.LPR_MULTIPLE and source["authority_level"] not in {
                 LegalAuthorityLevel.PRIMARY_LAW.value,
                 LegalAuthorityLevel.JUDICIAL_INTERPRETATION.value,
@@ -404,7 +610,8 @@ class PostgresLegalSourceStore:
             if parameter_source_snapshot_id is not None:
                 parameter_source = connection.execute(
                     """
-                    SELECT content_sha256, verification_status, license_status, authority_level
+                    SELECT content_sha256, verification_status, license_status, authority_level,
+                           license_basis, license_review_hash
                     FROM official_legal_source_snapshots
                     WHERE snapshot_id = %s AND firm_id = %s FOR SHARE
                     """,
@@ -415,6 +622,8 @@ class PostgresLegalSourceStore:
                 if (
                     parameter_source["verification_status"] != "VERIFIED"
                     or parameter_source["license_status"] != "ACTIVE"
+                    or not parameter_source["license_basis"]
+                    or not parameter_source["license_review_hash"]
                     or parameter_source["authority_level"]
                     != LegalAuthorityLevel.OFFICIAL_RATE_DATA.value
                 ):
@@ -737,7 +946,8 @@ class PostgresLegalSourceStore:
                        rule.required_fact_keys, rule.formula_kind,
                        rule.source_snapshot_id, rule.approval_hash AS rule_approval_hash,
                        rule.parameter_source_snapshot_id, rule.parameter_evidence_locator,
-                       source.content_sha256, source.verification_status, source.license_status
+                       source.content_sha256, source.verification_status, source.license_status,
+                       source.license_basis, source.license_review_hash
                 FROM legal_rule_versions rule
                 JOIN official_legal_source_snapshots source
                   ON source.snapshot_id = rule.source_snapshot_id AND source.firm_id = rule.firm_id
@@ -759,7 +969,8 @@ class PostgresLegalSourceStore:
                 parameter_rows = connection.execute(
                     """
                     SELECT snapshot_id, content_sha256, verification_status,
-                           license_status, authority_level
+                           license_status, authority_level, license_basis,
+                           license_review_hash
                     FROM official_legal_source_snapshots
                     WHERE snapshot_id = ANY(%s) AND firm_id = %s
                     FOR SHARE
@@ -789,6 +1000,12 @@ class PostgresLegalSourceStore:
                 )
                 rule["parameter_authority_level"] = (
                     parameter["authority_level"] if parameter else None
+                )
+                rule["parameter_license_basis"] = (
+                    parameter["license_basis"] if parameter else None
+                )
+                rule["parameter_license_review_hash"] = (
+                    parameter["license_review_hash"] if parameter else None
                 )
             required_fact_keys = {
                 fact_key
@@ -844,11 +1061,20 @@ class PostgresLegalSourceStore:
                 event = events[segment.trigger_event_id]
                 if rule["rule_status"] != "APPROVED":
                     raise CaseLedgerPersistenceBlocked("selected legal rule version is not current")
-                if rule["verification_status"] != "VERIFIED" or rule["license_status"] != "ACTIVE":
-                    raise CaseLedgerPersistenceBlocked("selected legal rule source is not verified and active")
+                if (
+                    rule["verification_status"] != "VERIFIED"
+                    or rule["license_status"] != "ACTIVE"
+                    or not rule["license_basis"]
+                    or not rule["license_review_hash"]
+                ):
+                    raise CaseLedgerPersistenceBlocked(
+                        "selected legal rule source lacks explicit license review"
+                    )
                 if rule["formula_kind"] == LegalRateFormulaKind.LPR_MULTIPLE.value and (
                     rule["parameter_verification_status"] != "VERIFIED"
                     or rule["parameter_license_status"] != "ACTIVE"
+                    or not rule["parameter_license_basis"]
+                    or not rule["parameter_license_review_hash"]
                     or rule["parameter_authority_level"]
                     != LegalAuthorityLevel.OFFICIAL_RATE_DATA.value
                 ):
@@ -1058,7 +1284,8 @@ class PostgresLegalSourceStore:
                 SELECT snapshot_id, source_id, publisher, authority_level,
                        official_url, provision_locator, retrieved_at, content_sha256,
                        content_media_type, verification_status, license_status,
-                       verified_by, verification_hash, supersedes_snapshot_id
+                       license_basis, license_review_hash, verified_by,
+                       verification_hash, supersedes_snapshot_id, capture_run_id
                 FROM official_legal_source_snapshots
                 WHERE firm_id = %s
                 ORDER BY source_id, retrieved_at DESC

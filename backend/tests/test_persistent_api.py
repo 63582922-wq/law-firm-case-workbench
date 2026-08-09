@@ -271,6 +271,18 @@ class FakePersistentLegalSourceStore:
             object_id=str(uuid4()),
         )
 
+    def register_reviewed_capture_snapshot(self, **kwargs):
+        self.calls.append(("register_reviewed_capture_snapshot", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="REGISTER_REVIEWED_OFFICIAL_SOURCE_CAPTURE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="OFFICIAL_LEGAL_SOURCE_SNAPSHOT",
+            object_id=str(uuid4()),
+        )
+
     def approve_legal_fact_binding(self, **kwargs):
         self.calls.append(("approve_legal_fact_binding", kwargs))
         return CaseLedgerCommandReceipt(
@@ -963,6 +975,57 @@ class PersistentApiTests(unittest.TestCase):
         review_call = next(call for name, call in capture_store.calls if name == "review_capture")
         self.assertEqual(review_call["run_id"], capture_store.run_id)
         self.assertEqual(review_call["actor"], self.identity.actor)
+
+    def test_reviewed_capture_registration_requires_legal_store_and_maps_license_review(self) -> None:
+        run_id = str(uuid4())
+        without_legal_store = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        missing = without_legal_store.post(
+            f"/v1/matters/{self.matter_id}/official-source-captures/{run_id}/register",
+            headers={"Idempotency-Key": "reviewed-capture-register-missing"},
+            json={
+                "expected_version": 10,
+                "license_basis": "官方公开页面，仅限本案内部法律研究与引用核验。",
+                "license_review_hash": "a" * 64,
+                "registration_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(missing.status_code, 503)
+
+        legal_store = FakePersistentLegalSourceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    legal_source_store=legal_store,
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/official-source-captures/{run_id}/register",
+            headers={"Idempotency-Key": "reviewed-capture-register-001"},
+            json={
+                "expected_version": 10,
+                "license_basis": "官方公开页面，仅限本案内部法律研究与引用核验。",
+                "license_review_hash": "a" * 64,
+                "registration_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        name, call = legal_store.calls[0]
+        self.assertEqual(name, "register_reviewed_capture_snapshot")
+        self.assertEqual(call["run_id"], run_id)
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["license_review_hash"], "a" * 64)
 
     def test_submission_routes_fail_closed_when_submission_store_is_not_configured(self) -> None:
         client = TestClient(

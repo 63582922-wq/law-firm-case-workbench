@@ -38,6 +38,7 @@ class FakeLegalConnection:
         include_required_binding: bool = True,
         rate_authority: str = "OFFICIAL_RATE_DATA",
         impacted_matter_id: str | None = None,
+        license_reviewed: bool = True,
     ) -> None:
         self.source_snapshot_id = str(uuid4())
         self.rate_source_snapshot_id = str(uuid4())
@@ -48,6 +49,7 @@ class FakeLegalConnection:
         self.include_required_binding = include_required_binding
         self.rate_authority = rate_authority
         self.impacted_matter_id = impacted_matter_id
+        self.license_reviewed = license_reviewed
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -69,6 +71,12 @@ class FakeLegalConnection:
                     "source_id": "PRIVATE-LENDING-CURRENT",
                     "verification_status": "VERIFIED",
                     "license_status": "ACTIVE",
+                    "license_basis": (
+                        "official public access for internal legal review"
+                        if self.license_reviewed
+                        else None
+                    ),
+                    "license_review_hash": "e" * 64 if self.license_reviewed else None,
                 }
             )
         if "FROM case_legal_bundle_segments segment" in normalized:
@@ -87,6 +95,8 @@ class FakeLegalConnection:
                         "content_sha256": "f" * 64,
                         "verification_status": "VERIFIED",
                         "license_status": "ACTIVE",
+                        "license_basis": "official public access for internal legal review",
+                        "license_review_hash": "e" * 64,
                         "authority_level": self.rate_authority,
                     }
                 ]
@@ -104,6 +114,12 @@ class FakeLegalConnection:
                     "content_sha256": "a" * 64,
                     "verification_status": "VERIFIED",
                     "license_status": "ACTIVE",
+                    "license_basis": (
+                        "official public access for internal legal review"
+                        if self.license_reviewed
+                        else None
+                    ),
+                    "license_review_hash": "e" * 64 if self.license_reviewed else None,
                     "authority_level": authority_level,
                 }
             )
@@ -122,6 +138,8 @@ class FakeLegalConnection:
                         "content_media_type": "text/html",
                         "verification_status": "VERIFIED",
                         "license_status": "ACTIVE",
+                        "license_basis": "official public access for internal legal review",
+                        "license_review_hash": "e" * 64,
                         "verified_by": self.fact_id,
                         "verification_hash": "b" * 64,
                         "supersedes_snapshot_id": None,
@@ -149,10 +167,14 @@ class FakeLegalConnection:
                         "parameter_content_sha256": "f" * 64,
                         "parameter_verification_status": "VERIFIED",
                         "parameter_license_status": "ACTIVE",
+                        "parameter_license_basis": "official public access for internal legal review",
+                        "parameter_license_review_hash": "e" * 64,
                         "parameter_authority_level": "OFFICIAL_RATE_DATA",
                         "content_sha256": "a" * 64,
                         "verification_status": "VERIFIED",
                         "license_status": "ACTIVE",
+                        "license_basis": "official public access for internal legal review",
+                        "license_review_hash": "e" * 64,
                     }
                 ]
             )
@@ -217,6 +239,46 @@ class FakeConnectionContext:
         return False
 
 
+class ReviewedCaptureConnection(FakeLegalConnection):
+    def __init__(self, *, plaintext: bytes, decision: str = "APPROVE_FOR_REGISTRATION") -> None:
+        super().__init__()
+        self.plaintext = plaintext
+        self.content_hash = sha256(plaintext).hexdigest()
+        self.capture_run_id = str(uuid4())
+        self.capture_review_id = str(uuid4())
+        self.decision = decision
+
+    def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
+        normalized = " ".join(sql.split())
+        if "FROM official_source_capture_runs capture" in normalized:
+            self.executed.append((normalized, params))
+            return FakeResult(
+                row={
+                    "run_id": self.capture_run_id,
+                    "source_id": "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+                    "publisher": "最高人民法院",
+                    "source_tier": "JUDICIAL_INTERPRETATION",
+                    "final_url": "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+                    "retrieved_at": datetime.now(timezone.utc),
+                    "content_media_type": "text/html",
+                    "content_sha256": self.content_hash,
+                    "storage_object_key": (
+                        f"{self.content_hash[:2]}/{self.content_hash[2:4]}/{self.content_hash}.lca"
+                    ),
+                    "capture_verification_hash": "c" * 64,
+                    "parsed_output_hash": "d" * 64,
+                    "review_id": self.capture_review_id,
+                    "decision": self.decision,
+                    "provision_locator": "第二十五条、第三十一条",
+                    "review_hash": "e" * 64,
+                }
+            )
+        if "WHERE capture_run_id = %s" in normalized:
+            self.executed.append((normalized, params))
+            return FakeResult(row=None)
+        return super().execute(sql, params)
+
+
 class LegalSourceStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.firm_id = str(uuid4())
@@ -246,6 +308,8 @@ class LegalSourceStoreTests(unittest.TestCase):
             content_media_type="text/html",
             storage_object_key=f"aa/aa/{'a' * 64}.lca",
             verification_hash="b" * 64,
+            license_basis="official public access for internal legal review",
+            license_review_hash="e" * 64,
         )
         with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "registered official"):
             self.store.register_official_source_snapshot(
@@ -292,6 +356,8 @@ class LegalSourceStoreTests(unittest.TestCase):
                 content_media_type="text/html",
                 storage_object_key=f"{content_hash[:2]}/{content_hash[2:4]}/{content_hash}.lca",
                 verification_hash="b" * 64,
+                license_basis="official public access for internal legal review",
+                license_review_hash="e" * 64,
             ),
         )
         self.assertEqual(receipt.matter_version, 2)
@@ -325,11 +391,74 @@ class LegalSourceStoreTests(unittest.TestCase):
                     content_media_type="text/html",
                     storage_object_key=f"{content_hash[:2]}/{content_hash[2:4]}/{content_hash}.lca",
                     verification_hash="b" * 64,
+                    license_basis="official public access for internal legal review",
+                    license_review_hash="e" * 64,
                     supersedes_snapshot_id=connection.source_snapshot_id,
                 ),
             )
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertNotIn("SET verification_status = 'SUPERSEDED'", sql)
+
+    def test_reviewed_capture_registration_derives_formal_fields_and_reauthenticates_object(self) -> None:
+        plaintext = b"synthetic captured official source bytes"
+        connection = ReviewedCaptureConnection(plaintext=plaintext)
+        store = PostgresLegalSourceStore(
+            "postgresql://not-used.invalid/lawcase_test",
+            official_source_reader=lambda key, expected: (
+                plaintext
+                if key == f"{connection.content_hash[:2]}/{connection.content_hash[2:4]}/{connection.content_hash}.lca"
+                and expected == connection.content_hash
+                else b""
+            ),
+        )
+        receipt = self.run_with(
+            connection,
+            lambda: store.register_reviewed_capture_snapshot(
+                matter_id=self.matter_id,
+                run_id=connection.capture_run_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="reviewed-capture-register-001",
+                license_basis="官方公开页面，仅限本案内部法律研究与引用核验。",
+                license_review_hash="f" * 64,
+                registration_hash="9" * 64,
+            ),
+        )
+        self.assertEqual(receipt.matter_version, 2)
+        insert = next(
+            (params for sql, params in connection.executed if "INSERT INTO official_legal_source_snapshots" in sql),
+            None,
+        )
+        self.assertIsNotNone(insert)
+        self.assertEqual(insert[-1], connection.capture_run_id)
+        self.assertIn("官方公开页面", insert[-5])
+        audit_text = str(connection.executed)
+        self.assertIn("REVIEWED_OFFICIAL_SOURCE_CAPTURE_REGISTERED", audit_text)
+
+    def test_rejected_capture_cannot_become_a_formal_source_snapshot(self) -> None:
+        plaintext = b"synthetic rejected official source bytes"
+        connection = ReviewedCaptureConnection(plaintext=plaintext, decision="REJECT")
+        store = PostgresLegalSourceStore(
+            "postgresql://not-used.invalid/lawcase_test",
+            official_source_reader=lambda _key, _expected: plaintext,
+        )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "not approved"):
+            self.run_with(
+                connection,
+                lambda: store.register_reviewed_capture_snapshot(
+                    matter_id=self.matter_id,
+                    run_id=connection.capture_run_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="reviewed-capture-register-rejected",
+                    license_basis="官方公开页面，仅限本案内部法律研究与引用核验。",
+                    license_review_hash="f" * 64,
+                    registration_hash="9" * 64,
+                ),
+            )
+        self.assertFalse(
+            any("INSERT INTO official_legal_source_snapshots" in sql for sql, _ in connection.executed)
+        )
 
     def test_approved_lpr_rule_derives_rate_from_verified_source_and_stales_dependents(self) -> None:
         connection = FakeLegalConnection()
@@ -365,6 +494,39 @@ class LegalSourceStoreTests(unittest.TestCase):
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("UPDATE calculation_runs", sql)
         self.assertIn("UPDATE case_legal_bundles", sql)
+
+    def test_legacy_source_without_license_review_cannot_support_a_new_rule(self) -> None:
+        connection = FakeLegalConnection(license_reviewed=False)
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "explicit license review"):
+            self.run_with(
+                connection,
+                lambda: self.store.approve_rule_version(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="legal-rule-unlicensed-source",
+                    rule_id="private-lending-cap",
+                    rule_version="PRIVATE-LENDING-LPR-2020-08",
+                    issue_key="interest_cap_after_2020_08_20",
+                    source_snapshot_id=connection.source_snapshot_id,
+                    parameter_source_snapshot_id=connection.rate_source_snapshot_id,
+                    parameter_evidence_locator="2021-01-15 前最近一期一年期 LPR 3.85%",
+                    effective_from=date(2020, 8, 20),
+                    effective_to=None,
+                    trigger_event_kind=LegalEventKind.CLAIM_FILED,
+                    formula_kind=LegalRateFormulaKind.LPR_MULTIPLE,
+                    base_annual_rate=Decimal("0.0385"),
+                    rate_multiplier=Decimal("4"),
+                    required_fact_keys=("contract_before_2020_08_20",),
+                    transition_rule_versions=("PRIVATE-LENDING-2015",),
+                    conflict_set="private-lending-interest-cap",
+                    priority=100,
+                    approval_hash="c" * 64,
+                ),
+            )
+        self.assertFalse(
+            any("INSERT INTO legal_rule_versions" in sql for sql, _ in connection.executed)
+        )
 
     def test_lpr_rule_rejects_non_rate_parameter_snapshot(self) -> None:
         connection = FakeLegalConnection(rate_authority="JUDICIAL_INTERPRETATION")

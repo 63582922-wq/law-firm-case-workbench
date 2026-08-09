@@ -132,6 +132,9 @@ export type LegalReviewView = {
     provisionLocator: string;
     verificationStatus: string;
     licenseStatus: string;
+    licenseBasis: string | null;
+    licenseReviewHash: string | null;
+    captureRunId: string | null;
     contentSha256: string | null;
   }[];
   ruleVersions: {
@@ -384,6 +387,9 @@ type PersistentLegalReviewSnapshot = {
     provision_locator: string;
     verification_status: string;
     license_status: string;
+    license_basis?: string | null;
+    license_review_hash?: string | null;
+    capture_run_id?: string | null;
     content_sha256: string;
   }[];
   rule_versions: {
@@ -765,6 +771,81 @@ export async function reviewOfficialSourceCapture(
   }
   if (payload.object_type !== "OFFICIAL_SOURCE_CAPTURE_REVIEW") {
     throw new Error("法源复核回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function registerReviewedOfficialSourceCapture(
+  input: {
+    runId: string;
+    expectedVersion: number;
+    contentSha256: string;
+    parsedOutputHash: string;
+    captureReviewHash: string;
+    licenseBasis: string;
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OfficialSourceCaptureReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以登记正式法源快照。");
+  }
+  const licenseBasis = input.licenseBasis.trim();
+  if (!licenseBasis) throw new Error("请填写本次公开访问、加密保存和案内使用的许可依据。");
+  if (!input.contentSha256 || !input.parsedOutputHash) {
+    throw new Error("本次抓取缺少内容或解析哈希，不能登记正式法源。");
+  }
+  const licenseReviewHash = await sha256Text([
+    "official-source-license-review-v1",
+    config.matterId,
+    input.runId,
+    input.contentSha256,
+    licenseBasis,
+  ].join("|"));
+  const registrationHash = await sha256Text([
+    "reviewed-official-source-registration-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    input.runId,
+    input.contentSha256,
+    input.parsedOutputHash,
+    input.captureReviewHash,
+    licenseReviewHash,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await fetch(
+      `${config.apiBase}/v1/matters/${config.matterId}/official-source-captures/${input.runId}/register`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          expected_version: input.expectedVersion,
+          license_basis: licenseBasis,
+          license_review_hash: licenseReviewHash,
+          registration_hash: registrationHash,
+        }),
+      },
+    );
+  } catch {
+    throw new Error("连接在正式法源登记确认前中断。请先刷新来源快照；系统不会重复登记。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "正式法源快照未登记"));
+  }
+  if (payload.object_type !== "OFFICIAL_LEGAL_SOURCE_SNAPSHOT") {
+    throw new Error("正式法源登记回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,
@@ -1215,6 +1296,9 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
     snapshotId: null,
     verificationStatus: "NOT_CAPTURED",
     licenseStatus: "DISCOVERY_ONLY",
+    licenseBasis: null,
+    licenseReviewHash: null,
+    captureRunId: null,
     contentSha256: null,
   };
   return {
@@ -1459,6 +1543,9 @@ function mapPersistentLegalReview(
       provisionLocator: item.provision_locator,
       verificationStatus: item.verification_status,
       licenseStatus: item.license_status,
+      licenseBasis: item.license_basis ?? null,
+      licenseReviewHash: item.license_review_hash ?? null,
+      captureRunId: item.capture_run_id ?? null,
       contentSha256: item.content_sha256,
     })),
     ruleVersions: payload.rule_versions.map((item) => ({

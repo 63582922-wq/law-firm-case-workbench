@@ -116,6 +116,7 @@ from .schemas import (
     PersistentOfficialSourceCaptureRequest,
     PersistentOfficialSourceCaptureReviewRequest,
     PersistentOfficialSourceCaptureSnapshotResponse,
+    PersistentReviewedCaptureRegistrationRequest,
     PersistentSubmissionLockRequest,
     PersistentSubmissionAccessResponse,
     PersistentSubmissionQaRequest,
@@ -204,6 +205,8 @@ class PersistentFormalCalculationPort(Protocol):
 
 class PersistentLegalSourcePort(Protocol):
     def register_official_source_snapshot(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def register_reviewed_capture_snapshot(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def approve_rule_version(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -654,9 +657,38 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 content_media_type=body.content_media_type,
                 storage_object_key=body.storage_object_key,
                 verification_hash=body.verification_hash,
+                license_basis=body.license_basis,
+                license_review_hash=body.license_review_hash,
                 supersedes_snapshot_id=(
                     str(body.supersedes_snapshot_id) if body.supersedes_snapshot_id else None
                 ),
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/official-source-captures/{run_id}/register",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def register_reviewed_official_source_capture(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentReviewedCaptureRegistrationRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.register_reviewed_capture_snapshot(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                license_basis=body.license_basis,
+                license_review_hash=body.license_review_hash,
+                registration_hash=body.registration_hash,
             )
         )
 
