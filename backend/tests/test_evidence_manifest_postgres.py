@@ -268,6 +268,29 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.assertIn("UPDATE evidence_manifests", sql)
         self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
 
+    def test_new_page_decision_candidate_invalidates_prior_candidate_for_recoverable_snapshot(self) -> None:
+        page_id = str(uuid4())
+        connection = FakeEvidenceConnection()
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.create_page_decision_candidate(
+                matter_id=self.matter_id,
+                evidence_page_id=page_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-decision-candidate-replacement",
+                disposition=PageDisposition.INCLUDE,
+                reason="[合成] 与目标主体相关。",
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        invalidate_at = sql.index("UPDATE evidence_page_decisions SET status = 'INVALIDATED'")
+        insert_at = sql.index("INSERT INTO evidence_page_decisions")
+        self.assertLess(invalidate_at, insert_at)
+        self.assertIn("AND status = 'CANDIDATE'", sql)
+
     def test_manifest_lock_blocks_any_source_page_without_approved_decision(self) -> None:
         page_id = str(uuid4())
         file_id = str(uuid4())

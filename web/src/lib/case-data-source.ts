@@ -33,6 +33,12 @@ export type EvidenceReviewPage = {
   decisionId: string | null;
   disposition: "INCLUDE" | "EXCLUDE" | null;
   reason: string | null;
+  pendingDecision: {
+    decisionId: string;
+    disposition: "INCLUDE" | "EXCLUDE";
+    reason: string;
+    status: "CANDIDATE";
+  } | null;
   annotations: { annotationId: string; x0: number; y0: number; x1: number; y1: number; label: string; status: string }[];
   syntheticPreview: { date: string; amount: string; counterpart: string; confidence: string; note: string } | null;
 };
@@ -61,6 +67,12 @@ export type EvidenceDerivativeDelivery = {
 
 export type EvidenceDerivativeRunReceipt = {
   runId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
+export type EvidenceMutationReceipt = {
+  objectId: string;
   matterVersion: number;
   requestId: string | null;
 };
@@ -311,7 +323,8 @@ type PersistentEvidenceSnapshot = {
     evidence_page_id: string;
     evidence_file_id: string;
     page_number: number;
-    decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string } | null;
+    decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "APPROVED" } | null;
+    pending_decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "CANDIDATE" } | null;
     annotations: { annotation_id: string; x0: string; y0: string; x1: string; y1: string; label: string; status: string }[];
   }[];
   duplicate_groups: { duplicate_group_id: string; status: string; canonical_page_id: string | null; evidence_page_ids: string[] }[];
@@ -988,6 +1001,210 @@ export async function fetchEvidenceDerivative(
   };
 }
 
+export async function proposeEvidencePageDecision(
+  input: { review: EvidenceReviewView; pageId: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(input.review, config);
+  const reason = input.reason.trim();
+  if (!reason) throw new Error("请填写本页纳入或排除的具体理由。");
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: `evidence-pages/${input.pageId}/decisions`,
+    body: { expected_version: matterVersion, disposition: input.disposition, reason },
+    expectedObjectType: "EVIDENCE_PAGE_DECISION",
+    fallback: "页级处置候选未建立",
+    interrupted: "连接在页级处置候选确认前中断。请先刷新证据快照；系统不会盲目重复提交。",
+  });
+}
+
+export async function approveEvidencePageDecision(
+  input: { review: EvidenceReviewView; page: EvidenceReviewPage },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(input.review, config);
+  const pending = input.page.pendingDecision;
+  if (!pending) throw new Error("当前页没有可批准的处置候选。");
+  const approvalHash = await sha256Text([
+    "evidence-page-decision-approval-v1",
+    persistentConfig.matterId,
+    String(matterVersion),
+    input.review.snapshotHash,
+    input.page.pageId,
+    pending.decisionId,
+    pending.disposition,
+    pending.reason,
+  ].join("|"));
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: `evidence-page-decisions/${pending.decisionId}/approve`,
+    body: { expected_version: matterVersion, approval_hash: approvalHash },
+    expectedObjectType: "EVIDENCE_PAGE_DECISION",
+    fallback: "页级处置未获批准",
+    interrupted: "连接在页级处置批准确认前中断。请先刷新证据快照；系统不会重复提交律师决定。",
+  });
+}
+
+export async function approveEvidenceAnnotation(
+  input: { review: EvidenceReviewView; page: EvidenceReviewPage; annotationId: string },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(input.review, config);
+  const annotation = input.page.annotations.find((item) => item.annotationId === input.annotationId);
+  if (!annotation || annotation.status !== "CANDIDATE") throw new Error("当前红框不是可批准候选。");
+  const approvalHash = await sha256Text([
+    "evidence-annotation-approval-v1",
+    persistentConfig.matterId,
+    String(matterVersion),
+    input.review.snapshotHash,
+    input.page.pageId,
+    annotation.annotationId,
+    annotation.label,
+    String(annotation.x0),
+    String(annotation.y0),
+    String(annotation.x1),
+    String(annotation.y1),
+  ].join("|"));
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: `evidence-annotations/${annotation.annotationId}/approve`,
+    body: { expected_version: matterVersion, approval_hash: approvalHash },
+    expectedObjectType: "EVIDENCE_ANNOTATION",
+    fallback: "红框候选未获批准",
+    interrupted: "连接在红框批准确认前中断。请先刷新证据快照；系统不会重复提交律师决定。",
+  });
+}
+
+export async function resolveEvidenceDuplicateGroup(
+  input: { review: EvidenceReviewView; groupId: string; sameSourcePage: boolean; canonicalPageId: string | null },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(input.review, config);
+  const group = input.review.duplicateGroups.find((item) => item.groupId === input.groupId);
+  if (!group || group.status !== "CANDIDATE") throw new Error("当前重复页组不是可裁决候选。");
+  if (input.sameSourcePage && !input.canonicalPageId) throw new Error("判定为同一来源页时必须选择唯一保留页。");
+  if (input.canonicalPageId && !group.pageIds.includes(input.canonicalPageId)) throw new Error("唯一保留页不属于当前重复页组。");
+  const approvalHash = await sha256Text([
+    "evidence-duplicate-resolution-approval-v1",
+    persistentConfig.matterId,
+    String(matterVersion),
+    input.review.snapshotHash,
+    group.groupId,
+    [...group.pageIds].sort().join(","),
+    input.sameSourcePage ? "SAME_SOURCE_PAGE" : "DISTINCT_PAGES",
+    input.canonicalPageId ?? "NO_CANONICAL_PAGE",
+  ].join("|"));
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: `evidence-duplicate-groups/${group.groupId}/resolve`,
+    body: {
+      expected_version: matterVersion,
+      approval_hash: approvalHash,
+      same_source_page: input.sameSourcePage,
+      canonical_page_id: input.canonicalPageId,
+    },
+    expectedObjectType: "EVIDENCE_DUPLICATE_GROUP",
+    fallback: "重复页结论未记录",
+    interrupted: "连接在重复页裁决确认前中断。请先刷新证据快照；系统不会重复提交律师决定。",
+  });
+}
+
+export async function lockEvidenceManifest(
+  review: EvidenceReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(review, config);
+  if (review.lockedManifest) throw new Error("当前证据清单已经锁定。");
+  if (review.pages.some((page) => !page.decisionId || page.pendingDecision)) {
+    throw new Error("仍有来源页未批准或存在待批准的新处置，不能锁定证据清单。");
+  }
+  if (review.duplicateGroups.some((group) => group.status === "CANDIDATE")) {
+    throw new Error("仍有重复页候选未裁决，不能锁定证据清单。");
+  }
+  const manifestBinding = {
+    pages: review.pages.map((page) => ({
+      pageId: page.pageId,
+      decisionId: page.decisionId,
+      disposition: page.disposition,
+      annotationIds: page.annotations.filter((item) => item.status === "APPROVED").map((item) => item.annotationId).sort(),
+    })),
+    duplicateGroups: review.duplicateGroups.map((group) => ({
+      groupId: group.groupId,
+      status: group.status,
+      canonicalPageId: group.canonicalPageId,
+      pageIds: [...group.pageIds].sort(),
+    })),
+  };
+  const approvalHash = await sha256Text([
+    "evidence-manifest-lock-approval-v1",
+    persistentConfig.matterId,
+    String(matterVersion),
+    review.snapshotHash,
+    JSON.stringify(manifestBinding),
+  ].join("|"));
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: "evidence-manifests/lock",
+    body: { expected_version: matterVersion, approval_hash: approvalHash },
+    expectedObjectType: "EVIDENCE_MANIFEST",
+    fallback: "证据清单未锁定",
+    interrupted: "连接在证据清单锁定确认前中断。请先刷新证据快照；系统不会重复锁定。",
+  });
+}
+
+function requireEvidenceMutationContext(
+  review: EvidenceReviewView,
+  config: CaseDataSourceConfig,
+): {
+  matterVersion: number;
+  persistentConfig: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>;
+} {
+  if (config.kind !== "persistent-preview") throw new Error("只有持久化工作台可以记录正式证据决定。");
+  if (review.sourceKind !== "persistent-preview" || review.matterVersion === null) {
+    throw new Error("当前证据快照不是可写入的持久化版本。");
+  }
+  return { matterVersion: review.matterVersion, persistentConfig: config };
+}
+
+async function postEvidenceMutation(input: {
+  config: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>;
+  path: string;
+  body: Record<string, unknown>;
+  expectedObjectType: string;
+  fallback: string;
+  interrupted: string;
+}): Promise<EvidenceMutationReceipt> {
+  let response: Response;
+  try {
+    response = await fetch(`${input.config.apiBase}/v1/matters/${input.config.matterId}/${input.path}`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify(input.body),
+    });
+  } catch {
+    throw new Error(input.interrupted);
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, input.fallback));
+  }
+  if (payload.object_type !== input.expectedObjectType) {
+    throw new Error("证据命令回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
 export async function enqueueEvidenceDerivativeRun(
   review: EvidenceReviewView,
   config: CaseDataSourceConfig = caseDataSourceConfig,
@@ -1110,6 +1327,7 @@ function mapSyntheticEvidence(): EvidenceReviewView {
       decisionId: item.confidence === "已核验" ? `synthetic-decision-${item.page}` : null,
       disposition: item.confidence === "已核验" ? "INCLUDE" : null,
       reason: item.confidence === "已核验" ? "[合成] 与目标主体相关。" : null,
+      pendingDecision: null,
       annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[合成] 相关交易行", status: "APPROVED" }] : [],
       syntheticPreview: { date: item.date, amount: item.amount, counterpart: item.counterpart, confidence: item.confidence, note: item.note },
     })),
@@ -1137,6 +1355,12 @@ function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: s
       decisionId: item.decision?.decision_id ?? null,
       disposition: item.decision?.disposition ?? null,
       reason: item.decision?.reason ?? null,
+      pendingDecision: item.pending_decision ? {
+        decisionId: item.pending_decision.decision_id,
+        disposition: item.pending_decision.disposition,
+        reason: item.pending_decision.reason,
+        status: item.pending_decision.status,
+      } : null,
       annotations: item.annotations.map((annotation) => ({ annotationId: annotation.annotation_id, x0: Number(annotation.x0), y0: Number(annotation.y0), x1: Number(annotation.x1), y1: Number(annotation.y1), label: annotation.label, status: annotation.status })),
       syntheticPreview: null,
     })),

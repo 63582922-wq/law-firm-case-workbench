@@ -603,6 +603,56 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(call["evidence_page_id"], page_id)
         self.assertEqual(call["disposition"].value, "INCLUDE")
 
+    def test_evidence_snapshot_exposes_pending_page_decision_for_interrupted_approval_recovery(self) -> None:
+        evidence_store = FakePersistentEvidenceStore()
+        page_id = str(uuid4())
+        file_id = str(uuid4())
+        decision_id = str(uuid4())
+        evidence_store.get_evidence_snapshot = lambda *, matter_id, actor: PersistentEvidenceSnapshot(
+            matter_id=matter_id,
+            version=8,
+            snapshot_hash="e" * 64,
+            original_files=(),
+            pages=(
+                {
+                    "evidence_page_id": page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 3,
+                    "rendered_page_sha256": None,
+                    "decision": None,
+                    "pending_decision": {
+                        "decision_id": decision_id,
+                        "disposition": "EXCLUDE",
+                        "reason": "[合成] 与本案目标主体无关。",
+                        "status": "CANDIDATE",
+                        "approval_hash": None,
+                        "approved_by": None,
+                    },
+                    "annotations": (),
+                },
+            ),
+            duplicate_groups=(),
+            locked_manifest=None,
+            derivatives=(),
+            derivative_runs=(),
+        )
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    evidence_manifest_store=evidence_store,
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/evidence-snapshot")
+        self.assertEqual(response.status_code, 200, response.text)
+        pending = response.json()["pages"][0]["pending_decision"]
+        self.assertEqual(pending["decision_id"], decision_id)
+        self.assertEqual(pending["disposition"], "EXCLUDE")
+        self.assertEqual(pending["status"], "CANDIDATE")
+
     def test_verified_derivative_uses_short_lived_bearer_and_one_time_loopback_delivery(self) -> None:
         with TemporaryDirectory(prefix="persistent-artifact-api-test-") as temporary:
             root = Path(temporary)

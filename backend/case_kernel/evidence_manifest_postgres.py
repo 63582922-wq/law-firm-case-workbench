@@ -242,6 +242,15 @@ class PostgresEvidenceManifestStore:
             if prior is not None:
                 return prior
             _require_page(connection, evidence_page_id=evidence_page_id, matter_id=matter_id, firm_id=actor.firm_id)
+            connection.execute(
+                """
+                UPDATE evidence_page_decisions
+                SET status = 'INVALIDATED', approval_hash = NULL, approved_by = NULL, updated_at = now()
+                WHERE evidence_page_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status = 'CANDIDATE'
+                """,
+                (evidence_page_id, matter_id, actor.firm_id),
+            )
             decision_id = str(uuid4())
             connection.execute(
                 """
@@ -1637,13 +1646,31 @@ class PostgresEvidenceManifestStore:
                 """
                 SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
                        page.rendered_page_sha256,
-                       decision.decision_id, decision.disposition, decision.reason,
-                       decision.approval_hash, decision.approved_by
+                       approved.decision_id, approved.disposition, approved.reason,
+                       approved.status, approved.approval_hash, approved.approved_by,
+                       pending.decision_id AS pending_decision_id,
+                       pending.disposition AS pending_disposition,
+                       pending.reason AS pending_reason,
+                       pending.status AS pending_status
                 FROM evidence_pages page
-                LEFT JOIN evidence_page_decisions decision
-                  ON decision.evidence_page_id = page.evidence_page_id
-                 AND decision.firm_id = page.firm_id AND decision.matter_id = page.matter_id
-                 AND decision.status = 'APPROVED'
+                LEFT JOIN LATERAL (
+                    SELECT decision_id, disposition, reason, status, approval_hash, approved_by
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'APPROVED'
+                    ORDER BY updated_at DESC, decision_id DESC
+                    LIMIT 1
+                ) approved ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT decision_id, disposition, reason, status
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'CANDIDATE'
+                    ORDER BY updated_at DESC, decision_id DESC
+                    LIMIT 1
+                ) pending ON TRUE
                 WHERE page.matter_id = %s AND page.firm_id = %s
                 ORDER BY page.evidence_file_id ASC, page.page_number ASC
                 """,
@@ -1762,10 +1789,23 @@ class PostgresEvidenceManifestStore:
                         "decision_id": str(row["decision_id"]),
                         "disposition": row["disposition"],
                         "reason": row["reason"],
+                        "status": row["status"],
                         "approval_hash": row["approval_hash"],
-                        "approved_by": str(row["approved_by"]),
+                        "approved_by": str(row["approved_by"]) if row["approved_by"] else None,
                     }
                     if row["decision_id"]
+                    else None
+                ),
+                "pending_decision": (
+                    {
+                        "decision_id": str(row["pending_decision_id"]),
+                        "disposition": row["pending_disposition"],
+                        "reason": row["pending_reason"],
+                        "status": row["pending_status"],
+                        "approval_hash": None,
+                        "approved_by": None,
+                    }
+                    if row["pending_decision_id"]
                     else None
                 ),
                 "annotations": tuple(_annotation_payload(item) for item in annotation_map.get(str(row["evidence_page_id"]), ())),

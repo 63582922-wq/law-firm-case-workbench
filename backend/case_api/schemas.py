@@ -543,8 +543,9 @@ class PersistentEvidenceDecisionSnapshot(BaseModel):
     decision_id: UUID
     disposition: str
     reason: str
-    approval_hash: str
-    approved_by: UUID
+    status: str
+    approval_hash: str | None
+    approved_by: UUID | None
 
 
 class PersistentEvidenceAnnotationSnapshot(BaseModel):
@@ -566,6 +567,7 @@ class PersistentEvidencePageSnapshot(BaseModel):
     page_number: int
     rendered_page_sha256: str | None
     decision: PersistentEvidenceDecisionSnapshot | None
+    pending_decision: PersistentEvidenceDecisionSnapshot | None
     annotations: tuple[PersistentEvidenceAnnotationSnapshot, ...]
 
 
