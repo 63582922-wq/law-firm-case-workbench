@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
+import { caseDataSourceConfig } from "@/lib/case-data-source";
 import { stageLabels, syntheticMatter, type EvidencePage } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
@@ -35,6 +36,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
   );
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
   const currentStageIndex = view === "calculation" ? 2 : 1;
+  const syntheticSource = caseDataSourceConfig.kind === "synthetic-alpha";
 
   function recordDecision() {
     if (duplicateDecision === "pending") {
@@ -51,25 +53,25 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
         <div className={styles.brand} aria-label="律所案件 AI 工作台">
           <span className={styles.brandMark}>案</span>
           <span>律所案件 AI 工作台</span>
-          <small>内部合成 Alpha</small>
+          <small>{syntheticSource ? "内部合成 Alpha" : caseDataSourceConfig.label}</small>
         </div>
         <div className={styles.topbarMeta}>
-          <span>当前角色：主办律师（合成）</span>
+          <span>{syntheticSource ? "当前角色：主办律师（合成）" : "身份来源：服务端会话与数据库案件角色"}</span>
           <span className={styles.dot} aria-hidden="true" />
-          <span>不连接真实案件材料</span>
+          <span>{syntheticSource ? "不连接真实案件材料" : caseDataSourceConfig.kind === "persistent-disabled" ? "持久化数据源未启用" : "持久化内部预览"}</span>
         </div>
       </header>
 
       <section className={styles.caseHeader} aria-labelledby="case-title">
         <div>
-          <p className={styles.eyebrow}>案件卷宗 / {syntheticMatter.matterNo}</p>
-          <h1 id="case-title">{syntheticMatter.title}</h1>
-          <p className={styles.caseSubline}>{syntheticMatter.client} · {syntheticMatter.court} · 争议对方：{syntheticMatter.opponent}</p>
+          <p className={styles.eyebrow}>{syntheticSource ? `案件卷宗 / ${syntheticMatter.matterNo}` : "持久化案件 / 由版本化快照读取"}</p>
+          <h1 id="case-title">{syntheticSource ? syntheticMatter.title : caseDataSourceConfig.kind === "persistent-disabled" ? "持久化案件尚未启用" : "案件标题将在事实台账中核验"}</h1>
+          <p className={styles.caseSubline}>{syntheticSource ? `${syntheticMatter.client} · ${syntheticMatter.court} · 争议对方：${syntheticMatter.opponent}` : caseDataSourceConfig.kind === "persistent-disabled" ? caseDataSourceConfig.reason : "不会以合成案件内容回退或覆盖持久化案件状态"}</p>
         </div>
         <div className={styles.deadline}>
-          <span>最近期限</span>
-          <strong>{syntheticMatter.deadline}</strong>
-          <em>合成演示时间，不代表真实法律期限</em>
+          <span>{syntheticSource ? "最近期限" : "期限状态"}</span>
+          <strong>{syntheticSource ? syntheticMatter.deadline : "尚未接入持久化期限台账"}</strong>
+          <em>{syntheticSource ? "合成演示时间，不代表真实法律期限" : "系统不会沿用合成期限"}</em>
         </div>
       </section>
 
@@ -134,7 +136,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
       </div>
 
       <footer className={styles.footer}>
-        <span>内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件</span>
+        <span>{syntheticSource ? "内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件" : "持久化内部预览 · 尚未通过真实身份、实库与安全验收 · 不生成法院提交文件"}</span>
         <span>所有结论、取舍与锁定均须由具备权限的人员在后续流程确认</span>
       </footer>
     </main>
