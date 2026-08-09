@@ -183,6 +183,7 @@ export function EvidenceWorkbench() {
             <span>当前 Manifest</span>
             <strong>{review.lockedManifest ? "已锁定" : "尚未锁定"}</strong>
             <small>{review.lockedManifest ? `${review.lockedManifest.includedPages} 页纳入 / ${review.lockedManifest.excludedPages} 页排除` : `仍有 ${unresolvedCount} 页待律师处置`}</small>
+            <small>派生件：{review.derivatives.length ? review.derivatives.map((item) => `${item.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "红框版" : "相关页版"} ${item.status}`).join("；") : "尚未生成"}</small>
           </div>
           <button className={styles.disabledAction} disabled type="button">生成提交材料（正式 PDF Worker 未接入）</button>
         </aside>

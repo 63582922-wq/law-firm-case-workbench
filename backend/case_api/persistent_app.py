@@ -55,6 +55,8 @@ from .schemas import (
     PersistentEvidenceAnnotationRequest,
     PersistentEvidenceDuplicateGroupRequest,
     PersistentEvidenceDuplicateResolutionRequest,
+    PersistentEvidenceDerivativeCandidateRequest,
+    PersistentEvidenceDerivativeVerificationRequest,
     PersistentEvidenceOriginalRequest,
     PersistentEvidencePageDecisionRequest,
     PersistentEvidenceSnapshotResponse,
@@ -114,6 +116,10 @@ class PersistentEvidenceManifestPort(Protocol):
     def resolve_duplicate_group(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def lock_manifest(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def register_derivative_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def verify_derivative(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot: ...
 
@@ -847,6 +853,59 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 expected_version=body.expected_version,
                 idempotency_key=idempotency_key,
                 approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-manifests/{manifest_id}/derivatives",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence-worker"],
+    )
+    async def register_evidence_derivative(
+        matter_id: UUID,
+        manifest_id: UUID,
+        body: PersistentEvidenceDerivativeCandidateRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.register_derivative_candidate(
+                matter_id=str(matter_id),
+                manifest_id=str(manifest_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                manifest_content_hash=body.manifest_content_hash,
+                artifact_type=body.artifact_type,
+                storage_object_key=body.storage_object_key,
+                artifact_sha256=body.artifact_sha256,
+                page_count=body.page_count,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/verify",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def verify_evidence_derivative(
+        matter_id: UUID,
+        derivative_id: UUID,
+        body: PersistentEvidenceDerivativeVerificationRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.verify_derivative(
+                matter_id=str(matter_id),
+                derivative_id=str(derivative_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                verification_hash=body.verification_hash,
             )
         )
 

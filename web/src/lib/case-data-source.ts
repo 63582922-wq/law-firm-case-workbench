@@ -43,6 +43,7 @@ export type EvidenceReviewView = {
   pages: EvidenceReviewPage[];
   duplicateGroups: { groupId: string; status: string; canonicalPageId: string | null; pageIds: string[] }[];
   lockedManifest: { manifestId: string; contentHash: string; totalPages: number; includedPages: number; excludedPages: number } | null;
+  derivatives: { derivativeId: string; artifactType: string; artifactSha256: string; pageCount: number; status: string }[];
 };
 
 type SyntheticReview = {
@@ -84,6 +85,7 @@ type PersistentEvidenceSnapshot = {
   }[];
   duplicate_groups: { duplicate_group_id: string; status: string; canonical_page_id: string | null; evidence_page_ids: string[] }[];
   locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
+  derivatives: { derivative_id: string; artifact_type: string; artifact_sha256: string; page_count: number; status: string }[];
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -216,6 +218,7 @@ function mapSyntheticEvidence(): EvidenceReviewView {
     })),
     duplicateGroups: [{ groupId: "synthetic-duplicate-17-18", status: "CANDIDATE", canonicalPageId: null, pageIds: ["synthetic-page-17", "synthetic-page-18"] }],
     lockedManifest: null,
+    derivatives: [],
   };
 }
 
@@ -241,6 +244,7 @@ function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: s
     })),
     duplicateGroups: payload.duplicate_groups.map((item) => ({ groupId: item.duplicate_group_id, status: item.status, canonicalPageId: item.canonical_page_id, pageIds: item.evidence_page_ids })),
     lockedManifest: payload.locked_manifest ? { manifestId: payload.locked_manifest.manifest_id, contentHash: payload.locked_manifest.content_hash, totalPages: payload.locked_manifest.total_pages, includedPages: payload.locked_manifest.included_pages, excludedPages: payload.locked_manifest.excluded_pages } : null,
+    derivatives: payload.derivatives.map((item) => ({ derivativeId: item.derivative_id, artifactType: item.artifact_type, artifactSha256: item.artifact_sha256, pageCount: item.page_count, status: item.status })),
   };
 }
 

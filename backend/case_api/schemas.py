@@ -480,6 +480,20 @@ class PersistentEvidenceDuplicateResolutionRequest(PersistentApprovalRequest):
         return self
 
 
+class PersistentEvidenceDerivativeCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    manifest_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_type: Literal["RELATED_PAGES_PDF", "ANNOTATED_RELATED_PAGES_PDF"]
+    storage_object_key: str = Field(pattern=r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca$")
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_count: int = Field(ge=1, le=10_000)
+
+
+class PersistentEvidenceDerivativeVerificationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    verification_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PersistentEvidenceDecisionSnapshot(BaseModel):
     decision_id: UUID
     disposition: str
@@ -551,6 +565,18 @@ class PersistentEvidenceLockedManifestSnapshot(BaseModel):
     entries: tuple[PersistentEvidenceManifestEntrySnapshot, ...]
 
 
+class PersistentEvidenceDerivativeSnapshot(BaseModel):
+    derivative_id: UUID
+    manifest_id: UUID
+    artifact_type: str
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_count: int
+    status: str
+    verification_hash: str | None
+    verified_by: UUID | None
+    verified_at: str | None
+
+
 class PersistentEvidenceSnapshotResponse(BaseModel):
     matter_id: UUID
     version: int
@@ -559,3 +585,4 @@ class PersistentEvidenceSnapshotResponse(BaseModel):
     pages: tuple[PersistentEvidencePageSnapshot, ...]
     duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSnapshot, ...]
     locked_manifest: PersistentEvidenceLockedManifestSnapshot | None
+    derivatives: tuple[PersistentEvidenceDerivativeSnapshot, ...]

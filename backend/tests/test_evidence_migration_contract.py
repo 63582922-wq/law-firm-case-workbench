@@ -60,6 +60,8 @@ class EvidenceMigrationContractTests(unittest.TestCase):
         self.assertIn("status IN ('STALE', 'REVOKED')", self.sql)
         self.assertIn("invalidated_at IS NOT NULL", self.sql)
         self.assertIn("length(trim(invalidation_reason)) > 0", self.sql)
+        self.assertIn("evidence_derivatives_one_verified_type_per_manifest", self.sql)
+        self.assertIn("storage_object_key ~ '^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}", self.sql)
 
 
 if __name__ == "__main__":

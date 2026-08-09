@@ -114,6 +114,7 @@ class FakePersistentEvidenceStore:
             pages=(),
             duplicate_groups=(),
             locked_manifest=None,
+            derivatives=(),
         )
 
     def create_page_decision_candidate(self, **kwargs):

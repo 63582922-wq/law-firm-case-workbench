@@ -36,6 +36,8 @@ class FakeEvidenceConnection:
         duplicate_groups: list[dict] | None = None,
         duplicate_members: list[dict] | None = None,
         annotations: list[dict] | None = None,
+        manifest_row: dict | None = None,
+        derivative_row: dict | None = None,
     ) -> None:
         self.permitted = permitted
         self.prior_receipt = prior_receipt
@@ -44,6 +46,8 @@ class FakeEvidenceConnection:
         self.duplicate_groups = duplicate_groups or []
         self.duplicate_members = duplicate_members or []
         self.annotations = annotations or []
+        self.manifest_row = manifest_row
+        self.derivative_row = derivative_row
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -76,6 +80,10 @@ class FakeEvidenceConnection:
             return FakeResult(rows=self.duplicate_members)
         if "SELECT annotation_id, evidence_page_id, purpose" in normalized:
             return FakeResult(rows=self.annotations)
+        if "SELECT content_hash, included_pages, status FROM evidence_manifests" in normalized:
+            return FakeResult(row=self.manifest_row)
+        if "SELECT derivative.status, derivative.manifest_id" in normalized:
+            return FakeResult(row=self.derivative_row)
         if "UPDATE matters SET version = version + 1" in normalized:
             return FakeResult(row={"version": 2})
         return FakeResult()
@@ -321,6 +329,79 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
             if "INSERT INTO evidence_manifest_page_annotations" in sql
         )
         self.assertEqual(annotation_params[1:3], (first_page_id, annotation_id))
+
+    def test_system_worker_registers_only_hash_bound_current_manifest_derivative(self) -> None:
+        manifest_id = str(uuid4())
+        artifact_hash = "9" * 64
+        object_key = f"{artifact_hash[:2]}/{artifact_hash[2:4]}/{artifact_hash}.lca"
+        system_actor = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        connection = FakeEvidenceConnection(
+            manifest_row={"content_hash": "8" * 64, "included_pages": 2, "status": "LOCKED"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_derivative_candidate(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=system_actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-register",
+                manifest_content_hash="8" * 64,
+                artifact_type="ANNOTATED_RELATED_PAGES_PDF",
+                storage_object_key=object_key,
+                artifact_sha256=artifact_hash,
+                page_count=2,
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_derivative_artifacts", sql)
+        self.assertIn("EVIDENCE_DERIVATIVE_CANDIDATE_REGISTERED", str(connection.executed))
+        self.assertNotIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "must match the artifact SHA-256"):
+            self.store.register_derivative_candidate(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=system_actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-wrong-key",
+                manifest_content_hash="8" * 64,
+                artifact_type="RELATED_PAGES_PDF",
+                storage_object_key=f"aa/bb/{artifact_hash}.lca",
+                artifact_sha256=artifact_hash,
+                page_count=2,
+            )
+
+    def test_derivative_verification_preserves_manifest_and_artifact_hash_binding(self) -> None:
+        derivative_id = str(uuid4())
+        manifest_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            derivative_row={
+                "status": "CANDIDATE",
+                "manifest_id": manifest_id,
+                "artifact_type": "RELATED_PAGES_PDF",
+                "artifact_sha256": "7" * 64,
+                "manifest_status": "LOCKED",
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.verify_derivative(
+                matter_id=self.matter_id,
+                derivative_id=derivative_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-verify",
+                verification_hash="6" * 64,
+            )
+        self.assertEqual(receipt.object_id, derivative_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'VERIFIED', verification_hash", sql)
+        self.assertIn("verified_at = now()", sql)
 
 
 if __name__ == "__main__":

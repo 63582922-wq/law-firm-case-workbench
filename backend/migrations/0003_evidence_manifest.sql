@@ -201,7 +201,7 @@ CREATE TABLE evidence_derivative_artifacts (
     matter_id uuid NOT NULL REFERENCES matters(matter_id),
     manifest_id uuid NOT NULL,
     artifact_type text NOT NULL CHECK (artifact_type IN ('RELATED_PAGES_PDF', 'ANNOTATED_RELATED_PAGES_PDF')),
-    storage_object_key text NOT NULL CHECK (length(trim(storage_object_key)) > 0),
+    storage_object_key text NOT NULL CHECK (storage_object_key ~ '^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca$'),
     artifact_sha256 char(64) NOT NULL CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
     page_count integer NOT NULL CHECK (page_count > 0),
     status text NOT NULL CHECK (status IN ('CANDIDATE', 'VERIFIED', 'STALE', 'REVOKED')),
@@ -212,6 +212,8 @@ CREATE TABLE evidence_derivative_artifacts (
     updated_at timestamptz NOT NULL DEFAULT now(),
     invalidated_at timestamptz,
     invalidation_reason text,
+    UNIQUE (derivative_id, firm_id, matter_id),
+    UNIQUE (manifest_id, artifact_type, artifact_sha256),
     CHECK (
         (
             status = 'CANDIDATE'
@@ -265,6 +267,9 @@ CREATE INDEX evidence_page_annotations_matter_status_idx ON evidence_page_annota
 CREATE INDEX evidence_duplicate_groups_matter_status_idx ON evidence_page_duplicate_groups (matter_id, status, created_at);
 CREATE INDEX evidence_manifests_matter_status_idx ON evidence_manifests (matter_id, status, created_at);
 CREATE INDEX evidence_derivatives_manifest_status_idx ON evidence_derivative_artifacts (manifest_id, status, created_at);
+CREATE UNIQUE INDEX evidence_derivatives_one_verified_type_per_manifest
+    ON evidence_derivative_artifacts (manifest_id, artifact_type)
+    WHERE status = 'VERIFIED';
 
 ALTER TABLE evidence_original_files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE evidence_original_files FORCE ROW LEVEL SECURITY;

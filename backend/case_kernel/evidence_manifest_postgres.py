@@ -10,6 +10,7 @@ the current submission bundle in the same transaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Iterator
 from uuid import uuid4
 
@@ -46,6 +47,7 @@ class PersistentEvidenceSnapshot:
     pages: tuple[dict[str, Any], ...]
     duplicate_groups: tuple[dict[str, Any], ...]
     locked_manifest: dict[str, Any] | None
+    derivatives: tuple[dict[str, Any], ...]
 
 
 class PostgresEvidenceManifestStore:
@@ -59,7 +61,7 @@ class PostgresEvidenceManifestStore:
     )
     _DECISION_ROLES = frozenset({Role.LEAD_LAWYER})
     _READ_ROLES = frozenset(
-        {Role.ASSISTANT, Role.COLLABORATING_LAWYER, Role.LEAD_LAWYER, Role.REVIEWER}
+        {Role.ASSISTANT, Role.COLLABORATING_LAWYER, Role.LEAD_LAWYER, Role.REVIEWER, Role.SYSTEM_WORKER}
     )
 
     def __init__(self, dsn: str) -> None:
@@ -941,6 +943,204 @@ class PostgresEvidenceManifestStore:
                 stale_submission=True,
             )
 
+    def register_derivative_candidate(
+        self,
+        *,
+        matter_id: str,
+        manifest_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        manifest_content_hash: str,
+        artifact_type: str,
+        storage_object_key: str,
+        artifact_sha256: str,
+        page_count: int,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("manifest_id", manifest_id)
+        _require_roles(actor, frozenset({Role.SYSTEM_WORKER}))
+        _require_positive_version(expected_version)
+        _validate_sha256("manifest_content_hash", manifest_content_hash)
+        _validate_sha256("artifact_sha256", artifact_sha256)
+        if artifact_type not in {"RELATED_PAGES_PDF", "ANNOTATED_RELATED_PAGES_PDF"}:
+            raise CaseLedgerPersistenceBlocked("unsupported evidence derivative artifact type")
+        if not re.fullmatch(r"[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca", storage_object_key):
+            raise CaseLedgerPersistenceBlocked("derivative storage key is not a managed content-addressed object")
+        expected_object_key = f"{artifact_sha256[:2]}/{artifact_sha256[2:4]}/{artifact_sha256}.lca"
+        if storage_object_key != expected_object_key:
+            raise CaseLedgerPersistenceBlocked("derivative storage key must match the artifact SHA-256")
+        if page_count < 1:
+            raise CaseLedgerPersistenceBlocked("derivative page count must be positive")
+        command_name = "REGISTER_EVIDENCE_DERIVATIVE_CANDIDATE"
+        payload = {
+            "matter_id": matter_id,
+            "manifest_id": manifest_id,
+            "expected_version": expected_version,
+            "manifest_content_hash": manifest_content_hash,
+            "artifact_type": artifact_type,
+            "storage_object_key": storage_object_key,
+            "artifact_sha256": artifact_sha256,
+            "page_count": page_count,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=frozenset({Role.SYSTEM_WORKER}),
+            )
+            if prior is not None:
+                return prior
+            manifest = connection.execute(
+                """
+                SELECT content_hash, included_pages, status
+                FROM evidence_manifests
+                WHERE manifest_id = %s AND matter_id = %s AND firm_id = %s
+                FOR SHARE
+                """,
+                (manifest_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if manifest is None:
+                raise KeyError(manifest_id)
+            if manifest["status"] != "LOCKED" or manifest["content_hash"] != manifest_content_hash:
+                raise CaseLedgerPersistenceBlocked("derivative source Manifest is no longer current or hash-bound")
+            if manifest["included_pages"] != page_count:
+                raise CaseLedgerPersistenceBlocked("derivative page count differs from the locked Manifest")
+            derivative_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO evidence_derivative_artifacts (
+                    derivative_id, firm_id, matter_id, manifest_id, artifact_type,
+                    storage_object_key, artifact_sha256, page_count, status
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'CANDIDATE')
+                """,
+                (
+                    derivative_id,
+                    actor.firm_id,
+                    matter_id,
+                    manifest_id,
+                    artifact_type,
+                    storage_object_key,
+                    artifact_sha256,
+                    page_count,
+                ),
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_CANDIDATE_REGISTERED",
+                object_type="EVIDENCE_DERIVATIVE",
+                object_id=derivative_id,
+                audit_payload={
+                    "derivative_id": derivative_id,
+                    "manifest_id": manifest_id,
+                    "manifest_content_hash": manifest_content_hash,
+                    "artifact_type": artifact_type,
+                    "artifact_sha256": artifact_sha256,
+                    "page_count": page_count,
+                },
+                stale_submission=False,
+            )
+
+    def verify_derivative(
+        self,
+        *,
+        matter_id: str,
+        derivative_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        verification_hash: str,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("derivative_id", derivative_id)
+        verification_roles = frozenset({Role.SYSTEM_WORKER, Role.LEAD_LAWYER})
+        _require_roles(actor, verification_roles)
+        _require_positive_version(expected_version)
+        _validate_sha256("derivative verification_hash", verification_hash)
+        command_name = "VERIFY_EVIDENCE_DERIVATIVE"
+        payload = {
+            "matter_id": matter_id,
+            "derivative_id": derivative_id,
+            "expected_version": expected_version,
+            "verification_hash": verification_hash,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=verification_roles,
+            )
+            if prior is not None:
+                return prior
+            derivative = connection.execute(
+                """
+                SELECT derivative.status, derivative.manifest_id, derivative.artifact_type,
+                       derivative.artifact_sha256, manifest.status AS manifest_status
+                FROM evidence_derivative_artifacts derivative
+                JOIN evidence_manifests manifest
+                  ON manifest.manifest_id = derivative.manifest_id
+                 AND manifest.matter_id = derivative.matter_id
+                 AND manifest.firm_id = derivative.firm_id
+                WHERE derivative.derivative_id = %s
+                  AND derivative.matter_id = %s AND derivative.firm_id = %s
+                FOR UPDATE OF derivative
+                """,
+                (derivative_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if derivative is None:
+                raise KeyError(derivative_id)
+            if derivative["status"] != "CANDIDATE" or derivative["manifest_status"] != "LOCKED":
+                raise CaseLedgerPersistenceBlocked("only a candidate from the current locked Manifest can be verified")
+            updated = connection.execute(
+                """
+                UPDATE evidence_derivative_artifacts
+                SET status = 'VERIFIED', verification_hash = %s, verified_by = %s,
+                    verified_at = now(), updated_at = now()
+                WHERE derivative_id = %s AND matter_id = %s AND firm_id = %s AND status = 'CANDIDATE'
+                """,
+                (verification_hash, actor.actor_id, derivative_id, matter_id, actor.firm_id),
+            )
+            if updated.rowcount != 1:
+                raise CaseLedgerPersistenceBlocked("derivative changed before verification")
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_VERIFIED",
+                object_type="EVIDENCE_DERIVATIVE",
+                object_id=derivative_id,
+                audit_payload={
+                    "derivative_id": derivative_id,
+                    "manifest_id": str(derivative["manifest_id"]),
+                    "artifact_type": derivative["artifact_type"],
+                    "artifact_sha256": derivative["artifact_sha256"],
+                    "verification_hash": verification_hash,
+                },
+                stale_submission=False,
+            )
+
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)
         _require_roles(actor, self._READ_ROLES)
@@ -1057,6 +1257,16 @@ class PostgresEvidenceManifestStore:
                         for row in manifest_entries
                     ),
                 }
+            derivative_rows = connection.execute(
+                """
+                SELECT derivative_id, manifest_id, artifact_type, artifact_sha256,
+                       page_count, status, verification_hash, verified_by, verified_at
+                FROM evidence_derivative_artifacts
+                WHERE matter_id = %s AND firm_id = %s AND status IN ('CANDIDATE', 'VERIFIED')
+                ORDER BY created_at ASC, derivative_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
         original_payload = tuple(
             {
                 **{key: row[key] for key in ("original_label", "original_file_sha256", "byte_size", "media_type", "page_count", "source_scan_fingerprint")},
@@ -1098,6 +1308,20 @@ class PostgresEvidenceManifestStore:
             }
             for row in group_rows
         )
+        derivatives = tuple(
+            {
+                "derivative_id": str(row["derivative_id"]),
+                "manifest_id": str(row["manifest_id"]),
+                "artifact_type": row["artifact_type"],
+                "artifact_sha256": row["artifact_sha256"],
+                "page_count": row["page_count"],
+                "status": row["status"],
+                "verification_hash": row["verification_hash"],
+                "verified_by": str(row["verified_by"]) if row["verified_by"] else None,
+                "verified_at": row["verified_at"].isoformat() if row["verified_at"] else None,
+            }
+            for row in derivative_rows
+        )
         snapshot_payload = {
             "matter_id": matter_id,
             "version": matter["version"],
@@ -1105,6 +1329,7 @@ class PostgresEvidenceManifestStore:
             "pages": pages,
             "duplicate_groups": groups,
             "locked_manifest": manifest_payload,
+            "derivatives": derivatives,
         }
         return PersistentEvidenceSnapshot(snapshot_hash=_payload_hash(snapshot_payload), **snapshot_payload)
 
