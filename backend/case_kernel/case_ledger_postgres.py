@@ -62,6 +62,21 @@ class CaseLedgerCommandReceipt:
     object_id: str
 
 
+@dataclass(frozen=True)
+class PersistentCaseSnapshot:
+    matter_id: str
+    title: str
+    stage: str
+    version: int
+    snapshot_hash: str
+    facts: tuple[dict[str, Any], ...]
+    claims: tuple[dict[str, Any], ...]
+    issues: tuple[dict[str, Any], ...]
+    transactions: tuple[dict[str, Any], ...]
+    payment_classifications: tuple[dict[str, Any], ...]
+    duplicate_groups: tuple[dict[str, Any], ...]
+
+
 class PostgresCaseLedgerStore:
     """UUID-only fact and transaction repository for PostgreSQL 16+."""
 
@@ -1445,6 +1460,266 @@ class PostgresCaseLedgerStore:
             for row in rows
         )
 
+    def get_case_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentCaseSnapshot:
+        """Read one repeatable-read, tenant-authorized projection for the workbench."""
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
+            _authorize_matter_read(connection, actor=actor, matter_id=matter_id, allowed_roles=self._CANDIDATE_ROLES)
+            matter = connection.execute(
+                """
+                SELECT matter_id, title, stage, version
+                FROM matters
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if matter is None:
+                raise KeyError(matter_id)
+            fact_rows = connection.execute(
+                """
+                SELECT fact_id, original_text, origin, status,
+                       jsonb_array_length(evidence_links) AS evidence_count,
+                       decision_hash, decided_by
+                FROM case_facts
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, fact_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            claim_rows = connection.execute(
+                """
+                SELECT claim_id, original_claim_text, claimed_amount, currency, status,
+                       jsonb_array_length(evidence_links) AS evidence_count,
+                       confirmation_hash, confirmed_by
+                FROM case_claims
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, claim_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            response_rows = connection.execute(
+                """
+                SELECT claim_response_id, claim_id, position, partial_amount, currency,
+                       approval_hash, approved_by
+                FROM case_claim_responses
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, claim_response_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            response_fact_rows = connection.execute(
+                """
+                SELECT claim_response_id, fact_id
+                FROM case_claim_response_facts
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY claim_response_id ASC, fact_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            issue_rows = connection.execute(
+                """
+                SELECT issue_id, question, status, approval_hash, approved_by
+                FROM case_dispute_issues
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, issue_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            issue_claim_rows = connection.execute(
+                """
+                SELECT issue_id, claim_id
+                FROM case_dispute_issue_claims
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY issue_id ASC, claim_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            issue_fact_rows = connection.execute(
+                """
+                SELECT issue_id, fact_id
+                FROM case_dispute_issue_facts
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY issue_id ASC, fact_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            transaction_rows = connection.execute(
+                """
+                SELECT transaction_id, local_date, date_precision, amount, currency,
+                       direction, payer_label, payee_label, channel, transaction_reference,
+                       status, jsonb_array_length(evidence_links) AS evidence_count,
+                       confirmation_hash, confirmed_by
+                FROM case_transactions
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY local_date ASC NULLS LAST, created_at ASC, transaction_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            classification_rows = connection.execute(
+                """
+                SELECT classification_id, transaction_id, origin, nature, same_day_sequence,
+                       status, jsonb_array_length(evidence_links) AS evidence_count,
+                       approval_hash, approved_by
+                FROM case_payment_classifications
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, classification_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            allocation_rows = connection.execute(
+                """
+                SELECT classification_id, obligation_id, amount, currency
+                FROM case_payment_allocations
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY classification_id ASC, obligation_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            group_rows = connection.execute(
+                """
+                SELECT duplicate_group_id, status, canonical_transaction_id,
+                       approval_hash, approved_by
+                FROM case_transaction_duplicate_groups
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, duplicate_group_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            member_rows = connection.execute(
+                """
+                SELECT duplicate_group_id, transaction_id
+                FROM case_transaction_duplicate_members
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY duplicate_group_id ASC, transaction_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+
+        response_facts = _group_ids(response_fact_rows, "claim_response_id", "fact_id")
+        responses_by_claim = {
+            str(row["claim_id"]): {
+                "claim_response_id": str(row["claim_response_id"]),
+                "position": row["position"],
+                "partial_amount": row["partial_amount"],
+                "currency": row["currency"],
+                "confirmed_fact_ids": response_facts.get(str(row["claim_response_id"]), ()),
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]),
+            }
+            for row in response_rows
+        }
+        issue_claims = _group_ids(issue_claim_rows, "issue_id", "claim_id")
+        issue_facts = _group_ids(issue_fact_rows, "issue_id", "fact_id")
+        allocation_map: dict[str, list[dict[str, Any]]] = {}
+        for row in allocation_rows:
+            allocation_map.setdefault(str(row["classification_id"]), []).append(
+                {
+                    "obligation_id": row["obligation_id"],
+                    "amount": row["amount"],
+                    "currency": row["currency"],
+                }
+            )
+        member_map = _group_ids(member_rows, "duplicate_group_id", "transaction_id")
+        facts = tuple(
+            {
+                "fact_id": str(row["fact_id"]),
+                "original_text": row["original_text"],
+                "origin": row["origin"],
+                "status": row["status"],
+                "evidence_count": row["evidence_count"],
+                "decision_hash": row["decision_hash"],
+                "decided_by": str(row["decided_by"]) if row["decided_by"] else None,
+            }
+            for row in fact_rows
+        )
+        claims = tuple(
+            {
+                "claim_id": str(row["claim_id"]),
+                "original_claim_text": row["original_claim_text"],
+                "claimed_amount": row["claimed_amount"],
+                "currency": row["currency"],
+                "status": row["status"],
+                "evidence_count": row["evidence_count"],
+                "confirmation_hash": row["confirmation_hash"],
+                "confirmed_by": str(row["confirmed_by"]) if row["confirmed_by"] else None,
+                "response": responses_by_claim.get(str(row["claim_id"])),
+            }
+            for row in claim_rows
+        )
+        issues = tuple(
+            {
+                "issue_id": str(row["issue_id"]),
+                "question": row["question"],
+                "status": row["status"],
+                "claim_ids": issue_claims.get(str(row["issue_id"]), ()),
+                "confirmed_fact_ids": issue_facts.get(str(row["issue_id"]), ()),
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]) if row["approved_by"] else None,
+            }
+            for row in issue_rows
+        )
+        transactions = tuple(
+            {
+                "transaction_id": str(row["transaction_id"]),
+                "local_date": row["local_date"],
+                "date_precision": row["date_precision"],
+                "amount": row["amount"],
+                "currency": row["currency"],
+                "direction": row["direction"],
+                "payer_label": row["payer_label"],
+                "payee_label": row["payee_label"],
+                "channel": row["channel"],
+                "transaction_reference": row["transaction_reference"],
+                "status": row["status"],
+                "evidence_count": row["evidence_count"],
+                "confirmation_hash": row["confirmation_hash"],
+                "confirmed_by": str(row["confirmed_by"]) if row["confirmed_by"] else None,
+            }
+            for row in transaction_rows
+        )
+        classifications = tuple(
+            {
+                "classification_id": str(row["classification_id"]),
+                "transaction_id": str(row["transaction_id"]),
+                "origin": row["origin"],
+                "nature": row["nature"],
+                "same_day_sequence": row["same_day_sequence"],
+                "status": row["status"],
+                "evidence_count": row["evidence_count"],
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]) if row["approved_by"] else None,
+                "allocations": tuple(allocation_map.get(str(row["classification_id"]), ())),
+            }
+            for row in classification_rows
+        )
+        groups = tuple(
+            {
+                "duplicate_group_id": str(row["duplicate_group_id"]),
+                "status": row["status"],
+                "canonical_transaction_id": (
+                    str(row["canonical_transaction_id"]) if row["canonical_transaction_id"] else None
+                ),
+                "transaction_ids": member_map.get(str(row["duplicate_group_id"]), ()),
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]) if row["approved_by"] else None,
+            }
+            for row in group_rows
+        )
+        payload = {
+            "matter_id": str(matter["matter_id"]),
+            "title": matter["title"],
+            "stage": matter["stage"],
+            "version": matter["version"],
+            "facts": facts,
+            "claims": claims,
+            "issues": issues,
+            "transactions": transactions,
+            "payment_classifications": classifications,
+            "duplicate_groups": groups,
+        }
+        return PersistentCaseSnapshot(snapshot_hash=_payload_hash(payload), **payload)
+
     def _transaction(self, firm_id: str) -> Iterator[psycopg.Connection]:
         return _TenantTransaction(self._dsn, firm_id)
 
@@ -1464,6 +1739,15 @@ class _TenantTransaction:
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> bool | None:
         return self._context.__exit__(exc_type, exc, traceback)
+
+
+class _ReadSnapshotTransaction(_TenantTransaction):
+    def __enter__(self) -> psycopg.Connection:
+        self._context = psycopg.connect(self._dsn, row_factory=dict_row)
+        self._connection = self._context.__enter__()
+        self._connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        self._connection.execute("SELECT set_config('app.firm_id', %s, true)", (self._firm_id,))
+        return self._connection
 
 
 def _validate_command_identity(*, matter_id: str, actor: Actor, idempotency_key: str) -> None:
@@ -1661,6 +1945,13 @@ def _normalized_optional_text(value: str | None) -> str | None:
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _group_ids(rows: Iterable[dict[str, Any]], group_key: str, value_key: str) -> dict[str, tuple[str, ...]]:
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        grouped.setdefault(str(row[group_key]), []).append(str(row[value_key]))
+    return {key: tuple(values) for key, values in grouped.items()}
 
 
 def _evidence_payload(links: tuple[EvidenceLink, ...]) -> list[dict[str, Any]]:

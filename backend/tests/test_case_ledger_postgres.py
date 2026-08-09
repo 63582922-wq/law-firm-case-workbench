@@ -49,6 +49,12 @@ class FakeConnection:
             return FakeResult(row=None)
         if "SELECT m.version," in normalized:
             return FakeResult(row={"version": 1, "permitted": self.permitted})
+        if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"):
+            return FakeResult(row={"authorized": 1} if self.permitted else None)
+        if normalized.startswith("SELECT matter_id, title, stage, version FROM matters"):
+            return FakeResult(
+                row={"matter_id": params[0], "title": "[合成] 持久化快照案件", "stage": "FACT_REVIEW", "version": 7}
+            )
         if "SELECT status FROM case_facts" in normalized:
             return FakeResult(row={"status": self.fact_status})
         if "SELECT status, claimed_amount, currency FROM case_claims" in normalized:
@@ -381,6 +387,19 @@ class PostgresCaseLedgerStoreTests(unittest.TestCase):
                     evidence_links=evidence(),
                 )
         connect.assert_not_called()
+
+    def test_case_snapshot_uses_repeatable_read_before_tenant_queries(self) -> None:
+        connection = FakeConnection()
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            snapshot = self.store.get_case_snapshot(matter_id=self.matter_id, actor=self.actor)
+        self.assertEqual(snapshot.version, 7)
+        self.assertEqual(len(snapshot.snapshot_hash), 64)
+        self.assertEqual(snapshot.facts, ())
+        self.assertTrue(connection.executed[0][0].startswith("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
+        self.assertTrue(connection.executed[1][0].startswith("SELECT set_config"))
 
     def test_alpha_identifiers_are_rejected_before_connection(self) -> None:
         with patch("case_kernel.case_ledger_postgres.psycopg.connect") as connect:

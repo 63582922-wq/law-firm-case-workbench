@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_api.persistent_identity import AuthenticationMethod, ServerIdentityContext
-from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt
+from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
@@ -79,6 +79,22 @@ class FakePersistentFactStore:
             audit_event_id=str(uuid4()),
             object_type="PAYMENT_CLASSIFICATION",
             object_id=str(uuid4()),
+        )
+
+    def get_case_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentCaseSnapshot(
+            matter_id=matter_id,
+            title="[合成] 持久化案件快照",
+            stage="FACT_REVIEW",
+            version=4,
+            snapshot_hash="c" * 64,
+            facts=(),
+            claims=(),
+            issues=(),
+            transactions=(),
+            payment_classifications=(),
+            duplicate_groups=(),
         )
 
 
@@ -228,6 +244,24 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(transaction_call["currency"], "CNY")
         self.assertEqual(classification_call["nature"].value, "INTEREST_PAYMENT")
         self.assertEqual(classification_call["allocations"][0].currency, "CNY")
+
+    def test_case_snapshot_is_a_single_versioned_read_model(self) -> None:
+        store = FakePersistentFactStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=store,
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/snapshot")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["version"], 4)
+        self.assertEqual(payload["snapshot_hash"], "c" * 64)
+        self.assertEqual(payload["payment_classifications"], [])
 
 
 if __name__ == "__main__":

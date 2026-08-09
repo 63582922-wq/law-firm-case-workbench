@@ -333,3 +333,98 @@ class PersistentDuplicateGroupCandidateRequest(BaseModel):
 class PersistentDuplicateGroupResolutionRequest(PersistentApprovalRequest):
     same_economic_event: bool
     canonical_transaction_id: UUID | None = None
+
+
+class PersistentSnapshotFact(PersistentFactResponse):
+    decided_by: UUID | None
+
+
+class PersistentSnapshotClaimResponse(BaseModel):
+    claim_response_id: UUID
+    position: str
+    partial_amount: Decimal | None
+    currency: str | None
+    confirmed_fact_ids: tuple[UUID, ...]
+    approval_hash: str
+    approved_by: UUID
+
+
+class PersistentSnapshotClaim(BaseModel):
+    claim_id: UUID
+    original_claim_text: str
+    claimed_amount: Decimal | None
+    currency: str | None
+    status: str
+    evidence_count: int
+    confirmation_hash: str | None
+    confirmed_by: UUID | None
+    response: PersistentSnapshotClaimResponse | None
+
+
+class PersistentSnapshotIssue(BaseModel):
+    issue_id: UUID
+    question: str
+    status: str
+    claim_ids: tuple[UUID, ...]
+    confirmed_fact_ids: tuple[UUID, ...]
+    approval_hash: str | None
+    approved_by: UUID | None
+
+
+class PersistentSnapshotTransaction(BaseModel):
+    transaction_id: UUID
+    local_date: date | None
+    date_precision: str
+    amount: Decimal
+    currency: str
+    direction: str
+    payer_label: str | None
+    payee_label: str | None
+    channel: str
+    transaction_reference: str | None
+    status: str
+    evidence_count: int
+    confirmation_hash: str | None
+    confirmed_by: UUID | None
+
+
+class PersistentSnapshotAllocation(BaseModel):
+    obligation_id: str
+    amount: Decimal
+    currency: str
+
+
+class PersistentSnapshotPaymentClassification(BaseModel):
+    classification_id: UUID
+    transaction_id: UUID
+    origin: str
+    nature: str
+    same_day_sequence: int | None
+    status: str
+    evidence_count: int
+    approval_hash: str | None
+    approved_by: UUID | None
+    allocations: tuple[PersistentSnapshotAllocation, ...]
+
+
+class PersistentSnapshotDuplicateGroup(BaseModel):
+    duplicate_group_id: UUID
+    status: str
+    canonical_transaction_id: UUID | None
+    transaction_ids: tuple[UUID, ...]
+    approval_hash: str | None
+    approved_by: UUID | None
+
+
+class PersistentCaseSnapshotResponse(BaseModel):
+    matter_id: UUID
+    title: str
+    stage: str
+    version: int
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    facts: tuple[PersistentSnapshotFact, ...]
+    claims: tuple[PersistentSnapshotClaim, ...]
+    issues: tuple[PersistentSnapshotIssue, ...]
+    transactions: tuple[PersistentSnapshotTransaction, ...]
+    payment_classifications: tuple[PersistentSnapshotPaymentClassification, ...]
+    duplicate_groups: tuple[PersistentSnapshotDuplicateGroup, ...]

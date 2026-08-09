@@ -39,6 +39,7 @@ from .persistent_identity import (
 )
 from .schemas import (
     CaseLedgerReceiptResponse,
+    PersistentCaseSnapshotResponse,
     PersistentApprovalRequest,
     PersistentClaimCandidateRequest,
     PersistentClaimResponseRequest,
@@ -82,6 +83,8 @@ class PersistentFactLedgerPort(Protocol):
     def create_duplicate_group_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def resolve_duplicate_group(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_case_snapshot(self, *, matter_id: str, actor: Actor): ...
 
 
 class PersistentRequestBlocked(ValueError):
@@ -207,6 +210,21 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "REQUEST_PRECONDITION_BLOCKED",
             "本次操作缺少必要的请求标识，请重新提交。",
         )
+
+    @app.get(
+        "/v1/matters/{matter_id}/snapshot",
+        response_model=PersistentCaseSnapshotResponse,
+        tags=["matters"],
+    )
+    async def get_case_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+    ) -> PersistentCaseSnapshotResponse:
+        snapshot = dependencies.case_ledger_store.get_case_snapshot(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentCaseSnapshotResponse.model_validate(snapshot.__dict__)
 
     @app.get(
         "/v1/matters/{matter_id}/facts",

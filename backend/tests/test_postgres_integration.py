@@ -296,6 +296,13 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
             approval_hash="3" * 64,
         )
         self.assertEqual(final.matter_version, 12)
+        snapshot = self.case_ledger_store.get_case_snapshot(matter_id=matter_id, actor=self.actor)
+        self.assertEqual(snapshot.version, 12)
+        self.assertEqual(len(snapshot.facts), 1)
+        self.assertEqual(len(snapshot.claims), 1)
+        self.assertEqual(len(snapshot.issues), 1)
+        self.assertEqual(len(snapshot.transactions), 1)
+        self.assertEqual(len(snapshot.payment_classifications), 1)
         with psycopg.connect(TEST_DSN) as connection:
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (self.firm_id,))
             response_links = connection.execute(
