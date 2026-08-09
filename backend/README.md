@@ -8,7 +8,9 @@
 - 记录最小化审计事件；
 - 在上游变更时使当前提交包失效；
 - 只使用严格合成数据和内存仓库，便于先验证领域控制逻辑；
-- 不包含 HTTP 服务、数据库、登录、真实文件、外部模型、OCR、真实文书、真实案件或导出功能。
+- 提供仅供合成环境使用的 FastAPI 契约边界：固定合成角色选择、幂等命令、版本冲突、审批和锁定；
+- 提供本地案卷文件夹的只读清单组件：文件哈希、容量上限、不写原件、不跟随符号链接；
+- 不包含生产 HTTP 身份认证、已执行数据库、真实文件接入、外部模型、OCR、真实文书、真实案件或导出功能。
 
 后续替换内存仓库为 PostgreSQL 时，必须保持同样的 Command、版本、幂等和审计语义，并补充数据库事务、RLS 和持久化 Outbox。不得将此目录的内存实现误用于生产。
 
@@ -17,4 +19,12 @@
 ```sh
 PYTHON=/Users/cft/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3
 $PYTHON -m unittest discover -s backend/tests -v
+```
+
+合成 API 的开发环境由 `backend/pyproject.toml` 和 `backend/uv.lock` 固定：
+
+```sh
+cd backend
+uv sync --group dev
+.venv/bin/python -m unittest discover -s tests -v
 ```

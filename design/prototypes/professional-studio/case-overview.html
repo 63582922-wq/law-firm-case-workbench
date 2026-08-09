@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>案件总览｜专业合议工作室</title>
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+  <!--
+    设计假设（合成 Alpha 静态原型）：
+    1. 使用者是承办律师、协办律师与复核人，而非当事人；首屏必须先回答“现在由谁决定什么”。
+    2. 视觉语言取自合议记录、案卷批注与版本交接：线性分隔、纸本底色、编辑式标题，而非项目管理看板。
+    3. 所有名称、案号、文件、金额、日期及交易均为严格合成数据；不代表真实案件、人员或法律结论。
+    4. 本页只表达界面层级与状态语义，不实现权限、计算、审批或真实 PDF 处理。
+  -->
+  <header class="topbar">
+    <div class="brandline">
+      <span class="brand">合议</span>
+      <span class="subbrand">证据驱动诉讼工作台</span>
+      <span class="tag alpha">内部合成 Alpha</span>
+    </div>
+    <div class="topbar-actions">
+      <span>案件</span>
+      <span>待办与审批</span>
+      <span>知识库</span>
+      <span class="signed-in">承办律师（模拟角色）</span>
+    </div>
+  </header>
+
+  <section class="casebar" aria-label="当前案件">
+    <div>
+      <div class="breadcrumbs">案件 / 民间借贷应诉 / 材料与证据</div>
+      <h1 class="case-title">原告甲某诉被告乙某民间借贷纠纷（合成）</h1>
+    </div>
+    <div class="case-meta">
+      <span class="case-ref">案号：合成民初-04281</span>
+      <span class="status-tag decision">待律师决定</span>
+    </div>
+  </section>
+
+  <div class="workspace">
+    <nav class="case-nav" aria-label="案件内导航">
+      <p class="nav-label">案件工作区</p>
+      <ul>
+        <li><a href="case-overview.html" aria-current="page"><span class="nav-index">01</span><span>案件总览</span></a></li>
+        <li><a href="evidence-workbench.html"><span class="nav-index">02</span><span>材料与证据</span></a></li>
+        <li><a href="#主体"><span class="nav-index">03</span><span>主体与身份</span></a></li>
+        <li><a href="#诉请"><span class="nav-index">04</span><span>诉请与争点</span></a></li>
+        <li><a href="#事实"><span class="nav-index">05</span><span>事实与时间线</span></a></li>
+        <li><a href="#交易"><span class="nav-index">06</span><span>交易台账</span></a></li>
+        <li><a href="#法律"><span class="nav-index">07</span><span>法律依据</span></a></li>
+        <li><a href="#计算"><span class="nav-index">08</span><span>利息计算</span></a></li>
+        <li><a href="#文书"><span class="nav-index">09</span><span>文书工作室</span></a></li>
+        <li><a href="#提交"><span class="nav-index">10</span><span>提交中心</span></a></li>
+        <li><a href="#审计"><span class="nav-index">11</span><span>审计记录</span></a></li>
+      </ul>
+      <div class="nav-divider"></div>
+      <p class="case-nav-note"><strong>工作原则</strong><br>原件只读；候选不等于结论；任何上游变更都应使下游结果失效。</p>
+    </nav>
+
+    <main class="main-column">
+      <section class="phase-rail" aria-label="案件阶段">
+        <div class="phase-item done"><span class="phase-index">01</span><span class="phase-name">接收材料</span><span class="phase-state">已完成</span></div>
+        <div class="phase-item done"><span class="phase-index">02</span><span class="phase-name">材料盘点</span><span class="phase-state">已完成</span></div>
+        <div class="phase-item current"><span class="phase-index">03</span><span class="phase-name">证据确认</span><span class="phase-state">当前待决</span></div>
+        <div class="phase-item blocked"><span class="phase-index">04</span><span class="phase-name">事实与台账</span><span class="phase-state">受上游影响</span></div>
+        <div class="phase-item"><span class="phase-index">05</span><span class="phase-name">法律与计算</span><span class="phase-state">未开始</span></div>
+        <div class="phase-item"><span class="phase-index">06</span><span class="phase-name">文书合并</span><span class="phase-state">未开始</span></div>
+        <div class="phase-item"><span class="phase-index">07</span><span class="phase-name">提交锁定</span><span class="phase-state">未开始</span></div>
+      </section>
+
+      <section class="decision-sheet" aria-labelledby="next-decision-title">
+        <div class="decision-core">
+          <div class="eyebrow-row">
+            <span class="section-kicker">下一项律师决定</span>
+            <span class="status-tag decision">需要承办律师</span>
+          </div>
+          <h2 class="decision-title" id="next-decision-title">确认微信流水第 12、17 页是否为精确重复</h2>
+          <p class="decision-copy">系统已发现两页视觉哈希一致。第 18 页内容相似但交易金额不同，不能自动排除。请先确认重复页处置，再生成任何相关页派生件。</p>
+          <div class="action-row">
+            <a class="button-link" href="evidence-workbench.html">打开证据工作台</a>
+            <button class="secondary" type="button">查看处置依据</button>
+          </div>
+        </div>
+        <aside class="decision-impact" aria-label="本决定的影响">
+          <span class="section-kicker">影响范围</span>
+          <ul class="impact-list">
+            <li><strong>相关页派生件</strong><span>尚未生成，原始文件保持只读</span></li>
+            <li><strong>交易台账</strong><span>1 笔候选付款等待来源确认</span></li>
+            <li><strong>文书与计算</strong><span>当前未启动，不显示正式金额</span></li>
+          </ul>
+        </aside>
+      </section>
+
+      <div class="overview-grid">
+        <section class="ruled-panel" aria-labelledby="health-title">
+          <div class="section-heading">
+            <h2 id="health-title">材料健康与账目范围</h2>
+            <a class="fine-link" href="evidence-workbench.html">核对页级处置</a>
+          </div>
+          <div class="panel-inner">
+            <div class="health-grid" aria-label="材料健康摘要">
+              <div class="health-item"><span class="health-label">材料页已处置</span><span class="health-value">36 / 36</span><span class="health-detail">每页均保留处置状态</span></div>
+              <div class="health-item"><span class="health-label">精确重复候选</span><span class="health-value">1 组</span><span class="health-detail">第 12、17 页待律师确认</span></div>
+              <div class="health-item"><span class="health-label">相似非重复</span><span class="health-value">1 页</span><span class="health-detail">第 18 页禁止自动排除</span></div>
+            </div>
+            <table class="ledger-table" aria-label="核心金额范围">
+              <thead><tr><th>项目</th><th>当前状态</th><th class="amount">金额（CNY）</th></tr></thead>
+              <tbody>
+                <tr><td>原告诉请本金</td><td><span class="status-tag candidate">诉请提取候选</span></td><td class="amount">80,000.00</td></tr>
+                <tr class="candidate-row"><td>已付金额</td><td><span class="status-tag decision">待付款性质确认</span></td><td class="amount">25,320.00</td></tr>
+                <tr><td>正式利息计算</td><td><span class="status-tag risk">条件未齐备</span></td><td class="amount">不显示</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="ruled-panel" aria-labelledby="handover-title">
+          <div class="section-heading"><h2 id="handover-title">合议交接</h2><span class="section-kicker">角色与责任</span></div>
+          <div class="panel-inner">
+            <div class="person-line"><span>承办律师（模拟）</span><span class="actor-role">待决定</span></div>
+            <div class="person-line"><span>协办律师（模拟）</span><span class="actor-role">已阅证据</span></div>
+            <div class="person-line"><span>律师助理（模拟）</span><span class="actor-role">已盘点</span></div>
+            <div class="person-line"><span>复核人（模拟）</span><span class="actor-role">尚未指派</span></div>
+            <p class="muted-copy" style="margin-top:12px;font-size:12px;">当前没有任何律师批准的付款性质、规则参数或正式计算结果。</p>
+          </div>
+        </section>
+
+        <section class="ruled-panel" aria-labelledby="recent-title">
+          <div class="section-heading"><h2 id="recent-title">最近变更</h2><span class="section-kicker">保留审计线索</span></div>
+          <div class="panel-inner">
+            <ol class="history-list">
+              <li><time>09:42</time><div><strong>检测到精确重复候选</strong><span>系统对合成微信流水第 12、17 页生成相同视觉哈希；未修改原件。</span></div></li>
+              <li><time>09:37</time><div><strong>页级相关性盘点完成</strong><span>36 页均已标记为相关、无关或待确认；第 18 页保持相似非重复。</span></div></li>
+              <li><time>09:18</time><div><strong>候选付款已建立</strong><span>交易记录尚未被认定为利息、还本或其他性质，不能进入正式计算。</span></div></li>
+            </ol>
+          </div>
+        </section>
+
+        <section class="ruled-panel" aria-labelledby="source-title">
+          <div class="section-heading"><h2 id="source-title">当前决定的来源</h2><span class="section-kicker">原件可回溯</span></div>
+          <div class="panel-inner">
+            <ul class="source-list">
+              <li><strong>微信交易明细_合成样本_2020.pdf</strong><br><span class="muted-copy">P12、P17 · 原件 · 视觉哈希一致</span></li>
+              <li><strong>微信交易明细_合成样本_2020.pdf</strong><br><span class="muted-copy">P18 · 原件 · 内容相似但金额不同</span></li>
+              <li><strong>页级处置清单_合成</strong><br><span class="muted-copy">36 / 36 已有处置，等待律师写入本组理由</span></li>
+            </ul>
+          </div>
+        </section>
+      </div>
+
+      <footer class="bottom-status"><span><strong>案件状态：</strong>材料已盘点，证据处置待律师决定</span><span class="synthetic-notice">本页面仅使用严格合成数据，不可用于真实案件</span></footer>
+    </main>
+
+    <aside class="right-rail" aria-label="案件状态与合议摘要">
+      <section class="rail-section">
+        <span class="rail-label">程序期限</span>
+        <h3>送达期限候选</h3>
+        <div class="deadline-date">2026-08-14<br>17:00</div>
+        <p class="deadline-note">尚未确认送达方式、起算规则与节假日；此日期不能作为可依赖期限。</p>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">合议简报</span>
+        <h3>先证明，再决定</h3>
+        <p class="muted-copy">本案当前问题不是计算利息，而是确认一笔候选付款的页级证据范围。完成前，所有下游金额均保持未启动。</p>
+        <ul class="check-list">
+          <li class="approved">材料范围已覆盖</li>
+          <li class="pending">重复页处置待决定</li>
+          <li class="pending">付款性质待确认</li>
+        </ul>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">风险提示</span>
+        <h3>避免覆盖与误用</h3>
+        <p class="muted-copy">原件、派生件、候选事实与批准结论使用不同语义。任何确认重复的操作也只能影响派生选择，不能删除原页。</p>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">下一步之后</span>
+        <h3>进入交易台账复核</h3>
+        <p class="muted-copy">仅在来源范围确认后，才可由律师对付款性质提出、修改或批准处理。</p>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

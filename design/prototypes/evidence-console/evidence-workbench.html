@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>谨证｜材料与证据 · 证据控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!--
+    严格合成数据：页面文字、文件、交易、坐标与状态均为虚构测试样例。
+    本屏展示“原件永不删除，派生件可审计”的交互结构：左为原件与页级处置，
+    中间为原始页视觉预览，右为 OCR、结构化候选、坐标与重复页判断。
+  -->
+  <div class="app-shell">
+    <aside class="side-rail" aria-label="案件内导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">证</div>
+        <div><span class="brand-name">谨证</span><span class="brand-caption">EVIDENCE CONTROL</span></div>
+      </div>
+      <section class="matter-chip" aria-label="当前合成案件">
+        <span class="matter-kicker">SYNTHETIC MATTER · M-26-0048</span>
+        <strong class="matter-name">原告甲诉被告乙<br>民间借贷纠纷</strong>
+        <span class="matter-meta">被告一审应诉 · 人民币</span>
+      </section>
+      <nav class="case-nav">
+        <span class="rail-label">案件工作流</span>
+        <a href="index.html"><span>案件总览</span><span class="nav-count">01</span></a>
+        <a class="active" href="evidence-workbench.html" aria-current="page"><span>材料与证据</span><span class="nav-count">94</span></a>
+        <a href="index.html"><span>主体与身份</span><span class="nav-count">03</span></a>
+        <a href="index.html"><span>诉请与争点</span><span class="nav-count">02</span></a>
+        <a href="index.html"><span>事实与时间线</span><span class="nav-count">12</span></a>
+        <a href="index.html"><span>交易台账</span><span class="nav-count">08</span></a>
+        <a href="index.html"><span>法律依据</span><span class="nav-count">待审</span></a>
+        <a href="index.html"><span>利息计算</span><span class="nav-count">失效</span></a>
+        <a href="index.html"><span>文书工作室</span><span class="nav-count">—</span></a>
+        <a href="index.html"><span>提交中心</span><span class="nav-count">—</span></a>
+      </nav>
+      <div class="rail-foot">
+        <div class="role-row"><span>当前角色</span><span class="role-name">承办律师</span></div>
+        <span class="environment">INTERNAL SYNTHETIC ALPHA</span>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="global-bar">
+        <div class="breadcrumb"><a href="index.html"><strong>案件</strong></a> / 材料与证据 / 证据工作台</div>
+        <div class="global-actions"><a class="global-link" href="index.html">返回案件总览</a><span class="user-stamp">陈律师 · 承办</span></div>
+      </header>
+      <section class="status-bar" aria-label="案件状态">
+        <div class="status-source"><strong>原件仓 · 94 页</strong><span>全部为合成材料，原件与派生件严格分离</span></div>
+        <div class="status-notice"><i class="notice-mark" aria-hidden="true"></i>当前筛选：与“原告甲”相关的候选页面，尚未构成正式事实</div>
+        <div class="stage-strip"><span class="stage done">材料盘点</span><span class="stage current">证据确认</span><span class="stage">事实</span><span class="stage">计算</span><span class="stage">文书</span><span class="stage">提交</span></div>
+      </section>
+
+      <div class="evidence-workspace">
+        <header class="evidence-toolbar">
+          <div><div class="eyebrow">EVIDENCE CONTROL · 02</div><h1>证据工作台</h1></div>
+          <div class="evidence-scope"><span>全量处置：94 / 94 页</span><i class="scope-rule" aria-hidden="true"></i><span>原件：不可覆盖</span><i class="scope-rule" aria-hidden="true"></i><span>红框：派生标注候选</span></div>
+        </header>
+
+        <section class="workbench" aria-label="三栏证据工作台">
+          <aside class="workbench-column file-column" aria-label="原件与页面清单">
+            <header class="column-head"><h2>文件与页面</h2><span>04 FILES</span></header>
+            <div class="file-filter" aria-label="页面筛选"><span class="selected">相关 12</span><span>待审 03</span><span>全量 94</span></div>
+            <div class="source-group">
+              <div class="source-heading">法院送达资料（合成）</div>
+              <div class="source-file"><strong>送达回证与起诉状摘要.pdf</strong><small>ORIGINAL · 18 PAGES · SHA-256 VERIFIED</small></div>
+            </div>
+            <div class="source-group">
+              <div class="source-heading">微信交易记录（合成）</div>
+              <div class="source-file active"><strong>微信交易流水_2022.pdf</strong><small>ORIGINAL · 22 PAGES · SHA-256 VERIFIED</small></div>
+              <ul class="page-list" aria-label="微信交易流水页面">
+                <li><b>p.10</b><span>无关候选</span><em>待审</em></li>
+                <li><b>p.11</b><span>相关候选</span><em>保留</em></li>
+                <li class="current"><b>p.12</b><span>交易记录</span><em>当前页</em></li>
+                <li class="duplicate"><b>p.48</b><span>精确重复候选</span><em>DUP-G-002</em></li>
+                <li><b>p.50</b><span>相似但不同</span><em>待复核</em></li>
+              </ul>
+            </div>
+            <div class="source-group">
+              <div class="source-heading">借据与聊天记录（合成）</div>
+              <div class="source-file"><strong>借据扫描件.pdf</strong><small>ORIGINAL · 04 PAGES · HUMAN REVIEWED</small></div>
+              <div class="source-file"><strong>聊天记录导出.pdf</strong><small>ORIGINAL · 50 PAGES · OCR PARTIAL</small></div>
+            </div>
+          </aside>
+
+          <section class="workbench-column viewer-column" aria-label="原始页面视觉预览">
+            <header class="viewer-tools"><span class="original-label">原件页视觉预览 · 仅查看</span><span class="page-counter">微信交易流水_2022.pdf · p.12 / 22</span></header>
+            <div class="paper-stage">
+              <article class="source-page" aria-label="严格合成的交易记录页面">
+                <span class="document-stamp">SYNTHETIC SOURCE · PAGE 12</span>
+                <h3>微信支付交易记录</h3>
+                <p class="no-indent">导出范围：2022-04-01 至 2022-04-30　　记录类型：转账</p>
+                <p>以下内容仅为产品开发用合成文本。页面中出现的当事人、金额、日期和交易号均非真实信息，不代表任何付款事实或法律立场。</p>
+                <div class="transfer-row">
+                  <b>2022-04-08<br>14:26:09</b>
+                  <div>
+                    <strong>转账给：原告甲（合成昵称）</strong><br>
+                    交易金额：CNY 1,000.00　　交易单号：SYN-20220408-001<br>
+                    备注：合成测试记录；付款性质待律师确认
+                  </div>
+                  <div class="evidence-red-box" aria-label="红框标注候选"><span>红框标注候选</span></div>
+                </div>
+                <p>导出信息提示：该记录只用于形成“付款候选”。是否属于本金、利息或其他性质，必须结合借据、诉请与律师确认进行判断。</p>
+                <p>下方存在其他非相关测试记录。其原始页面仍保留在材料目录中，不会因当前筛选而被删除或覆盖。</p>
+                <div class="page-footnote"><span>ORIGINAL ARTIFACT · IMMUTABLE</span><span>12 / 22</span></div>
+              </article>
+            </div>
+          </section>
+
+          <aside class="workbench-column review-column" aria-label="页面提取与审查信息">
+            <header class="column-head"><h2>提取与处置</h2><span>PAGE-P12</span></header>
+            <section class="review-section">
+              <h3>页面状态</h3>
+              <div class="decision-row"><span class="decision-copy-sm">相关性</span><span class="status-tag tag-candidate">相关候选</span></div>
+              <div class="decision-row"><span class="decision-copy-sm">页面处置</span><span class="status-tag tag-review">待律师决定</span></div>
+              <div class="decision-row"><span class="decision-copy-sm">原件完整性</span><span class="status-tag tag-verified">哈希一致</span></div>
+            </section>
+            <section class="review-section">
+              <h3>结构化候选</h3>
+              <div class="value-grid">
+                <div><span class="field-label">日期</span><b>2022-04-08</b></div>
+                <div><span class="field-label">金额 / 币种</span><b>1,000.00 CNY</b></div>
+                <div><span class="field-label">付款方</span><b>被告乙（候选）</b></div>
+                <div><span class="field-label">收款方</span><b>原告甲（候选）</b></div>
+              </div>
+              <a class="source-link" href="#">候选交易 TX-C-0007 · 尚未进入正式台账</a>
+            </section>
+            <section class="review-section">
+              <h3>OCR 与坐标</h3>
+              <div class="ocr-extract">转账给：原告甲（合成昵称）<br>交易金额：CNY 1,000.00<br>交易单号：SYN-20220408-001</div>
+              <p class="coordinate">BBOX [76, 284, 423, 392] · ROTATION 0° · OCR 0.98</p>
+            </section>
+            <section class="review-section duplicate-box">
+              <h3>重复页判断</h3>
+              <p>p.48 与当前页的视觉哈希、文本及版式特征一致，归入 <b>DUP-G-002</b>。</p>
+              <div class="decision-row"><span class="decision-copy-sm">精确重复</span><span class="status-tag tag-review">待确认</span></div>
+              <div class="decision-row"><span class="decision-copy-sm">p.50 相似页</span><span class="status-tag tag-candidate">不得自动排除</span></div>
+            </section>
+            <section class="review-section derivative-box">
+              <h3>派生件预览</h3>
+              <p>确认后仅生成“相关页派生 PDF”；原件仍可回到本页，且会保留页码、坐标、哈希与处置理由。</p>
+              <p class="workbench-note">预计：保留 12 页 · 红框 1 处 · 处置清单 94 / 94</p>
+            </section>
+          </aside>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
