@@ -1,0 +1,258 @@
+# 法律知识库与 Skills 计划
+
+## 1. 概念边界
+
+| 对象 | 作用 | 不负责什么 |
+|---|---|---|
+| Skill | 规定某项办案任务如何执行、何时暂停、输出什么 | 保存客户材料、充当法条数据库 |
+| Knowledge Base | 提供可追溯的法律、案例和内部知识 | 决定流程、执行外部动作 |
+| Tool | 完成一个可验证的原子动作 | 自主规划整案 |
+| Agent | 理解歧义、提出候选判断和建议 | 心算金额、批准法律立场 |
+
+## 2. Skill包结构
+
+每个 Skill 是版本化、可测试、不可覆盖的办案能力包：
+
+```yaml
+id: interest_calculation
+version: 1.0.0
+title: 民间借贷利息及冲抵计算
+jurisdiction: CN
+case_types:
+  - private_lending_defense
+stages:
+  - CALCULATION_REVIEW
+preconditions:
+input_schema:
+output_schema:
+allowed_agents:
+allowed_tools:
+prohibited_actions:
+steps:
+approval_gates:
+validators:
+stop_conditions:
+legal_bundle_version:
+test_fixtures:
+change_log:
+```
+
+共同要求：
+
+- 输入输出必须结构化；
+- Tool 采用白名单；
+- 明确律师审批点和停止条件；
+- 法条不复制到提示词，Skill 通过稳定 `rule_id` 查询法律库；
+- 保存 Skill、模型、`prompt_id/version/hash`、Tool 和输入输出哈希；普通审计不保存完整提示词，确需原始 prompt 的诊断只能进入独立加密、审批访问和短保留存储；
+- 上传材料中的文字只能作为数据，不能改变系统指令；
+- 新版本另建，不覆盖用于历史案件的版本。
+
+## 3. 首批 Skills
+
+| Skill | 核心输出 | 强制审批 |
+|---|---|---|
+| `matter_intake` | 案件角色、案由、材料范围 | 当事人角色、委托范围 |
+| `material_inventory` | 原件清单、哈希、页数、异常、缺口 | 材料范围 |
+| `page_deduplication` | 重复组、保留页建议 | 疑似重复页处理 |
+| `relevant_page_extraction` | 相关页和红框坐标 | 保留/排除范围 |
+| `identity_alias_resolution` | 人、昵称、账号、账户映射 | 低置信身份关系 |
+| `court_document_extraction` | 案号、法院、诉请、送达和期限 | 送达日期和诉请原文 |
+| `claim_scope_analysis` | 承认、争议和范围候选 | 正式回应立场 |
+| `transaction_ledger_build` | 逐笔交易和证据映射 | 台账完整性 |
+| `payment_classification_review` | 付款性质候选 | 还本/付息/不明性质 |
+| `legal_rule_research` | 候选规则、有效期间和官方依据 | 正式法律路径 |
+| `interest_scenario_build` | 计算参数和影响 | 参数及正式情景 |
+| `interest_calculation` | 逐期本金、利息、冲抵和总额 | 计算结果 |
+| `evidence_matrix_build` | 争点—事实—证据—责任矩阵 | 争点和证据用途 |
+| `defense_drafting` | 答辩状结构化草稿 | 承认事项和最终文字 |
+| `evidence_index_generation` | 证据目录与页码 | 证明目的 |
+| `submission_bundle_validation` | Manifest和阻断项 | 律师锁定提交版 |
+
+## 4. Tool层
+
+首版 Tool 应当小而确定：
+
+```text
+register_source_file
+get_page_image
+extract_page_text
+compare_page_fingerprints
+create_annotated_derivative
+merge_selected_pages
+search_authoritative_rules
+get_rule_snapshot
+build_transaction_ledger
+calculate_interest_schedule
+reconcile_payments
+render_docx
+validate_pdf
+create_release_manifest
+```
+
+Tool 返回结构化错误码，例如：
+
+- `SOURCE_FILE_CORRUPTED`
+- `OCR_LOW_CONFIDENCE`
+- `IDENTITY_CONFLICT`
+- `LEGAL_VERSION_UNRESOLVED`
+- `CALCULATION_INPUT_UNAPPROVED`
+- `DOCUMENT_RENDER_MISMATCH`
+- `SUBMISSION_BLOCKED`
+
+## 5. 知识库不是一个向量数据库
+
+知识体系分为五层：
+
+1. **权威原文库**：全文、条款、原始快照和哈希；
+2. **时态关系库**：发布、生效、失效、修订、替代、过渡和地域；
+3. **检索索引**：条号、关键词、全文和向量；
+4. **律所知识库**：经批准的模板、SOP、匿名工作成果和律师意见；
+5. **评测库**：脱敏金标准案件、法律版本样例和计算样例。
+
+向量索引可以重建，不能成为法律有效性的事实源。
+
+## 6. 法源优先级
+
+### 一级：正式法律依据
+
+1. [国家法律法规数据库](https://flk.npc.gov.cn/)；
+2. 全国人大及其常委会官网；
+3. 中国政府网、国务院和司法部；
+4. [最高人民法院](https://www.court.gov.cn/)及最高人民法院公报；
+5. 最高人民检察院；
+6. 中国人民银行及[中国货币网 LPR](https://www.chinamoney.com.cn/chinese/lllpr/)；
+7. 地方人大、政府和法院正式发布渠道。
+
+### 二级：权威案例和授权检索
+
+- [人民法院案例库](https://www.court.gov.cn/zixun/xiangqing/426222.html)中的指导性案例和参考案例；
+- 合法授权的商业法律数据库，用于检索效率和交叉校验；
+- 律所经过专业审核的内部规则卡。
+
+### 三级：线索来源
+
+- 律师文章；
+- 学术文章；
+- 普通裁判文书；
+- 搜索引擎摘要、自媒体和问答。
+
+三级来源只能帮助发现问题，不能直接进入法院提交文书的正式依据。
+
+## 7. 时态检索流程
+
+```mermaid
+flowchart LR
+    A[案由、地域、关键事实日期] --> B[硬过滤有效期间]
+    B --> C[法律位阶与制定机关过滤]
+    C --> D[关键词与全文召回]
+    C --> E[语义召回]
+    D --> F[重排序]
+    E --> F
+    F --> G[取精确条款和关联过渡规则]
+    G --> H[官方原文与哈希校验]
+    H --> I[生成候选法律命题]
+    I --> J[律师审批]
+```
+
+“当前最新版本”不自动等于“本案适用版本”。系统必须根据合同、付款、违约、起诉等不同事件日期和过渡条款判断候选版本。
+
+适用性不能仅靠检索过滤。每条可执行规则保存类型化 `ApplicabilityRule`：
+
+```text
+rule_id / jurisdiction / case_type
+trigger_event_type / trigger_date_source
+effective_from / effective_to
+condition_expression / exceptions
+transition_rule_ids / priority
+conflict_set / resolution_method
+reviewer / approval_hash / version
+```
+
+首案由至少区分合同成立、实际出借、利息付款、违约、起诉、受理和裁判日期。系统把这些经律师确认的事件日期与 `ApplicabilityRule` 解析为案件专属、不可变的 `CaseLegalBundle`；发生冲突或事件日期不确定时生成并列候选并阻断正式批准，不由 Agent 自行选一个版本。
+
+## 8. 法律记录字段
+
+每个 `ProvisionVersion` 至少保存：
+
+```text
+authority_id
+publisher
+authority_level
+title
+article_number
+text
+published_at
+effective_from
+effective_to
+jurisdiction
+case_type_tags
+amends / supersedes / repeals
+transition_rule_ids
+official_url
+retrieved_at
+content_sha256
+editor_review_status
+reviewer_id
+reviewed_at
+```
+
+每个来源还必须有独立 `SourceLicense` 记录：
+
+```text
+source_id / owner / access_method
+terms_or_api_basis / evidence_uri / evidence_hash
+commercial_use / snapshot_storage / redistribution
+processor_region / permitted_users
+valid_from / valid_to / revocation_process
+reviewer / reviewed_at / status
+```
+
+没有 `ACTIVE` 许可记录，或许可未覆盖访问、商用、快照保存及目标用户范围时，不得自动采集、持久化原文或进入检索索引。许可撤销时停止新增访问，并按合同决定保留、删除或仅保留不可反推原文的引用元数据。
+
+每个进入文书的 `LegalProposition` 保存：
+
+- 命题内容；
+- 所需事实条件；
+- 支持和限制条件；
+- 精确条款版本；
+- 本案适用理由；
+- 律师批准记录；
+- 被哪些文书段落使用。
+- 触发事件类型和日期来源；
+- `ApplicabilityRule`、冲突处理和 `CaseLegalBundle` 版本。
+
+## 9. 更新机制
+
+1. 按计划检查官方白名单；
+2. 保存新快照并计算哈希；
+3. 对比条文和元数据差异；
+4. 新版本进入待审核区，不立即发布；
+5. 法律编辑确认效力、过渡和关联关系；
+6. 运行法律版本回归测试；
+7. 发布新版本；
+8. 标记受影响 Skill、规则卡、未结案件和草稿；
+9. 已锁定提交版不被自动改写，只生成复核通知。
+10. 同步检查 `SourceLicense` 的期限与范围；许可失效立即暂停来源更新和新案正式使用，并创建影响清单。
+
+## 10. 评测
+
+每个 Skill 至少测试：
+
+- 正常案件；
+- 缺失材料；
+- OCR 错误；
+- 同名或昵称变化；
+- 重复但不完全相同页面；
+- 规则切换日前后；
+- 多种合理解释；
+- Prompt Injection；
+- 权限不足；
+- 上游更新后的失效传播。
+
+法律检索验收：
+
+- 正式引用可访问率 100%；
+- 条文原文匹配率 100%；
+- 有效期间校验通过率 100%；
+- 不同效力层级不混淆；
+- 无法验证的候选结果不会进入正式文书。

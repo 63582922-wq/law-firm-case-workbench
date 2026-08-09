@@ -1,0 +1,43 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Real or private matter data must never enter Git
+private-data/
+client-data/
+matter-data/
+uploads/
+exports/
+backups/
+*.zip
+
+# Generated document and OCR artifacts
+artifacts/
+derived/
+ocr-cache/
+
+# Synthetic templates and rigorously anonymized fixtures may be versioned in
+# explicit project folders. Real matter files remain excluded by the private
+# data directories above and must also be blocked by pre-commit data checks.
+
+# Development output
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+coverage/
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local tools and OS
+.DS_Store
+.idea/
+.vscode/
+*.log
