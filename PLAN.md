@@ -134,6 +134,7 @@ AI 不应替代律师，而应降低律师在材料整理、事实核对、规�
 - 已建立私有远程 Git，基线提交 `cdc92e5` 已推送至 `main` 分支；从远端执行独立浅克隆后，文件数、计划哈希和 Git 完整性检查均通过。
 - 当前 GitHub 私有仓库套餐拒绝为该私有仓库启用分支保护；公开仓库不符合保密边界。因此在升级为支持私有仓保护的方案，或迁移至可自建保护规则的 Git 服务前，远端仅作恢复副本，生产代码不得直接合并到 `main`。
 - 恢复证据、适用范围和未完成项记录于 `docs/DEVELOPMENT_RECOVERY_BASELINE.md`。独立加密的非 Git 资产备份尚未配置；在其完成前，不得把真实案件材料或不可由 Git 重建的资产放入本项目。
+- 已准备可复现的田野研究、金标准、计算与法律规则、权限与外部调用、Phase 1 可用性测试契约，分别记录于 `research/PHASE_0_FIELD_PROTOCOL.md`、`docs/CALCULATION_AND_LEGAL_RULES_CONTRACT.md`、`docs/SECURITY_CONTROL_MATRICES.md` 和 `design/PHASE_1_USABILITY_PROTOCOL.md`；它们均待执业律师/安全负责人或真实研究证据确认。
 
 ### 工作
 
@@ -171,6 +172,7 @@ AI 不应替代律师，而应降低律师在材料整理、事实核对、规�
 - Phase 1 可用性测试协议、统一合成案件和观察记录模板；
 - 分域状态词典及 UI 文案/颜色/操作映射；
 - 开发资产备份矩阵、备份清单和首次恢复演练记录；
+- `docs/PHASE_0_EXECUTION_LEDGER.md` 及田野研究、金标准、计算/法律、权限/外部调用和可用性测试执行契约；
 - 本计划的评审记录。
 
 ### 阶段出口
