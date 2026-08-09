@@ -30,6 +30,12 @@ from case_kernel.evidence_manifest_postgres import (
 )
 from case_kernel.errors import IdempotencyConflict, VersionConflict
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
+from case_kernel.calculation_engine import AllocationPolicy
+from case_kernel.formal_calculation_postgres import (
+    FormalRuleSegmentInput,
+    PersistentFormalCalculationSnapshot,
+    PostgresFormalCalculationStore,
+)
 from case_kernel.models import Actor
 from case_kernel.local_access_grants import LocalSessionProof
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
@@ -79,6 +85,8 @@ from .schemas import (
     PersistentFactCandidateRequest,
     PersistentFactDecisionRequest,
     PersistentFactResponse,
+    PersistentFormalCalculationRequest,
+    PersistentFormalCalculationSnapshotResponse,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
 )
@@ -152,11 +160,23 @@ class PersistentEvidenceManifestPort(Protocol):
     def get_verified_derivative_locator(self, *, matter_id: str, derivative_id: str, actor: Actor): ...
 
 
+class PersistentFormalCalculationPort(Protocol):
+    def create_formal_calculation(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_current_calculation(
+        self, *, matter_id: str, obligation_id: str, actor: Actor
+    ) -> PersistentFormalCalculationSnapshot: ...
+
+
 class PersistentRequestBlocked(ValueError):
     pass
 
 
 class PersistentEvidenceServiceUnavailable(RuntimeError):
+    pass
+
+
+class PersistentCalculationServiceUnavailable(RuntimeError):
     pass
 
 
@@ -166,6 +186,7 @@ class PersistentApiDependencies:
     case_ledger_store: PersistentFactLedgerPort
     identity_resolver: ServerIdentityResolver
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
+    formal_calculation_store: PersistentFormalCalculationPort | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
 
@@ -182,6 +203,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.evidence_manifest_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL evidence Manifest store")
+        if self.formal_calculation_store is not None and not isinstance(
+            self.formal_calculation_store, PostgresFormalCalculationStore
+        ):
+            if not getattr(self.formal_calculation_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL formal calculation store")
         if (self.artifact_access_broker is None) != (self.artifact_store is None):
             raise ValueError("artifact access broker and encrypted artifact store must be configured together")
         if self.artifact_access_broker is not None and self.evidence_manifest_store is None:
@@ -219,6 +245,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "mode": "postgres-internal-preview",
             "persistence": "configured-not-probed",
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
+            "formal_calculation": "configured" if dependencies.formal_calculation_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
         }
 
@@ -241,6 +268,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         if dependencies.evidence_manifest_store is None:
             raise PersistentEvidenceServiceUnavailable("evidence Manifest persistence is not configured")
         return dependencies.evidence_manifest_store
+
+    def get_formal_calculation_store() -> PersistentFormalCalculationPort:
+        if dependencies.formal_calculation_store is None:
+            raise PersistentCalculationServiceUnavailable(
+                "formal calculation persistence is not configured"
+            )
+        return dependencies.formal_calculation_store
 
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
@@ -313,6 +347,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "证据持久化服务尚未启用，未回退到合成数据。",
         )
 
+    @app.exception_handler(PersistentCalculationServiceUnavailable)
+    async def calculation_service_handler(_: Request, exc: PersistentCalculationServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "FORMAL_CALCULATION_SERVICE_UNAVAILABLE",
+            "正式利息计算服务尚未启用，未回退到合成测算。",
+        )
+
     @app.exception_handler(ManagedArtifactBlocked)
     async def managed_artifact_handler(_: Request, exc: ManagedArtifactBlocked):
         del exc
@@ -358,6 +401,68 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             )
             for fact in facts
         )
+
+    @app.get(
+        "/v1/matters/{matter_id}/calculations/{obligation_id}/current",
+        response_model=PersistentFormalCalculationSnapshotResponse,
+        tags=["formal-calculation"],
+    )
+    async def get_current_formal_calculation(
+        matter_id: UUID,
+        obligation_id: str,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        calculation_store: Annotated[
+            PersistentFormalCalculationPort, Depends(get_formal_calculation_store)
+        ],
+    ) -> PersistentFormalCalculationSnapshotResponse:
+        snapshot = calculation_store.get_current_calculation(
+            matter_id=str(matter_id),
+            obligation_id=obligation_id,
+            actor=identity.actor,
+        )
+        return PersistentFormalCalculationSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/formal-calculations",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["formal-calculation"],
+    )
+    async def create_formal_calculation(
+        matter_id: UUID,
+        body: PersistentFormalCalculationRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        calculation_store: Annotated[
+            PersistentFormalCalculationPort, Depends(get_formal_calculation_store)
+        ],
+    ) -> CaseLedgerReceiptResponse:
+        receipt = calculation_store.create_formal_calculation(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
+            obligation_id=body.obligation_id,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            legal_bundle_id=str(body.legal_bundle_id),
+            legal_bundle_hash=body.legal_bundle_hash,
+            allocation_policy=AllocationPolicy(body.allocation_policy),
+            rule_segments=tuple(
+                FormalRuleSegmentInput(
+                    segment_id=str(segment.segment_id),
+                    start_date=segment.start_date,
+                    end_date=segment.end_date,
+                    annual_rate=segment.annual_rate,
+                    source_rule_version=segment.source_rule_version,
+                    applicability_anchor=segment.applicability_anchor,
+                    approval_hash=segment.approval_hash,
+                )
+                for segment in body.rule_segments
+            ),
+            approval_hash=body.approval_hash,
+        )
+        return _receipt(receipt)
 
     @app.post(
         "/v1/matters/{matter_id}/facts",

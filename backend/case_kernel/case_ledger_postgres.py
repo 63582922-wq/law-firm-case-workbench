@@ -2097,7 +2097,36 @@ def _finish_command(
     object_id: str,
     audit_payload: dict[str, Any],
     stale_submission: bool,
+    stale_calculations: bool | None = None,
 ) -> CaseLedgerCommandReceipt:
+    if stale_calculations is None:
+        stale_calculations = stale_submission
+    if stale_calculations:
+        stale_reason = "上游案件事实、证据或交易发生正式变化。"
+        connection.execute(
+            """
+            UPDATE calculation_runs
+            SET status = 'STALE', stale_at = now(), stale_reason = %s
+            WHERE matter_id = %s AND firm_id = %s AND status = 'VERIFIED'
+            """,
+            (stale_reason, matter_id, actor.firm_id),
+        )
+        connection.execute(
+            """
+            UPDATE calculation_scenarios
+            SET status = 'STALE', stale_at = now(), stale_reason = %s
+            WHERE matter_id = %s AND firm_id = %s AND status = 'APPROVED'
+            """,
+            (stale_reason, matter_id, actor.firm_id),
+        )
+        connection.execute(
+            """
+            UPDATE case_legal_bundles
+            SET status = 'STALE', stale_at = now(), stale_reason = %s
+            WHERE matter_id = %s AND firm_id = %s AND status = 'APPROVED'
+            """,
+            (stale_reason, matter_id, actor.firm_id),
+        )
     if stale_submission:
         connection.execute(
             """

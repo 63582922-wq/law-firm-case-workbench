@@ -14,6 +14,7 @@ from case_api.persistent_identity import AuthenticationMethod, ServerIdentityCon
 from case_kernel.artifact_access import EphemeralArtifactAccessBroker, VerifiedDerivativeLocator
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
 from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
+from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
@@ -159,6 +160,90 @@ class FakePersistentEvidenceStore:
             object_id=str(uuid4()),
         )
 
+
+class FakePersistentFormalCalculationStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.scenario_id = str(uuid4())
+        self.run_id = str(uuid4())
+        self.bundle_id = str(uuid4())
+        self.segment_id = str(uuid4())
+
+    def create_formal_calculation(self, **kwargs):
+        self.calls.append(("create_formal_calculation", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CREATE_FORMAL_CALCULATION",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="CALCULATION_RUN",
+            object_id=self.run_id,
+        )
+
+    def get_current_calculation(self, *, matter_id: str, obligation_id: str, actor: Actor):
+        self.calls.append(
+            (
+                "get_current_calculation",
+                {"matter_id": matter_id, "obligation_id": obligation_id, "actor": actor},
+            )
+        )
+        return PersistentFormalCalculationSnapshot(
+            matter_id=matter_id,
+            matter_version=6,
+            scenario={
+                "scenario_id": self.scenario_id,
+                "obligation_id": obligation_id,
+                "version": 1,
+                "start_date": "2020-01-01",
+                "end_date": "2021-01-01",
+                "currency": "CNY",
+                "allocation_policy": "INTEREST_THEN_PRINCIPAL",
+                "legal_bundle_id": self.bundle_id,
+                "legal_bundle_hash": "a" * 64,
+                "transaction_snapshot_hash": "b" * 64,
+                "input_hash": "c" * 64,
+                "approved_by": actor.actor_id,
+                "approval_hash": "d" * 64,
+            },
+            run={
+                "run_id": self.run_id,
+                "scenario_id": self.scenario_id,
+                "scenario_version": 1,
+                "engine_version": "lawcase-calc-1",
+                "legal_bundle_id": self.bundle_id,
+                "legal_bundle_hash": "a" * 64,
+                "input_hash": "c" * 64,
+                "output_hash": "e" * 64,
+                "independent_check_hash": "f" * 64,
+                "total_interest_accrued": "1200.00",
+                "total_interest_paid": "1000.00",
+                "remaining_principal": "10000.00",
+                "remaining_unpaid_interest": "200.00",
+                "unapplied_payments": "0.00",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "line_items": (
+                    {
+                        "line_sequence": 1,
+                        "period_start": "2020-01-01",
+                        "period_end": "2021-01-01",
+                        "opening_principal": "10000.00",
+                        "annual_rate": "0.12",
+                        "day_count": 366,
+                        "accrued_interest": "1200.00",
+                        "closing_principal": "10000.00",
+                        "accrued_unpaid_interest": "200.00",
+                        "rule_segment_id": self.segment_id,
+                        "source_rule_version": "SYNTHETIC-RULE-2020",
+                        "evidence_ids": ("synthetic-evidence",),
+                    },
+                ),
+                "payment_allocations": (),
+            },
+            snapshot_hash="9" * 64,
+        )
 
 class PersistentApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -466,6 +551,123 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(call["manifest_id"], manifest_id)
         self.assertEqual(call["expected_version"], 5)
         self.assertEqual(call["manifest_content_hash"], "8" * 64)
+
+    def test_formal_calculation_routes_fail_closed_without_formal_store(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(
+            f"/v1/matters/{self.matter_id}/calculations/synthetic-obligation/current"
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "FORMAL_CALCULATION_SERVICE_UNAVAILABLE")
+
+    def test_formal_calculation_read_and_command_are_identity_version_and_rule_bound(self) -> None:
+        calculation_store = FakePersistentFormalCalculationStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    formal_calculation_store=calculation_store,
+                )
+            )
+        )
+        current = client.get(
+            f"/v1/matters/{self.matter_id}/calculations/synthetic-obligation/current"
+        )
+        self.assertEqual(current.status_code, 200, current.text)
+        self.assertEqual(current.json()["run"]["engine_version"], "lawcase-calc-1")
+        self.assertEqual(current.json()["scenario"]["currency"], "CNY")
+
+        segment_id = str(uuid4())
+        created = client.post(
+            f"/v1/matters/{self.matter_id}/formal-calculations",
+            headers={"Idempotency-Key": "formal-calculation-api-001"},
+            json={
+                "expected_version": 6,
+                "obligation_id": "synthetic-obligation",
+                "start_date": "2020-01-01",
+                "end_date": "2021-01-01",
+                "legal_bundle_id": calculation_store.bundle_id,
+                "legal_bundle_hash": "a" * 64,
+                "allocation_policy": "INTEREST_THEN_PRINCIPAL",
+                "rule_segments": [
+                    {
+                        "segment_id": segment_id,
+                        "start_date": "2020-01-01",
+                        "end_date": "2021-01-01",
+                        "annual_rate": "0.12",
+                        "source_rule_version": "SYNTHETIC-RULE-2020",
+                        "applicability_anchor": "synthetic approved event",
+                        "approval_hash": "b" * 64,
+                    }
+                ],
+                "approval_hash": "c" * 64,
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        call = next(item for item in calculation_store.calls if item[0] == "create_formal_calculation")[1]
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["expected_version"], 6)
+        self.assertEqual(call["allocation_policy"].value, "INTEREST_THEN_PRINCIPAL")
+        self.assertEqual(call["rule_segments"][0].segment_id, segment_id)
+
+    def test_formal_calculation_rejects_gapped_rule_segments_before_store_call(self) -> None:
+        calculation_store = FakePersistentFormalCalculationStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    formal_calculation_store=calculation_store,
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/formal-calculations",
+            headers={"Idempotency-Key": "formal-calculation-api-gap"},
+            json={
+                "expected_version": 6,
+                "obligation_id": "synthetic-obligation",
+                "start_date": "2020-01-01",
+                "end_date": "2021-01-01",
+                "legal_bundle_id": calculation_store.bundle_id,
+                "legal_bundle_hash": "a" * 64,
+                "allocation_policy": "INTEREST_THEN_PRINCIPAL",
+                "rule_segments": [
+                    {
+                        "segment_id": str(uuid4()),
+                        "start_date": "2020-01-01",
+                        "end_date": "2020-06-01",
+                        "annual_rate": "0.12",
+                        "source_rule_version": "SYNTHETIC-RULE-1",
+                        "applicability_anchor": "synthetic approved event",
+                        "approval_hash": "b" * 64,
+                    },
+                    {
+                        "segment_id": str(uuid4()),
+                        "start_date": "2020-06-02",
+                        "end_date": "2021-01-01",
+                        "annual_rate": "0.10",
+                        "source_rule_version": "SYNTHETIC-RULE-2",
+                        "applicability_anchor": "synthetic approved event",
+                        "approval_hash": "c" * 64,
+                    },
+                ],
+                "approval_hash": "d" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertFalse(any(name == "create_formal_calculation" for name, _ in calculation_store.calls))
 
 
 if __name__ == "__main__":

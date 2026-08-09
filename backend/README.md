@@ -17,6 +17,8 @@
 
 `POST /v1/calculation-previews` 仅返回**非持久化的合成预览**，不是正式 `CalculationRun`，不支持真实身份或真实案卷。其调用者仍必须在生产实现中先完成法律规则、适用期间、付款性质与冲抵顺序的权限化审批；本 Alpha API 的 `X-Alpha-Actor` 只是一份固定测试选择器，绝非认证机制。
 
+独立的持久化预览 API 已提供正式计算读写边界：正式运行只由数据库中已确认交易、已批准付款分类和当前已批准案件法律规则包生成，保存逐期本金/利息、逐笔冲抵及独立复算哈希；服务或正式运行缺失时返回明确阻断，不会调用上述合成预览作为替代。官方法源快照登记与法律规则包审批命令仍未完成，因此该边界尚不能用于真实办案。
+
 `PostgresMatterStore` 的使用契约和显式破坏性测试门见 [`docs/POSTGRES_INTEGRATION_CONTRACT.md`](../docs/POSTGRES_INTEGRATION_CONTRACT.md)。它只接受 UUID 标识，故 Alpha 的 `alpha_*` 调用不会触发数据库连接。
 
 后续替换内存仓库为 PostgreSQL 时，必须保持同样的 Command、版本、幂等和审计语义，并补充数据库事务、RLS 和持久化 Outbox。不得将此目录的内存实现误用于生产。

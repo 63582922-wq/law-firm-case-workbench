@@ -660,3 +660,114 @@ class PersistentArtifactAccessResponse(BaseModel):
     purpose: Literal["INLINE_PREVIEW", "DOWNLOAD"]
     access_token: str = Field(min_length=20, max_length=200)
     expires_at: datetime
+
+
+class PersistentFormalRuleSegmentRequest(BaseModel):
+    segment_id: UUID
+    start_date: date
+    end_date: date
+    annual_rate: Decimal = Field(ge=0, le=1, max_digits=18, decimal_places=12)
+    source_rule_version: str = Field(min_length=1, max_length=240)
+    applicability_anchor: str = Field(min_length=1, max_length=500)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def interval_is_non_empty(self):
+        if self.start_date >= self.end_date:
+            raise ValueError("formal rule segment interval must be non-empty")
+        return self
+
+
+class PersistentFormalCalculationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    obligation_id: str = Field(min_length=1, max_length=240)
+    start_date: date
+    end_date: date
+    legal_bundle_id: UUID
+    legal_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    allocation_policy: Literal["INTEREST_THEN_PRINCIPAL", "PRINCIPAL_THEN_INTEREST"]
+    rule_segments: list[PersistentFormalRuleSegmentRequest] = Field(min_length=1, max_length=500)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def interval_and_segments_match(self):
+        if self.start_date >= self.end_date:
+            raise ValueError("formal calculation interval must be non-empty")
+        ordered = sorted(self.rule_segments, key=lambda item: (item.start_date, item.end_date))
+        if ordered[0].start_date != self.start_date or ordered[-1].end_date != self.end_date:
+            raise ValueError("formal rule segments must cover the requested calculation interval")
+        for previous, current in zip(ordered, ordered[1:]):
+            if previous.end_date != current.start_date:
+                raise ValueError("formal rule segments must be continuous without gaps or overlap")
+        return self
+
+
+class PersistentFormalCalculationLineItemResponse(BaseModel):
+    line_sequence: int = Field(ge=1)
+    period_start: date
+    period_end: date
+    opening_principal: Decimal
+    annual_rate: Decimal
+    day_count: int = Field(ge=1)
+    accrued_interest: Decimal
+    closing_principal: Decimal
+    accrued_unpaid_interest: Decimal
+    rule_segment_id: UUID
+    source_rule_version: str
+    evidence_ids: tuple[str, ...]
+
+
+class PersistentFormalCalculationAllocationResponse(BaseModel):
+    allocation_sequence: int = Field(ge=1)
+    payment_event_id: str
+    effective_date: date
+    payment_amount: Decimal
+    allocated_interest: Decimal
+    allocated_principal: Decimal
+    unapplied_amount: Decimal
+    payment_application: str
+    evidence_ids: tuple[str, ...]
+
+
+class PersistentFormalCalculationScenarioResponse(BaseModel):
+    scenario_id: UUID
+    obligation_id: str
+    version: int = Field(ge=1)
+    start_date: date
+    end_date: date
+    currency: Literal["CNY"]
+    allocation_policy: str
+    legal_bundle_id: UUID
+    legal_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    transaction_snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_by: UUID
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentFormalCalculationRunResponse(BaseModel):
+    run_id: UUID
+    scenario_id: UUID
+    scenario_version: int = Field(ge=1)
+    engine_version: str
+    legal_bundle_id: UUID
+    legal_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    independent_check_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    total_interest_accrued: Decimal
+    total_interest_paid: Decimal
+    remaining_principal: Decimal
+    remaining_unpaid_interest: Decimal
+    unapplied_payments: Decimal
+    generated_at: datetime
+    line_items: tuple[PersistentFormalCalculationLineItemResponse, ...]
+    payment_allocations: tuple[PersistentFormalCalculationAllocationResponse, ...]
+
+
+class PersistentFormalCalculationSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    scenario: PersistentFormalCalculationScenarioResponse | None
+    run: PersistentFormalCalculationRunResponse | None
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

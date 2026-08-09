@@ -2,6 +2,7 @@ from unittest.mock import patch
 import unittest
 
 from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
+from case_kernel.formal_calculation_postgres import PostgresFormalCalculationStore
 from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.runtime import (
     RuntimeConfigurationBlocked,
@@ -22,6 +23,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertEqual(settings.mode, RuntimeMode.SYNTHETIC_ALPHA)
         self.assertIsInstance(services.matter_store, InMemoryMatterStore)
         self.assertIsNone(services.case_ledger_store)
+        self.assertIsNone(services.formal_calculation_store)
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()
 
@@ -62,6 +64,7 @@ class RuntimeSettingsTests(unittest.TestCase):
             services = build_runtime_services(settings)
         self.assertIsInstance(services.matter_store, PostgresMatterStore)
         self.assertIsInstance(services.case_ledger_store, PostgresCaseLedgerStore)
+        self.assertIsInstance(services.formal_calculation_store, PostgresFormalCalculationStore)
         self.assertNotIn("synthetic-password", repr(settings))
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()

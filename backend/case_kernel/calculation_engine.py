@@ -225,7 +225,7 @@ def calculate(scenario: CalculationScenario) -> CalculationRun:
         run_id=f"calculation_run_{uuid4().hex}",
         scenario_id=scenario.scenario_id,
         scenario_version=scenario.version,
-        engine_version="synthetic-alpha-calc-1",
+        engine_version="lawcase-calc-1",
         legal_bundle_id=scenario.legal_bundle.bundle_id,
         legal_bundle_hash=scenario.legal_bundle.bundle_hash,
         input_hash=input_hash,

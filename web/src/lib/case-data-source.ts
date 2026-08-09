@@ -1,4 +1,8 @@
-import { alphaCalculationApiBase } from "@/lib/synthetic-calculation";
+import {
+  alphaCalculationApiBase,
+  alphaCalculationPreviewRequest,
+  type CalculationPreview,
+} from "@/lib/synthetic-calculation";
 import { syntheticMatter } from "@/lib/synthetic-matter";
 
 export type CaseDataSourceConfig =
@@ -61,6 +65,56 @@ export type EvidenceDerivativeRunReceipt = {
   requestId: string | null;
 };
 
+export type CalculationReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  status: "ready" | "empty";
+  emptyReason: string | null;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  obligationId: string | null;
+  startDate: string | null;
+  endDate: string | null;
+  currency: "CNY";
+  allocationPolicy: string | null;
+  legalBundleId: string | null;
+  legalBundleHash: string | null;
+  approvalHash: string | null;
+  engineVersion: string | null;
+  independentCheckMatch: boolean;
+  totalInterestAccrued: string | null;
+  totalInterestPaid: string | null;
+  remainingPrincipal: string | null;
+  remainingUnpaidInterest: string | null;
+  unappliedPayments: string | null;
+  lineItems: {
+    lineSequence: number;
+    periodStart: string;
+    periodEnd: string;
+    openingPrincipal: string;
+    annualRate: string;
+    dayCount: number;
+    accruedInterest: string;
+    closingPrincipal: string;
+    accruedUnpaidInterest: string;
+    ruleSegmentId: string;
+    sourceRuleVersion: string;
+    evidenceIds: string[];
+  }[];
+  paymentAllocations: {
+    allocationSequence: number;
+    paymentEventId: string;
+    effectiveDate: string;
+    paymentAmount: string;
+    allocatedInterest: string;
+    allocatedPrincipal: string;
+    unappliedAmount: string;
+    paymentApplication: string;
+    evidenceIds: string[];
+  }[];
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -102,6 +156,60 @@ type PersistentEvidenceSnapshot = {
   locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
   derivatives: { derivative_id: string; artifact_type: string; artifact_sha256: string; page_count: number; status: string }[];
   derivative_runs: { run_id: string; manifest_id: string; status: string; attempt_count: number; failure_code: string | null }[];
+};
+
+type PersistentFormalCalculationSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  scenario: {
+    scenario_id: string;
+    obligation_id: string;
+    version: number;
+    start_date: string;
+    end_date: string;
+    currency: "CNY";
+    allocation_policy: string;
+    legal_bundle_id: string;
+    legal_bundle_hash: string;
+    approval_hash: string;
+  } | null;
+  run: {
+    engine_version: string;
+    legal_bundle_id: string;
+    legal_bundle_hash: string;
+    independent_check_hash: string;
+    total_interest_accrued: string;
+    total_interest_paid: string;
+    remaining_principal: string;
+    remaining_unpaid_interest: string;
+    unapplied_payments: string;
+    line_items: {
+      line_sequence: number;
+      period_start: string;
+      period_end: string;
+      opening_principal: string;
+      annual_rate: string;
+      day_count: number;
+      accrued_interest: string;
+      closing_principal: string;
+      accrued_unpaid_interest: string;
+      rule_segment_id: string;
+      source_rule_version: string;
+      evidence_ids: string[];
+    }[];
+    payment_allocations: {
+      allocation_sequence: number;
+      payment_event_id: string;
+      effective_date: string;
+      payment_amount: string;
+      allocated_interest: string;
+      allocated_principal: string;
+      unapplied_amount: string;
+      payment_application: string;
+      evidence_ids: string[];
+    }[];
+  } | null;
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -161,6 +269,47 @@ export async function loadEvidenceReview(config: CaseDataSourceConfig = caseData
   const payload = (await response.json()) as PersistentEvidenceSnapshot | ErrorEnvelope;
   if (!response.ok || !("pages" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化证据快照不可用"));
   return mapPersistentEvidence(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function loadCalculationReview(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+  persistentObligationId: string | undefined = process.env.NEXT_PUBLIC_PERSISTENT_OBLIGATION_ID,
+): Promise<CalculationReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") {
+    const response = await fetch(`${alphaCalculationApiBase}/v1/calculation-previews`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Alpha-Actor": "alpha_lead_lawyer" },
+      body: JSON.stringify(alphaCalculationPreviewRequest),
+    });
+    const payload = (await response.json()) as CalculationPreview | ErrorEnvelope;
+    if (!response.ok || !("independent_check_match" in payload)) {
+      throw new Error(errorMessage(payload as ErrorEnvelope, "本机合成计算服务未返回可核验结果"));
+    }
+    return mapSyntheticCalculation(payload, response.headers.get("X-Request-ID"));
+  }
+  const obligationId = persistentObligationId?.trim() || "";
+  if (!obligationId) {
+    return emptyPersistentCalculation("尚未选择需要计算的债务单元；系统未显示任何演示金额。", null, null);
+  }
+  const response = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/calculations/${encodeURIComponent(obligationId)}/current`,
+    { credentials: "include", headers: { Accept: "application/json" }, cache: "no-store" },
+  );
+  const payload = (await response.json()) as PersistentFormalCalculationSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "正式利息计算快照不可用"));
+  }
+  if (!payload.scenario || !payload.run) {
+    return emptyPersistentCalculation(
+      "当前债务单元尚无经律师批准并完成独立复算的正式计算。",
+      payload.matter_version,
+      payload.snapshot_hash,
+      response.headers.get("X-Request-ID"),
+      obligationId,
+    );
+  }
+  return mapPersistentCalculation(payload, response.headers.get("X-Request-ID"));
 }
 
 export async function fetchEvidenceDerivative(
@@ -382,6 +531,150 @@ function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: s
     lockedManifest: payload.locked_manifest ? { manifestId: payload.locked_manifest.manifest_id, contentHash: payload.locked_manifest.content_hash, totalPages: payload.locked_manifest.total_pages, includedPages: payload.locked_manifest.included_pages, excludedPages: payload.locked_manifest.excluded_pages } : null,
     derivatives: payload.derivatives.map((item) => ({ derivativeId: item.derivative_id, artifactType: item.artifact_type, artifactSha256: item.artifact_sha256, pageCount: item.page_count, status: item.status })),
     derivativeRuns: payload.derivative_runs.map((item) => ({ runId: item.run_id, manifestId: item.manifest_id, status: item.status, attemptCount: item.attempt_count, failureCode: item.failure_code })),
+  };
+}
+
+function mapSyntheticCalculation(payload: CalculationPreview, requestId: string | null): CalculationReviewView {
+  return {
+    sourceKind: "synthetic-alpha",
+    sourceLabel: "本机合成数据",
+    status: "ready",
+    emptyReason: null,
+    matterVersion: null,
+    snapshotHash: payload.output_hash,
+    requestId,
+    obligationId: "alpha_obligation_001",
+    startDate: alphaCalculationPreviewRequest.start_date,
+    endDate: alphaCalculationPreviewRequest.end_date,
+    currency: "CNY",
+    allocationPolicy: alphaCalculationPreviewRequest.allocation_policy,
+    legalBundleId: payload.legal_bundle_id,
+    legalBundleHash: payload.legal_bundle_hash,
+    approvalHash: alphaCalculationPreviewRequest.approval_hash,
+    engineVersion: payload.engine_version,
+    independentCheckMatch: payload.independent_check_match,
+    totalInterestAccrued: payload.total_interest_accrued,
+    totalInterestPaid: payload.total_interest_paid,
+    remainingPrincipal: payload.remaining_principal,
+    remainingUnpaidInterest: payload.remaining_unpaid_interest,
+    unappliedPayments: payload.unapplied_payments,
+    lineItems: payload.line_items.map((item, index) => ({
+      lineSequence: index + 1,
+      periodStart: item.period_start,
+      periodEnd: item.period_end,
+      openingPrincipal: item.opening_principal,
+      annualRate: item.annual_rate,
+      dayCount: item.day_count,
+      accruedInterest: item.accrued_interest,
+      closingPrincipal: item.closing_principal,
+      accruedUnpaidInterest: item.accrued_unpaid_interest,
+      ruleSegmentId: item.rule_segment_id,
+      sourceRuleVersion: item.source_rule_version,
+      evidenceIds: item.evidence_ids,
+    })),
+    paymentAllocations: payload.payment_allocations.map((item, index) => ({
+      allocationSequence: index + 1,
+      paymentEventId: item.payment_event_id,
+      effectiveDate: item.effective_date,
+      paymentAmount: item.payment_amount,
+      allocatedInterest: item.allocated_interest,
+      allocatedPrincipal: item.allocated_principal,
+      unappliedAmount: item.unapplied_amount,
+      paymentApplication: "BY_POLICY",
+      evidenceIds: item.evidence_ids,
+    })),
+  };
+}
+
+function mapPersistentCalculation(
+  payload: PersistentFormalCalculationSnapshot,
+  requestId: string | null,
+): CalculationReviewView {
+  const scenario = payload.scenario!;
+  const run = payload.run!;
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "持久化内部预览",
+    status: "ready",
+    emptyReason: null,
+    matterVersion: payload.matter_version,
+    snapshotHash: payload.snapshot_hash,
+    requestId,
+    obligationId: scenario.obligation_id,
+    startDate: scenario.start_date,
+    endDate: scenario.end_date,
+    currency: scenario.currency,
+    allocationPolicy: scenario.allocation_policy,
+    legalBundleId: scenario.legal_bundle_id,
+    legalBundleHash: scenario.legal_bundle_hash,
+    approvalHash: scenario.approval_hash,
+    engineVersion: run.engine_version,
+    independentCheckMatch: Boolean(run.independent_check_hash),
+    totalInterestAccrued: run.total_interest_accrued,
+    totalInterestPaid: run.total_interest_paid,
+    remainingPrincipal: run.remaining_principal,
+    remainingUnpaidInterest: run.remaining_unpaid_interest,
+    unappliedPayments: run.unapplied_payments,
+    lineItems: run.line_items.map((item) => ({
+      lineSequence: item.line_sequence,
+      periodStart: item.period_start,
+      periodEnd: item.period_end,
+      openingPrincipal: item.opening_principal,
+      annualRate: item.annual_rate,
+      dayCount: item.day_count,
+      accruedInterest: item.accrued_interest,
+      closingPrincipal: item.closing_principal,
+      accruedUnpaidInterest: item.accrued_unpaid_interest,
+      ruleSegmentId: item.rule_segment_id,
+      sourceRuleVersion: item.source_rule_version,
+      evidenceIds: item.evidence_ids,
+    })),
+    paymentAllocations: run.payment_allocations.map((item) => ({
+      allocationSequence: item.allocation_sequence,
+      paymentEventId: item.payment_event_id,
+      effectiveDate: item.effective_date,
+      paymentAmount: item.payment_amount,
+      allocatedInterest: item.allocated_interest,
+      allocatedPrincipal: item.allocated_principal,
+      unappliedAmount: item.unapplied_amount,
+      paymentApplication: item.payment_application,
+      evidenceIds: item.evidence_ids,
+    })),
+  };
+}
+
+function emptyPersistentCalculation(
+  reason: string,
+  matterVersion: number | null,
+  snapshotHash: string | null,
+  requestId: string | null = null,
+  obligationId: string | null = null,
+): CalculationReviewView {
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "持久化内部预览",
+    status: "empty",
+    emptyReason: reason,
+    matterVersion,
+    snapshotHash,
+    requestId,
+    obligationId,
+    startDate: null,
+    endDate: null,
+    currency: "CNY",
+    allocationPolicy: null,
+    legalBundleId: null,
+    legalBundleHash: null,
+    approvalHash: null,
+    engineVersion: null,
+    independentCheckMatch: false,
+    totalInterestAccrued: null,
+    totalInterestPaid: null,
+    remainingPrincipal: null,
+    remainingUnpaidInterest: null,
+    unappliedPayments: null,
+    lineItems: [],
+    paymentAllocations: [],
   };
 }
 
