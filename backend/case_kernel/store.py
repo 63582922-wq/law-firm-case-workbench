@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from threading import RLock
-from typing import Callable
+from typing import Callable, Protocol
 
 from .errors import IdempotencyConflict, VersionConflict
 from .models import Actor, AuditEvent, CommandReceipt, Matter
@@ -17,6 +17,28 @@ from .models import Actor, AuditEvent, CommandReceipt, Matter
 class StoredCommand:
     payload_hash: str
     receipt: CommandReceipt
+
+
+class MatterStore(Protocol):
+    """Persistence port. Concrete adapters must preserve one-transaction command semantics."""
+
+    def create(self, *, matter: Matter, actor: Actor, idempotency_key: str) -> CommandReceipt: ...
+
+    def get(self, matter_id: str, *, firm_id: str | None = None) -> Matter: ...
+
+    def audit_events(self, matter_id: str, *, firm_id: str | None = None) -> list[AuditEvent]: ...
+
+    def mutate(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        command_name: str,
+        idempotency_key: str,
+        expected_version: int,
+        payload: dict[str, str],
+        mutate_matter: Callable[[Matter], AuditEvent],
+    ) -> CommandReceipt: ...
 
 
 class InMemoryMatterStore:
@@ -64,19 +86,21 @@ class InMemoryMatterStore:
             self._commands[command_key] = StoredCommand(payload_hash, receipt)
             return receipt
 
-    def get(self, matter_id: str) -> Matter:
+    def get(self, matter_id: str, *, firm_id: str | None = None) -> Matter:
         with self._lock:
-            return deepcopy(self._matters[matter_id])
+            matter = self._matters[matter_id]
+            return deepcopy(matter)
 
-    def audit_events(self, matter_id: str) -> list[AuditEvent]:
+    def audit_events(self, matter_id: str, *, firm_id: str | None = None) -> list[AuditEvent]:
         with self._lock:
+            matter = self._matters[matter_id]
             return [deepcopy(event) for event in self._audit_events if event.matter_id == matter_id]
 
     def mutate(
         self,
         *,
         matter_id: str,
-        actor_id: str,
+        actor: Actor,
         command_name: str,
         idempotency_key: str,
         expected_version: int,
@@ -88,7 +112,7 @@ class InMemoryMatterStore:
         payload_hash = sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        command_key = (actor_id, matter_id, command_name, idempotency_key)
+        command_key = (actor.actor_id, matter_id, command_name, idempotency_key)
 
         with self._lock:
             prior = self._commands.get(command_key)

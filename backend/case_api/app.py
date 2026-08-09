@@ -228,9 +228,7 @@ def create_app(
 
     @app.get("/v1/matters/{matter_id}", response_model=MatterResponse, tags=["matters"])
     async def get_matter(matter_id: str, actor: Annotated[Actor, Depends(get_synthetic_actor)]) -> MatterResponse:
-        matter = workflow._store.get(matter_id)  # Read-only Alpha adapter; repository port replaces this in Phase 2 persistence work.
-        if matter.firm_id != actor.firm_id:
-            raise AuthorizationDenied("actor does not belong to the matter's firm")
+        matter = workflow.get_matter(actor, matter_id=matter_id)
         return to_matter_response(matter)
 
     @app.post("/v1/matters/{matter_id}/advance", response_model=ReceiptResponse, tags=["matters"])

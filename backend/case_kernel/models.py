@@ -106,7 +106,7 @@ class AuditEvent:
         payload: Mapping[str, str],
     ) -> "AuditEvent":
         return cls(
-            event_id=f"audit_{uuid4().hex}",
+            event_id=str(uuid4()),
             matter_id=matter.matter_id,
             firm_id=matter.firm_id,
             actor_id=actor.actor_id,

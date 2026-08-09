@@ -17,7 +17,7 @@ from .models import (
     SubmissionLifecycle,
     SubmissionValidity,
 )
-from .store import InMemoryMatterStore
+from .store import MatterStore
 
 
 FORWARD_TRANSITIONS: dict[MatterStage, MatterStage] = {
@@ -47,8 +47,13 @@ INVALIDATION_TARGETS: dict[str, MatterStage] = {
 class MatterWorkflow:
     """Application service; agents must use it rather than mutating a Matter directly."""
 
-    def __init__(self, store: InMemoryMatterStore) -> None:
+    def __init__(self, store: MatterStore) -> None:
         self._store = store
+
+    def get_matter(self, actor: Actor, *, matter_id: str) -> Matter:
+        matter = self._store.get(matter_id, firm_id=actor.firm_id)
+        self._require_firm(actor, matter)
+        return matter
 
     @staticmethod
     def _require_firm(actor: Actor, matter: Matter) -> None:
@@ -113,7 +118,7 @@ class MatterWorkflow:
 
         return self._store.mutate(
             matter_id=matter_id,
-            actor_id=actor.actor_id,
+            actor=actor,
             command_name="ADVANCE_MATTER",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
@@ -160,7 +165,7 @@ class MatterWorkflow:
 
         return self._store.mutate(
             matter_id=matter_id,
-            actor_id=actor.actor_id,
+            actor=actor,
             command_name="RECORD_APPROVAL",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
@@ -194,7 +199,7 @@ class MatterWorkflow:
                 raise PreconditionBlocked("a current submission bundle already exists")
             input_version = matter.version
             bundle = SubmissionBundle(
-                bundle_id=f"bundle_{uuid4().hex}",
+                bundle_id=str(uuid4()),
                 lifecycle=SubmissionLifecycle.LOCKED,
                 validity=SubmissionValidity.VALID,
                 final_text_hash=final_text_hash,
@@ -214,7 +219,7 @@ class MatterWorkflow:
 
         return self._store.mutate(
             matter_id=matter_id,
-            actor_id=actor.actor_id,
+            actor=actor,
             command_name="LOCK_SUBMISSION",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
@@ -263,7 +268,7 @@ class MatterWorkflow:
 
         return self._store.mutate(
             matter_id=matter_id,
-            actor_id=actor.actor_id,
+            actor=actor,
             command_name="INVALIDATE_FROM_UPSTREAM_CHANGE",
             idempotency_key=idempotency_key,
             expected_version=expected_version,
