@@ -135,6 +135,7 @@ AI 不应替代律师，而应降低律师在材料整理、事实核对、规�
 - 当前 GitHub 私有仓库套餐拒绝为该私有仓库启用分支保护；公开仓库不符合保密边界。因此在升级为支持私有仓保护的方案，或迁移至可自建保护规则的 Git 服务前，远端仅作恢复副本，生产代码不得直接合并到 `main`。
 - 恢复证据、适用范围和未完成项记录于 `docs/DEVELOPMENT_RECOVERY_BASELINE.md`。独立加密的非 Git 资产备份尚未配置；在其完成前，不得把真实案件材料或不可由 Git 重建的资产放入本项目。
 - 已准备可复现的田野研究、金标准、计算与法律规则、权限与外部调用、Phase 1 可用性测试契约，分别记录于 `research/PHASE_0_FIELD_PROTOCOL.md`、`docs/CALCULATION_AND_LEGAL_RULES_CONTRACT.md`、`docs/SECURITY_CONTROL_MATRICES.md` 和 `design/PHASE_1_USABILITY_PROTOCOL.md`；它们均待执业律师/安全负责人或真实研究证据确认。
+- 已完成第一轮公开二级研究，结论、来源等级、竞品压力和待证伪假设记录于 `research/ONLINE_EVIDENCE_REVIEW.md`。公开材料不计入律师访谈、流程观察、金标准案件或付费试点证据。
 
 ### 工作
 

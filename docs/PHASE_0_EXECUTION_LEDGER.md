@@ -9,6 +9,7 @@
 | 工作包 | 当前状态 | 已有证据 | 仍需的外部输入或门禁 |
 |---|---|---|---|
 | 产品范围与非目标 | 已准备，待律师确认 | `CONTEXT.md`、`PLAN.md` | 承办律师确认首案由、页数/交易数边界和不受理情形 |
+| 公开二级研究 | 首轮完成，待持续更新 | `research/ONLINE_EVIDENCE_REVIEW.md` | 不能替代访谈、观察、金标准案件或购买验证 |
 | 访谈与观察协议 | 已准备，待执行 | `research/RESEARCH_PLAN.md`、`research/PHASE_0_FIELD_PROTOCOL.md` | 10 名目标律师、3 个历史流程观察及书面研究同意 |
 | 金标准案件协议 | 已准备，待律师标注 | `research/PHASE_0_FIELD_PROTOCOL.md`、`QUALITY_AND_RELEASE.md` | 3—5 个已办结、合法脱敏案件及律师确认答案 |
 | 计算与法律规则契约 | 已准备，待法律编辑确认 | `docs/CALCULATION_AND_LEGAL_RULES_CONTRACT.md` | 每条正式规则的官方法源、适用锚点、过渡条款和审批 |
