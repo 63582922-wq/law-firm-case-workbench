@@ -19,6 +19,7 @@ from .evidence_manifest_postgres import PostgresEvidenceManifestStore
 from .formal_calculation_postgres import PostgresFormalCalculationStore
 from .legal_source_postgres import PostgresLegalSourceStore
 from .postgres_store import PostgresMatterStore
+from .submission_postgres import PostgresSubmissionStore
 from .store import InMemoryMatterStore, MatterStore
 
 
@@ -82,6 +83,7 @@ class RuntimeServices:
     evidence_manifest_store: PostgresEvidenceManifestStore | None
     formal_calculation_store: PostgresFormalCalculationStore | None
     legal_source_store: PostgresLegalSourceStore | None
+    submission_store: PostgresSubmissionStore | None
     persistence_label: str
 
 
@@ -99,6 +101,7 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
             evidence_manifest_store=None,
             formal_calculation_store=None,
             legal_source_store=None,
+            submission_store=None,
             persistence_label="in-memory-synthetic-only",
         )
     dsn = settings.postgres_dsn
@@ -111,5 +114,6 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
         evidence_manifest_store=PostgresEvidenceManifestStore(dsn),
         formal_calculation_store=PostgresFormalCalculationStore(dsn),
         legal_source_store=PostgresLegalSourceStore(dsn),
+        submission_store=PostgresSubmissionStore(dsn),
         persistence_label="postgres-internal-preview",
     )

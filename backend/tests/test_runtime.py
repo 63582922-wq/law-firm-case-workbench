@@ -5,6 +5,7 @@ from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
 from case_kernel.formal_calculation_postgres import PostgresFormalCalculationStore
 from case_kernel.legal_source_postgres import PostgresLegalSourceStore
 from case_kernel.postgres_store import PostgresMatterStore
+from case_kernel.submission_postgres import PostgresSubmissionStore
 from case_kernel.runtime import (
     RuntimeConfigurationBlocked,
     RuntimeMode,
@@ -26,6 +27,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNone(services.case_ledger_store)
         self.assertIsNone(services.formal_calculation_store)
         self.assertIsNone(services.legal_source_store)
+        self.assertIsNone(services.submission_store)
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()
 
@@ -68,6 +70,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsInstance(services.case_ledger_store, PostgresCaseLedgerStore)
         self.assertIsInstance(services.formal_calculation_store, PostgresFormalCalculationStore)
         self.assertIsInstance(services.legal_source_store, PostgresLegalSourceStore)
+        self.assertIsInstance(services.submission_store, PostgresSubmissionStore)
         self.assertNotIn("synthetic-password", repr(settings))
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()

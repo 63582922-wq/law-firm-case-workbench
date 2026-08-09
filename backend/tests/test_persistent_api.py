@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 import unittest
+from zipfile import ZIP_STORED, ZipFile
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,11 @@ from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactSt
 from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
+from case_kernel.submission_postgres import PersistentSubmissionSnapshot
+from case_kernel.submission_access import (
+    SubmissionExportAccessBroker,
+    VerifiedSubmissionExportLocator,
+)
 
 
 class StaticIdentityResolver:
@@ -275,6 +281,59 @@ class FakePersistentLegalSourceStore:
             object_type="CASE_LEGAL_FACT_BINDING",
             object_id=str(uuid4()),
         )
+
+
+class FakePersistentSubmissionStore:
+    persistent_test_double = True
+
+    def __init__(self, locator: VerifiedSubmissionExportLocator | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.bundle_id = str(uuid4())
+        self.locator = locator
+
+    def _receipt(self, name: str, kwargs: dict, object_type: str):
+        self.calls.append((name, kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name=name.upper(),
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type=object_type,
+            object_id=self.bundle_id if object_type == "SUBMISSION_BUNDLE" else str(uuid4()),
+        )
+
+    def register_work_product_candidate(self, **kwargs):
+        return self._receipt("register_work_product_candidate", kwargs, "SUBMISSION_WORK_PRODUCT")
+
+    def approve_work_product(self, **kwargs):
+        return self._receipt("approve_work_product", kwargs, "SUBMISSION_WORK_PRODUCT")
+
+    def create_qa_ready_bundle(self, **kwargs):
+        return self._receipt("create_qa_ready_bundle", kwargs, "SUBMISSION_BUNDLE")
+
+    def lock_submission_bundle(self, **kwargs):
+        return self._receipt("lock_submission_bundle", kwargs, "SUBMISSION_BUNDLE")
+
+    def get_submission_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_submission_snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentSubmissionSnapshot(
+            matter_id=matter_id,
+            matter_version=12,
+            stage="READY_TO_EXPORT",
+            work_products=(),
+            bundles=(),
+            current_bundle=None,
+            current_components=(),
+            current_export=None,
+            snapshot_hash="a" * 64,
+        )
+
+    def get_verified_export_locator(self, **kwargs):
+        self.calls.append(("get_verified_export_locator", kwargs))
+        if self.locator is None:
+            raise KeyError(kwargs["export_id"])
+        return self.locator
 
 class PersistentApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -798,6 +857,152 @@ class PersistentApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 422)
         self.assertEqual(legal_store.calls, [])
+
+    def test_submission_routes_fail_closed_when_submission_store_is_not_configured(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/submission-snapshot")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "SUBMISSION_SERVICE_UNAVAILABLE")
+
+    def test_submission_snapshot_qa_and_lock_use_server_identity_and_hash_bound_inputs(self) -> None:
+        submission_store = FakePersistentSubmissionStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    submission_store=submission_store,
+                )
+            )
+        )
+        snapshot = client.get(f"/v1/matters/{self.matter_id}/submission-snapshot")
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertEqual(snapshot.json()["snapshot_hash"], "a" * 64)
+
+        work_product_ids = [str(uuid4()) for _ in range(2)]
+        manifest_id = str(uuid4())
+        legal_bundle_id = str(uuid4())
+        calculation_run_id = str(uuid4())
+        final_approval_id = str(uuid4())
+        qa = client.post(
+            f"/v1/matters/{self.matter_id}/submission-bundles/qa-ready",
+            headers={"Idempotency-Key": "submission-qa-api-001"},
+            json={
+                "expected_version": 12,
+                "selections": [
+                    {
+                        "work_product_id": work_product_ids[0],
+                        "sequence": 1,
+                        "court_filename": "01_民事答辩状.pdf",
+                    },
+                    {
+                        "work_product_id": work_product_ids[1],
+                        "sequence": 2,
+                        "court_filename": "02_证据材料.pdf",
+                    },
+                ],
+                "required_document_kinds": ["DEFENCE_STATEMENT", "EVIDENCE_MATERIAL"],
+                "evidence_manifest_id": manifest_id,
+                "legal_bundle_id": legal_bundle_id,
+                "calculation_run_id": calculation_run_id,
+                "final_text_approval_id": final_approval_id,
+                "expected_qa_hash": "b" * 64,
+            },
+        )
+        self.assertEqual(qa.status_code, 201, qa.text)
+        qa_call = next(call for name, call in submission_store.calls if name == "create_qa_ready_bundle")
+        self.assertEqual(qa_call["actor"], self.identity.actor)
+        self.assertEqual(qa_call["evidence_manifest_id"], manifest_id)
+        self.assertEqual(qa_call["selections"][0].court_filename, "01_民事答辩状.pdf")
+
+        locked = client.post(
+            f"/v1/matters/{self.matter_id}/submission-bundles/{submission_store.bundle_id}/lock",
+            headers={"Idempotency-Key": "submission-lock-api-001"},
+            json={
+                "expected_version": 13,
+                "expected_input_hash": "b" * 64,
+                "lock_approval_hash": "c" * 64,
+            },
+        )
+        self.assertEqual(locked.status_code, 200, locked.text)
+        lock_call = next(call for name, call in submission_store.calls if name == "lock_submission_bundle")
+        self.assertEqual(lock_call["actor"], self.identity.actor)
+        self.assertEqual(lock_call["expected_input_hash"], "b" * 64)
+        self.assertNotIn("court_zip_object_key", lock_call)
+
+    def test_verified_submission_zip_uses_one_time_loopback_download(self) -> None:
+        with TemporaryDirectory(prefix="persistent-submission-api-test-") as temporary:
+            root = Path(temporary)
+            case_root = root / "case"
+            case_root.mkdir()
+            source = root / "court.zip"
+            with ZipFile(source, "w", ZIP_STORED) as archive:
+                archive.writestr("01_民事答辩状.pdf", b"%PDF-1.4\n%%EOF\n")
+            content = source.read_bytes()
+            artifact_hash = sha256(content).hexdigest()
+            artifact_store = LocalEncryptedArtifactStore(
+                root / "managed",
+                key_id="synthetic-submission-api-key-v1",
+                encryption_key=b"k" * 32,
+            )
+            stored = artifact_store.put_file(
+                source, expected_sha256=artifact_hash, case_root=case_root
+            )
+            export_id = str(uuid4())
+            locator = VerifiedSubmissionExportLocator(
+                firm_id=self.firm_id,
+                matter_id=self.matter_id,
+                export_id=export_id,
+                bundle_id=str(uuid4()),
+                object_key=stored.object_key,
+                court_zip_sha256=artifact_hash,
+                court_zip_bytes=len(content),
+                lifecycle="EXPORTED",
+                validity="VALID",
+            )
+            submission_store = FakePersistentSubmissionStore(locator=locator)
+            client = TestClient(
+                create_persistent_app(
+                    PersistentApiDependencies(
+                        settings=self.settings,
+                        case_ledger_store=FakePersistentFactStore(),
+                        identity_resolver=StaticIdentityResolver(self.identity),
+                        submission_store=submission_store,
+                        submission_access_broker=SubmissionExportAccessBroker(),
+                        artifact_store=artifact_store,
+                    )
+                ),
+                client=("127.0.0.1", 51001),
+            )
+            issued = client.post(
+                f"/v1/matters/{self.matter_id}/submission-exports/{export_id}/access"
+            )
+            self.assertEqual(issued.status_code, 200, issued.text)
+            token = issued.json()["access_token"]
+            delivered = client.get(
+                f"/v1/matters/{self.matter_id}/submission-exports/{export_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(delivered.status_code, 200, delivered.text)
+            self.assertEqual(delivered.content, content)
+            self.assertEqual(delivered.headers["content-type"], "application/zip")
+            self.assertEqual(delivered.headers["x-artifact-sha256"], artifact_hash)
+            self.assertIn("court-submission.zip", delivered.headers["content-disposition"])
+            replay = client.get(
+                f"/v1/matters/{self.matter_id}/submission-exports/{export_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(replay.status_code, 403)
+            self.assertEqual(replay.json()["code"], "SUBMISSION_ACCESS_DENIED")
 
 
 if __name__ == "__main__":

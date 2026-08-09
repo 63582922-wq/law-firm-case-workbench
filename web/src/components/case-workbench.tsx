@@ -5,11 +5,12 @@ import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { EvidenceWorkbench as EvidenceManifestWorkbench } from "@/components/evidence-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
 import { LegalWorkbench } from "@/components/legal-workbench";
+import { SubmissionWorkbench } from "@/components/submission-workbench";
 import { caseDataSourceConfig } from "@/lib/case-data-source";
 import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
-type View = "overview" | "evidence" | "facts" | "legal" | "calculation";
+type View = "overview" | "evidence" | "facts" | "legal" | "calculation" | "bundle";
 
 const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
   { id: "overview", label: "案件总览", href: "/" },
@@ -17,13 +18,13 @@ const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; hr
   { id: "facts", label: "事实与争点", href: "/facts" },
   { id: "legal", label: "法律规则", href: "/legal" },
   { id: "calculation", label: "利息测算", href: "/calculation" },
-  { id: "bundle", label: "提交材料" },
+  { id: "bundle", label: "提交材料", href: "/bundle" },
 ];
 
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
   const [view] = useState<View>(initialView);
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
-  const currentStageIndex = view === "legal" || view === "calculation" ? 2 : 1;
+  const currentStageIndex = view === "bundle" ? 4 : view === "legal" || view === "calculation" ? 2 : 1;
   const syntheticSource = caseDataSourceConfig.kind === "synthetic-alpha";
 
   return (
@@ -100,13 +101,13 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <Overview unresolvedCount={unresolvedCount} />
         ) : view === "evidence" ? (
           <EvidenceManifestWorkbench />
-        ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : (
+        ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : view === "calculation" ? (
           <CalculationWorkbench />
-        )}
+        ) : <SubmissionWorkbench />}
       </div>
 
       <footer className={styles.footer}>
-        <span>{syntheticSource ? "内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件" : "持久化内部预览 · 尚未通过真实身份、实库与安全验收 · 不生成法院提交文件"}</span>
+        <span>{syntheticSource ? "内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件" : "持久化内部预览 · 仅在依赖、审批、本机编译与导出核验全部通过后形成法院 ZIP"}</span>
         <span>所有结论、取舍与锁定均须由具备权限的人员在后续流程确认</span>
       </footer>
     </main>

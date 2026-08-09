@@ -165,6 +165,66 @@ export type LegalReviewView = {
   }[];
 };
 
+export type SubmissionReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  status: "blocked" | "reviewable" | "locked" | "exported";
+  statusReason: string;
+  matterVersion: number | null;
+  stage: string | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  workProducts: {
+    workProductId: string;
+    documentKind: string;
+    audience: string;
+    mediaType: string;
+    artifactSha256: string;
+    byteSize: number;
+    pageCount: number | null;
+    status: string;
+    approvalHash: string | null;
+  }[];
+  bundles: {
+    bundleId: string;
+    lifecycle: string;
+    validity: string;
+    currency: string;
+    inputHash: string;
+    evidenceManifestHash: string;
+    legalBundleHash: string;
+    calculationOutputHash: string;
+    finalTextHash: string;
+    qaHash: string;
+  }[];
+  currentBundleId: string | null;
+  currentComponents: {
+    workProductId: string;
+    sequence: number;
+    documentKind: string;
+    courtFilename: string;
+    mediaType: string;
+    artifactSha256: string;
+    byteSize: number;
+    approvalHash: string;
+  }[];
+  currentExport: {
+    exportId: string;
+    courtZipSha256: string;
+    courtZipBytes: number;
+    internalManifestSha256: string;
+    componentCount: number;
+    verificationHash: string;
+    verifiedAt: string;
+  } | null;
+};
+
+export type SubmissionExportDelivery = {
+  blob: Blob;
+  fileName: "法院提交材料.zip";
+  artifactSha256: string;
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -320,6 +380,56 @@ type PersistentLegalReviewSnapshot = {
   }[];
 };
 
+type PersistentSubmissionSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  stage: string;
+  snapshot_hash: string;
+  work_products: {
+    work_product_id: string;
+    document_kind: string;
+    audience: string;
+    media_type: string;
+    artifact_sha256: string;
+    byte_size: number;
+    page_count: number | null;
+    status: string;
+    approval_hash: string | null;
+  }[];
+  bundles: {
+    bundle_id: string;
+    lifecycle: string;
+    validity: string;
+    currency: string;
+    input_hash: string;
+    evidence_manifest_hash: string;
+    legal_bundle_hash: string;
+    calculation_output_hash: string;
+    final_text_hash: string;
+    qa_hash: string;
+  }[];
+  current_bundle: { bundle_id: string } | null;
+  current_components: {
+    work_product_id: string;
+    sequence: number;
+    document_kind: string;
+    court_filename: string;
+    media_type: string;
+    artifact_sha256: string;
+    byte_size: number;
+    approval_hash: string;
+  }[];
+  current_export: {
+    export_id: string;
+    court_zip_sha256: string;
+    court_zip_bytes: number;
+    internal_manifest_sha256: string;
+    component_count: number;
+    verification_hash: string;
+    verified_at: string;
+  } | null;
+};
+
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
 
 export const caseDataSourceConfig = resolveCaseDataSourceConfig({
@@ -435,6 +545,77 @@ export async function loadLegalReview(
     throw new Error(errorMessage(payload as ErrorEnvelope, "法律依据审查快照不可用"));
   }
   return mapPersistentLegalReview(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function loadSubmissionReview(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<SubmissionReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") return syntheticSubmissionView();
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/submission-snapshot`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const payload = (await response.json()) as PersistentSubmissionSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "提交材料快照不可用"));
+  }
+  return mapPersistentSubmission(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function fetchSubmissionExport(
+  review: SubmissionReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<SubmissionExportDelivery> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以下载法院提交包。");
+  }
+  if (!review.currentExport || review.status !== "exported") {
+    throw new Error("当前案件没有有效且已核验的法院提交包。");
+  }
+  const exportId = review.currentExport.exportId;
+  const accessResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/submission-exports/${exportId}/access`,
+    { method: "POST", credentials: "include", headers: { Accept: "application/json" } },
+  );
+  const accessPayload = (await accessResponse.json()) as
+    | { access_token: string; export_id: string; expires_at: string }
+    | ErrorEnvelope;
+  if (!accessResponse.ok || !("access_token" in accessPayload)) {
+    throw new Error(errorMessage(accessPayload as ErrorEnvelope, "无法取得法院提交包的短时下载许可"));
+  }
+  if (accessPayload.export_id !== exportId) {
+    throw new Error("下载许可与当前提交包不一致，已停止读取。");
+  }
+  const contentResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/submission-exports/${exportId}/content`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/zip", Authorization: `Bearer ${accessPayload.access_token}` },
+      cache: "no-store",
+    },
+  );
+  if (!contentResponse.ok) {
+    const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new Error(errorMessage(payload, "法院提交包读取失败"));
+  }
+  if (contentResponse.headers.get("Content-Type")?.split(";", 1)[0] !== "application/zip") {
+    throw new Error("提交包返回了非 ZIP 内容，已停止下载。");
+  }
+  const returnedHash = contentResponse.headers.get("X-Artifact-SHA256");
+  if (returnedHash !== review.currentExport.courtZipSha256) {
+    throw new Error("提交包的服务端哈希与当前快照不一致，已停止下载。");
+  }
+  const contentLength = Number(contentResponse.headers.get("Content-Length") || "0");
+  if (contentLength > 256 * 1024 * 1024) {
+    throw new Error("法院提交包超过本机下载大小上限。");
+  }
+  const blob = await contentResponse.blob();
+  if (blob.size < 1 || blob.size > 256 * 1024 * 1024) {
+    throw new Error("法院提交包为空或超过本机下载大小上限。");
+  }
+  return { blob, fileName: "法院提交材料.zip", artifactSha256: returnedHash };
 }
 
 export async function fetchEvidenceDerivative(
@@ -931,6 +1112,95 @@ function mapPersistentLegalReview(
       annualRate: item.annual_rate,
       applicabilityAnchor: item.applicability_anchor,
     })),
+  };
+}
+
+function syntheticSubmissionView(): SubmissionReviewView {
+  return {
+    sourceKind: "synthetic-alpha",
+    sourceLabel: "本机合成模式",
+    status: "blocked",
+    statusReason: "合成模式不建立可提交文件、锁定版或导出回执；这里只展示正式流程的必备门禁。",
+    matterVersion: null,
+    stage: null,
+    snapshotHash: null,
+    requestId: null,
+    workProducts: [],
+    bundles: [],
+    currentBundleId: null,
+    currentComponents: [],
+    currentExport: null,
+  };
+}
+
+function mapPersistentSubmission(
+  payload: PersistentSubmissionSnapshot,
+  requestId: string | null,
+): SubmissionReviewView {
+  const currentBundle = payload.current_bundle
+    ? payload.bundles.find((item) => item.bundle_id === payload.current_bundle?.bundle_id) ?? null
+    : null;
+  const status: SubmissionReviewView["status"] = payload.current_export
+    ? "exported"
+    : currentBundle?.lifecycle === "LOCKED"
+      ? "locked"
+      : "reviewable";
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "持久化提交材料快照",
+    status,
+    statusReason: currentBundle
+      ? "当前提交版已绑定证据、法律规则、利息计算、最终文本和逐份文件哈希；任何上游正式变化都会使其失效。"
+      : "尚无当前锁定提交版。只有完成 QA 且全部依赖仍有效时才能锁定。",
+    matterVersion: payload.matter_version,
+    stage: payload.stage,
+    snapshotHash: payload.snapshot_hash,
+    requestId,
+    workProducts: payload.work_products.map((item) => ({
+      workProductId: item.work_product_id,
+      documentKind: item.document_kind,
+      audience: item.audience,
+      mediaType: item.media_type,
+      artifactSha256: item.artifact_sha256,
+      byteSize: item.byte_size,
+      pageCount: item.page_count,
+      status: item.status,
+      approvalHash: item.approval_hash,
+    })),
+    bundles: payload.bundles.map((item) => ({
+      bundleId: item.bundle_id,
+      lifecycle: item.lifecycle,
+      validity: item.validity,
+      currency: item.currency,
+      inputHash: item.input_hash,
+      evidenceManifestHash: item.evidence_manifest_hash,
+      legalBundleHash: item.legal_bundle_hash,
+      calculationOutputHash: item.calculation_output_hash,
+      finalTextHash: item.final_text_hash,
+      qaHash: item.qa_hash,
+    })),
+    currentBundleId: payload.current_bundle?.bundle_id ?? null,
+    currentComponents: payload.current_components.map((item) => ({
+      workProductId: item.work_product_id,
+      sequence: item.sequence,
+      documentKind: item.document_kind,
+      courtFilename: item.court_filename,
+      mediaType: item.media_type,
+      artifactSha256: item.artifact_sha256,
+      byteSize: item.byte_size,
+      approvalHash: item.approval_hash,
+    })),
+    currentExport: payload.current_export
+      ? {
+          exportId: payload.current_export.export_id,
+          courtZipSha256: payload.current_export.court_zip_sha256,
+          courtZipBytes: payload.current_export.court_zip_bytes,
+          internalManifestSha256: payload.current_export.internal_manifest_sha256,
+          componentCount: payload.current_export.component_count,
+          verificationHash: payload.current_export.verification_hash,
+          verifiedAt: payload.current_export.verified_at,
+        }
+      : null,
   };
 }
 

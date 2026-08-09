@@ -46,6 +46,15 @@ from case_kernel.legal_source_postgres import (
 from case_kernel.models import Actor
 from case_kernel.local_access_grants import LocalSessionProof
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
+from case_kernel.submission_postgres import (
+    PersistentSubmissionSnapshot,
+    PostgresSubmissionStore,
+    SubmissionComponentSelection,
+)
+from case_kernel.submission_access import (
+    SubmissionAccessBlocked,
+    SubmissionExportAccessBroker,
+)
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 from case_kernel.request_context import current_request_id, reset_request_id, set_request_id
 from case_kernel.transaction_ledger import (
@@ -100,6 +109,11 @@ from .schemas import (
     PersistentLegalRuleVersionRequest,
     PersistentLegalReviewSnapshotResponse,
     PersistentOfficialLegalSourceSnapshotRequest,
+    PersistentSubmissionLockRequest,
+    PersistentSubmissionAccessResponse,
+    PersistentSubmissionQaRequest,
+    PersistentSubmissionSnapshotResponse,
+    PersistentSubmissionWorkProductRequest,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
 )
@@ -197,6 +211,22 @@ class PersistentLegalSourcePort(Protocol):
     ) -> PersistentLegalReviewSnapshot: ...
 
 
+class PersistentSubmissionPort(Protocol):
+    def register_work_product_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_work_product(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def create_qa_ready_bundle(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def lock_submission_bundle(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_submission_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentSubmissionSnapshot: ...
+
+    def get_verified_export_locator(self, **kwargs): ...
+
+
 class PersistentRequestBlocked(ValueError):
     pass
 
@@ -213,6 +243,10 @@ class PersistentLegalSourceServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentSubmissionServiceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PersistentApiDependencies:
     settings: RuntimeSettings
@@ -221,6 +255,8 @@ class PersistentApiDependencies:
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
     formal_calculation_store: PersistentFormalCalculationPort | None = None
     legal_source_store: PersistentLegalSourcePort | None = None
+    submission_store: PersistentSubmissionPort | None = None
+    submission_access_broker: SubmissionExportAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
 
@@ -247,10 +283,24 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.legal_source_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL legal source store")
-        if (self.artifact_access_broker is None) != (self.artifact_store is None):
-            raise ValueError("artifact access broker and encrypted artifact store must be configured together")
+        if self.submission_store is not None and not isinstance(
+            self.submission_store, PostgresSubmissionStore
+        ):
+            if not getattr(self.submission_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL submission store")
+        if (
+            self.artifact_access_broker is not None
+            or self.submission_access_broker is not None
+        ) and self.artifact_store is None:
+            raise ValueError("artifact access brokers require the encrypted artifact store")
+        if self.artifact_store is not None and (
+            self.artifact_access_broker is None and self.submission_access_broker is None
+        ):
+            raise ValueError("encrypted artifact store requires at least one guarded access broker")
         if self.artifact_access_broker is not None and self.evidence_manifest_store is None:
             raise ValueError("artifact access requires the guarded evidence Manifest store")
+        if self.submission_access_broker is not None and self.submission_store is None:
+            raise ValueError("submission access requires the guarded submission store")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
@@ -286,7 +336,9 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
             "formal_calculation": "configured" if dependencies.formal_calculation_store else "not-configured",
             "legal_source": "configured" if dependencies.legal_source_store else "not-configured",
+            "submission": "configured" if dependencies.submission_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
+            "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
         }
 
     if dependencies is None:
@@ -323,10 +375,26 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             )
         return dependencies.legal_source_store
 
+    def get_submission_store() -> PersistentSubmissionPort:
+        if dependencies.submission_store is None:
+            raise PersistentSubmissionServiceUnavailable(
+                "submission persistence is not configured"
+            )
+        return dependencies.submission_store
+
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
             raise PersistentEvidenceServiceUnavailable("encrypted artifact access is not configured")
         return dependencies.artifact_access_broker, dependencies.artifact_store
+
+    def require_submission_artifact_services() -> tuple[
+        SubmissionExportAccessBroker, LocalEncryptedArtifactStore
+    ]:
+        if dependencies.submission_access_broker is None or dependencies.artifact_store is None:
+            raise PersistentSubmissionServiceUnavailable(
+                "verified submission export access is not configured"
+            )
+        return dependencies.submission_access_broker, dependencies.artifact_store
 
     @app.exception_handler(PersistentAuthenticationBlocked)
     async def authentication_handler(_: Request, exc: PersistentAuthenticationBlocked):
@@ -412,6 +480,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "官方法源与案件规则包服务尚未启用，未使用模型记忆或网页摘要替代。",
         )
 
+    @app.exception_handler(PersistentSubmissionServiceUnavailable)
+    async def submission_service_handler(_: Request, exc: PersistentSubmissionServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "SUBMISSION_SERVICE_UNAVAILABLE",
+            "提交材料服务尚未启用，未生成或回退到合成文件。",
+        )
+
     @app.exception_handler(ManagedArtifactBlocked)
     async def managed_artifact_handler(_: Request, exc: ManagedArtifactBlocked):
         del exc
@@ -419,6 +496,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ARTIFACT_INTEGRITY_BLOCKED",
             "证据派生件完整性核验未通过，系统已停止读取。",
+        )
+
+    @app.exception_handler(SubmissionAccessBlocked)
+    async def submission_access_handler(_: Request, exc: SubmissionAccessBlocked):
+        del exc
+        return _error(
+            status.HTTP_403_FORBIDDEN,
+            "SUBMISSION_ACCESS_DENIED",
+            "法院提交包下载许可无效、已过期或不属于当前本机会话。",
         )
 
     @app.get(
@@ -685,6 +771,202 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 ),
                 approval_hash=body.approval_hash,
             )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/submission-snapshot",
+        response_model=PersistentSubmissionSnapshotResponse,
+        tags=["submissions"],
+    )
+    async def get_submission_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> PersistentSubmissionSnapshotResponse:
+        snapshot = submission_store.get_submission_snapshot(
+            matter_id=str(matter_id), actor=identity.actor
+        )
+        return PersistentSubmissionSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/submission-work-products",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["submissions"],
+    )
+    async def register_submission_work_product(
+        matter_id: UUID,
+        body: PersistentSubmissionWorkProductRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            submission_store.register_work_product_candidate(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                document_kind=body.document_kind,
+                audience=body.audience,
+                media_type=body.media_type,
+                storage_object_key=body.storage_object_key,
+                artifact_sha256=body.artifact_sha256,
+                byte_size=body.byte_size,
+                page_count=body.page_count,
+                semantic_text_sha256=body.semantic_text_sha256,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/submission-work-products/{work_product_id}/approve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["submissions"],
+    )
+    async def approve_submission_work_product(
+        matter_id: UUID,
+        work_product_id: UUID,
+        body: PersistentApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            submission_store.approve_work_product(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                work_product_id=str(work_product_id),
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/submission-bundles/qa-ready",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["submissions"],
+    )
+    async def create_submission_qa_bundle(
+        matter_id: UUID,
+        body: PersistentSubmissionQaRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            submission_store.create_qa_ready_bundle(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                selections=tuple(
+                    SubmissionComponentSelection(
+                        work_product_id=str(item.work_product_id),
+                        sequence=item.sequence,
+                        court_filename=item.court_filename,
+                    )
+                    for item in body.selections
+                ),
+                required_document_kinds=tuple(body.required_document_kinds),
+                evidence_manifest_id=str(body.evidence_manifest_id),
+                legal_bundle_id=str(body.legal_bundle_id),
+                calculation_run_id=str(body.calculation_run_id),
+                final_text_approval_id=str(body.final_text_approval_id),
+                expected_qa_hash=body.expected_qa_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/submission-bundles/{bundle_id}/lock",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["submissions"],
+    )
+    async def lock_submission_bundle(
+        matter_id: UUID,
+        bundle_id: UUID,
+        body: PersistentSubmissionLockRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            submission_store.lock_submission_bundle(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                bundle_id=str(bundle_id),
+                expected_input_hash=body.expected_input_hash,
+                lock_approval_hash=body.lock_approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/submission-exports/{export_id}/access",
+        response_model=PersistentSubmissionAccessResponse,
+        tags=["submission-access"],
+    )
+    async def issue_submission_export_access(
+        matter_id: UUID,
+        export_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        submission_store: Annotated[PersistentSubmissionPort, Depends(get_submission_store)],
+    ) -> PersistentSubmissionAccessResponse:
+        broker, _ = require_submission_artifact_services()
+        locator = submission_store.get_verified_export_locator(
+            matter_id=str(matter_id), export_id=str(export_id), actor=identity.actor
+        )
+        issued = broker.issue(
+            locator=locator,
+            actor=identity.actor,
+            session=_local_session(identity),
+        )
+        return PersistentSubmissionAccessResponse(
+            grant_id=issued.grant_id,
+            export_id=issued.export_id,
+            access_token=issued.access_token,
+            expires_at=issued.expires_at,
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/submission-exports/{export_id}/content",
+        response_class=Response,
+        tags=["submission-access"],
+    )
+    async def deliver_submission_export(
+        matter_id: UUID,
+        export_id: UUID,
+        request: Request,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        broker, artifact_store = require_submission_artifact_services()
+        if request.client is None:
+            raise PersistentRequestBlocked("local client address is unavailable")
+        delivery = broker.deliver(
+            access_token=_bearer_token(authorization),
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            export_id=str(export_id),
+            session=_local_session(identity),
+            client_ip=request.client.host,
+            artifact_store=artifact_store,
+        )
+        return Response(
+            content=delivery.content,
+            media_type=delivery.media_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Content-Disposition": (
+                    "attachment; filename=\"court-submission.zip\"; "
+                    "filename*=UTF-8''%E6%B3%95%E9%99%A2%E6%8F%90%E4%BA%A4%E6%9D%90%E6%96%99.zip"
+                ),
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-SHA256": delivery.artifact_sha256,
+            },
         )
 
     @app.post(

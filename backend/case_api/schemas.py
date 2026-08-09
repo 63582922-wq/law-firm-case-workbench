@@ -869,3 +869,68 @@ class PersistentLegalReviewSnapshotResponse(BaseModel):
     current_bundle: dict[str, Any] | None
     bundle_segments: tuple[dict[str, Any], ...]
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentSubmissionWorkProductRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    document_kind: str = Field(min_length=1, max_length=120)
+    audience: Literal["COURT_SUBMISSION", "INTERNAL_ONLY"]
+    media_type: Literal["application/pdf"]
+    storage_object_key: str = Field(pattern=r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca$")
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(gt=0, le=134_217_728)
+    page_count: int = Field(gt=0, le=20_000)
+    semantic_text_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentSubmissionComponentSelectionRequest(BaseModel):
+    work_product_id: UUID
+    sequence: int = Field(gt=0, le=100)
+    court_filename: str = Field(min_length=5, max_length=180)
+
+
+class PersistentSubmissionQaRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    selections: list[PersistentSubmissionComponentSelectionRequest] = Field(min_length=1, max_length=100)
+    required_document_kinds: list[str] = Field(min_length=1, max_length=100)
+    evidence_manifest_id: UUID
+    legal_bundle_id: UUID
+    calculation_run_id: UUID
+    final_text_approval_id: UUID
+    expected_qa_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def selected_files_are_contiguous_and_unique(self):
+        ordered = sorted(self.selections, key=lambda item: item.sequence)
+        if [item.sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("submission file sequence must be contiguous from 1")
+        if len({item.work_product_id for item in ordered}) != len(ordered):
+            raise ValueError("submission work products must be unique")
+        if len(set(self.required_document_kinds)) != len(self.required_document_kinds):
+            raise ValueError("required document kinds must be unique")
+        return self
+
+
+class PersistentSubmissionLockRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    expected_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    lock_approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentSubmissionSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    stage: str
+    work_products: tuple[dict[str, Any], ...]
+    bundles: tuple[dict[str, Any], ...]
+    current_bundle: dict[str, Any] | None
+    current_components: tuple[dict[str, Any], ...]
+    current_export: dict[str, Any] | None
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentSubmissionAccessResponse(BaseModel):
+    grant_id: UUID
+    export_id: UUID
+    access_token: str = Field(min_length=20, max_length=200)
+    expires_at: datetime
