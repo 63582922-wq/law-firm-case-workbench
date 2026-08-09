@@ -58,6 +58,8 @@
 .brand small { padding: 3px 6px; border: 1px solid var(--line); color: var(--ink-faint); font-weight: 500; letter-spacing: 0; }
 .topbarMeta { gap: 9px; }
 .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--line-strong); }
+.runtimeState { color: var(--ochre); }
+.runtimeBlocked { color: var(--red); }
 
 .caseHeader {
   min-height: 134px;

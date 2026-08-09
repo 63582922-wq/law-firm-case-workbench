@@ -1,12 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { EvidenceWorkbench as EvidenceManifestWorkbench } from "@/components/evidence-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
 import { LegalWorkbench } from "@/components/legal-workbench";
 import { SubmissionWorkbench } from "@/components/submission-workbench";
 import { caseDataSourceConfig } from "@/lib/case-data-source";
+import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
@@ -23,9 +25,37 @@ const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; hr
 
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
   const [view] = useState<View>(initialView);
+  const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
   const currentStageIndex = view === "bundle" ? 4 : view === "legal" || view === "calculation" ? 2 : 1;
   const syntheticSource = caseDataSourceConfig.kind === "synthetic-alpha";
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const status = await readDesktopRuntimeStatus();
+        if (cancelled || status === null) return;
+        setDesktopRuntime(status);
+        if (status.phase === "STARTING") timer = setTimeout(refresh, 350);
+      } catch {
+        if (!cancelled) {
+          setDesktopRuntime({
+            phase: "BLOCKED",
+            message: "无法核验本机受控服务，案件访问保持禁用。",
+            apiBase: null,
+            processId: null,
+          });
+        }
+      }
+    };
+    void refresh();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, []);
 
   return (
     <main className={styles.shell}>
@@ -39,6 +69,14 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <span>{syntheticSource ? "当前角色：主办律师（合成）" : "身份来源：服务端会话与数据库案件角色"}</span>
           <span className={styles.dot} aria-hidden="true" />
           <span>{syntheticSource ? "不连接真实案件材料" : caseDataSourceConfig.kind === "persistent-disabled" ? "持久化数据源未启用" : "持久化内部预览"}</span>
+          {desktopRuntime ? (
+            <>
+              <span className={styles.dot} aria-hidden="true" />
+              <span className={desktopRuntime.phase === "BLOCKED" || desktopRuntime.phase === "STOPPED" ? styles.runtimeBlocked : styles.runtimeState}>
+                {desktopRuntime.phase === "READY" ? "本机服务已就绪（案件仍禁用）" : desktopRuntime.message}
+              </span>
+            </>
+          ) : null}
         </div>
       </header>
 

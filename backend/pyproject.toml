@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Synthetic Alpha API boundary for the law-firm case workbench"
 requires-python = ">=3.12"
 dependencies = [
-    "cryptography>=46,<47",
+    "cryptography>=50,<51",
     "fastapi>=0.115,<1",
     "psycopg[binary]>=3.2,<4",
     "pypdf>=6.10,<7",
@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "httpx2>=2.7,<3",
     "pillow>=12.2,<13",
+    "pyinstaller>=6.21,<7",
 ]
 
 [build-system]

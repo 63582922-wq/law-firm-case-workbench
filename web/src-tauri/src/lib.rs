@@ -1,13 +1,190 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::path::Path;
-use tauri::{AppHandle, Manager};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_shell::{ShellExt, process::CommandChild, process::CommandEvent};
 use uuid::Uuid;
+
+const LOCAL_API_PROTOCOL: &str = "lawcase-local-api-v1";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SelectedCaseFolder {
     selected_root: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopRuntimeStatus {
+    phase: String,
+    message: String,
+    api_base: Option<String>,
+    process_id: Option<u32>,
+}
+
+struct LocalApiState {
+    phase: String,
+    message: String,
+    api_base: Option<String>,
+    process_id: Option<u32>,
+    child: Option<CommandChild>,
+}
+
+impl Default for LocalApiState {
+    fn default() -> Self {
+        Self {
+            phase: "STARTING".to_string(),
+            message: "正在核验本机受控服务…".to_string(),
+            api_base: None,
+            process_id: None,
+            child: None,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct LocalApiRuntime {
+    inner: Arc<Mutex<LocalApiState>>,
+}
+
+#[derive(Deserialize)]
+struct LocalApiReady {
+    protocol: String,
+    status: String,
+    port: u16,
+    pid: u32,
+    challenge_sha256: String,
+}
+
+fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
+    let state = runtime.inner.lock().expect("local API state lock poisoned");
+    DesktopRuntimeStatus {
+        phase: state.phase.clone(),
+        message: state.message.clone(),
+        api_base: state.api_base.clone(),
+        process_id: state.process_id,
+    }
+}
+
+fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
+    let child = {
+        let mut state = runtime.inner.lock().expect("local API state lock poisoned");
+        state.phase = "BLOCKED".to_string();
+        state.message = message.to_string();
+        state.api_base = None;
+        state.process_id = None;
+        state.child.take()
+    };
+    if let Some(child) = child {
+        let _ = child.kill();
+    }
+}
+
+fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady, String> {
+    if payload.len() > 1024 {
+        return Err("本机服务就绪回执过长。".to_string());
+    }
+    let ready: LocalApiReady =
+        serde_json::from_slice(payload).map_err(|_| "本机服务就绪回执格式无效。".to_string())?;
+    let expected_digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
+    if ready.protocol != LOCAL_API_PROTOCOL
+        || ready.status != "READY"
+        || ready.pid <= 1
+        || ready.port == 0
+        || ready.challenge_sha256 != expected_digest
+    {
+        return Err("本机服务未通过父进程绑定核验。".to_string());
+    }
+    Ok(ready)
+}
+
+fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), String> {
+    let challenge = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let (mut receiver, mut child) = app
+        .shell()
+        .sidecar("lawcase-local-api")
+        .map_err(|_| "无法定位随应用分发的本机服务。".to_string())?
+        .spawn()
+        .map_err(|_| "无法启动随应用分发的本机服务。".to_string())?;
+    let process_id = child.pid();
+    let handshake = serde_json::json!({
+        "protocol": LOCAL_API_PROTOCOL,
+        "challenge": challenge,
+        "parent_pid": std::process::id(),
+    });
+    if child.write(format!("{}\n", handshake).as_bytes()).is_err() {
+        let _ = child.kill();
+        return Err("无法建立桌面父进程与本机服务的私有握手。".to_string());
+    }
+    {
+        let mut state = runtime.inner.lock().expect("local API state lock poisoned");
+        state.process_id = Some(process_id);
+        state.child = Some(child);
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let mut ready_received = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                CommandEvent::Stdout(line) if !ready_received => {
+                    match verify_ready_payload(&line, &challenge) {
+                        Ok(ready) => {
+                            let mut state =
+                                runtime.inner.lock().expect("local API state lock poisoned");
+                            state.phase = "READY".to_string();
+                            state.message =
+                                "本机受控服务已就绪；真实案件数据仍保持禁用。".to_string();
+                            state.api_base = Some(format!("http://127.0.0.1:{}", ready.port));
+                            state.process_id = Some(process_id);
+                            ready_received = true;
+                        }
+                        Err(message) => {
+                            mark_runtime_blocked(&runtime, &message);
+                            break;
+                        }
+                    }
+                }
+                CommandEvent::Error(_) => {
+                    mark_runtime_blocked(&runtime, "本机服务进程通信失败，案件访问保持禁用。");
+                    break;
+                }
+                CommandEvent::Terminated(_) => {
+                    let mut state = runtime.inner.lock().expect("local API state lock poisoned");
+                    if state.phase != "BLOCKED" {
+                        state.phase = "STOPPED".to_string();
+                        state.message = "本机受控服务已停止，案件访问保持禁用。".to_string();
+                    }
+                    state.api_base = None;
+                    state.process_id = None;
+                    state.child = None;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(())
+}
+
+fn stop_local_api(runtime: &LocalApiRuntime) {
+    let child = {
+        let mut state = runtime.inner.lock().expect("local API state lock poisoned");
+        state.phase = "STOPPED".to_string();
+        state.message = "桌面应用退出，本机受控服务已停止。".to_string();
+        state.api_base = None;
+        state.process_id = None;
+        state.child.take()
+    };
+    if let Some(child) = child {
+        let _ = child.kill();
+    }
+}
+
+#[tauri::command]
+fn desktop_runtime_status(runtime: State<'_, LocalApiRuntime>) -> DesktopRuntimeStatus {
+    snapshot_runtime(&runtime)
 }
 
 fn validate_matter_id(matter_id: &str) -> Result<(), String> {
@@ -71,16 +248,36 @@ async fn select_case_folder(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![select_case_folder])
-        .run(tauri::generate_context!())
+        .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            let runtime = LocalApiRuntime::default();
+            app.manage(runtime.clone());
+            if let Err(message) = start_local_api(app.handle(), runtime.clone()) {
+                mark_runtime_blocked(&runtime, &message);
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            desktop_runtime_status,
+            select_case_folder
+        ])
+        .build(tauri::generate_context!())
         .expect("桌面应用启动失败");
+    app.run(|app_handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            stop_local_api(&app_handle.state::<LocalApiRuntime>());
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_matter_id, validate_selected_root};
+    use super::{
+        LOCAL_API_PROTOCOL, validate_matter_id, validate_selected_root, verify_ready_payload,
+    };
+    use sha2::{Digest, Sha256};
     use std::path::Path;
 
     #[test]
@@ -115,5 +312,17 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn verifies_sidecar_pid_protocol_port_and_parent_challenge() {
+        let challenge = "a".repeat(64);
+        let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
+        let payload = format!(
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\"}}",
+            LOCAL_API_PROTOCOL, digest
+        );
+        assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
+        assert!(verify_ready_payload(payload.as_bytes(), "b").is_err());
     }
 }

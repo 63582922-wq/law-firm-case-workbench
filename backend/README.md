@@ -13,6 +13,7 @@
 - 提供公开研究网关的合成领域边界：敏感检索词阻断、来源域名白名单、律师显式授权、请求/响应哈希账本；
 - 提供合成利息与冲抵预览：只接受已批准的 CNY 事件、连续规则期间和明确冲抵顺序，并以独立日步进校验器复算；
 - 提供 PostgreSQL 16+ 的 UUID 持久化仓储适配器：RLS 租户上下文、命令幂等、锁行版本检查、append-only 审计和 Outbox 在同一事务中写入；默认 API 不使用它；
+- 提供可由 Tauri 监护的自包含禁用态 sidecar，以及一次性桌面启动凭证、令牌摘要、短时 Bearer、数值 loopback/Origin、过期与撤销的本机会话契约；没有服务端登记律师身份和持久依赖时不开放案件路由；
 - 不包含生产 HTTP 身份认证、已配置或实际执行的数据库、真实文件接入、外部模型、OCR、真实文书、真实案件或导出功能。
 
 `POST /v1/calculation-previews` 仅返回**非持久化的合成预览**，不是正式 `CalculationRun`，不支持真实身份或真实案卷。其调用者仍必须在生产实现中先完成法律规则、适用期间、付款性质与冲抵顺序的权限化审批；本 Alpha API 的 `X-Alpha-Actor` 只是一份固定测试选择器，绝非认证机制。
@@ -37,3 +38,11 @@ cd backend
 uv sync --group dev
 .venv/bin/python -m unittest discover -s tests -v
 ```
+
+构建当前平台的桌面 sidecar：
+
+```sh
+.venv/bin/python scripts/build_desktop_sidecar.py
+```
+
+生成物写入 Tauri 的忽略目录并由桌面构建重新生成，不进入 Git。

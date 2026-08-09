@@ -12,7 +12,11 @@ from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
-from case_api.persistent_identity import AuthenticationMethod, ServerIdentityContext
+from case_api.persistent_identity import (
+    AuthenticationMethod,
+    DesktopSessionAuthority,
+    ServerIdentityContext,
+)
 from case_kernel.artifact_access import EphemeralArtifactAccessBroker, VerifiedDerivativeLocator
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
 from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
@@ -491,6 +495,69 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(response.json()["code"], "AUTHENTICATION_REQUIRED")
         self.assertEqual(response.json()["request_id"], response.headers["X-Request-ID"])
         self.assertEqual(store.calls, [])
+
+    def test_desktop_bootstrap_is_one_time_and_drives_persistent_identity(self) -> None:
+        now = datetime.now(timezone.utc)
+        authority = DesktopSessionAuthority(
+            actor=self.identity.actor,
+            bootstrap_token="b" * 64,
+            bootstrap_expires_at=now + timedelta(seconds=30),
+            session_expires_at=now + timedelta(minutes=30),
+            token_factory=lambda: "s" * 64,
+        )
+        store = FakePersistentFactStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=store,
+                    identity_resolver=authority,
+                    desktop_session_authority=authority,
+                )
+            ),
+            client=("127.0.0.1", 50001),
+        )
+        exchange = client.post(
+            "/v1/desktop-sessions/exchange",
+            headers={"Origin": "tauri://localhost", "X-Desktop-Bootstrap": "b" * 64},
+        )
+        self.assertEqual(exchange.status_code, 200, exchange.text)
+        self.assertEqual(exchange.headers["Cache-Control"], "no-store")
+        self.assertEqual(exchange.json()["token_type"], "Bearer")
+        self.assertEqual(exchange.json()["access_token"], "s" * 64)
+        facts = client.get(
+            f"/v1/matters/{self.matter_id}/facts",
+            headers={
+                "Origin": "tauri://localhost",
+                "Authorization": f"Bearer {exchange.json()['access_token']}",
+            },
+        )
+        self.assertEqual(facts.status_code, 200, facts.text)
+        self.assertEqual(store.calls[0][1]["actor"].actor_id, self.actor_id)
+        reused = client.post(
+            "/v1/desktop-sessions/exchange",
+            headers={"Origin": "tauri://localhost", "X-Desktop-Bootstrap": "b" * 64},
+        )
+        self.assertEqual(reused.status_code, 401)
+        self.assertEqual(reused.json()["code"], "AUTHENTICATION_REQUIRED")
+
+    def test_desktop_bootstrap_cannot_use_a_different_identity_resolver(self) -> None:
+        now = datetime.now(timezone.utc)
+        authority = DesktopSessionAuthority(
+            actor=self.identity.actor,
+            bootstrap_token="b" * 64,
+            bootstrap_expires_at=now + timedelta(seconds=30),
+            session_expires_at=now + timedelta(minutes=30),
+        )
+        with self.assertRaisesRegex(ValueError, "same authority"):
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    desktop_session_authority=authority,
+                )
+            )
 
     def test_transaction_and_payment_classification_routes_keep_currency_and_application_explicit(self) -> None:
         store = FakePersistentFactStore()

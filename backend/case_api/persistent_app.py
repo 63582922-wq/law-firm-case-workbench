@@ -80,12 +80,14 @@ from case_kernel.transaction_ledger import (
 )
 
 from .persistent_identity import (
+    DesktopSessionAuthority,
     PersistentAuthenticationBlocked,
     ServerIdentityContext,
     ServerIdentityResolver,
 )
 from .schemas import (
     CaseLedgerReceiptResponse,
+    DesktopSessionGrantResponse,
     PersistentArtifactAccessRequest,
     PersistentArtifactAccessResponse,
     PersistentLocalFolderGrantRequest,
@@ -289,6 +291,7 @@ class PersistentApiDependencies:
     settings: RuntimeSettings
     case_ledger_store: PersistentFactLedgerPort
     identity_resolver: ServerIdentityResolver
+    desktop_session_authority: DesktopSessionAuthority | None = None
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
     formal_calculation_store: PersistentFormalCalculationPort | None = None
     legal_source_store: PersistentLegalSourcePort | None = None
@@ -303,6 +306,8 @@ class PersistentApiDependencies:
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
             raise ValueError("persistent API requires postgres-internal-preview runtime settings")
+        if self.desktop_session_authority is not None and self.identity_resolver is not self.desktop_session_authority:
+            raise ValueError("desktop bootstrap and identity resolution must use the same authority")
         if not isinstance(self.case_ledger_store, PostgresCaseLedgerStore):
             # Test doubles must explicitly opt in via the marker; arbitrary
             # objects cannot accidentally become a production persistence port.
@@ -393,6 +398,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
             "original_page_access": "configured" if dependencies.original_page_access_broker else "not-configured",
+            "desktop_session": "configured" if dependencies.desktop_session_authority else "not-configured",
         }
 
     if dependencies is None:
@@ -590,6 +596,31 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "SUBMISSION_ACCESS_DENIED",
             "法院提交包下载许可无效、已过期或不属于当前本机会话。",
         )
+
+    if dependencies.desktop_session_authority is not None:
+        @app.post(
+            "/v1/desktop-sessions/exchange",
+            response_model=DesktopSessionGrantResponse,
+            tags=["desktop-session"],
+        )
+        async def exchange_desktop_session(
+            request: Request,
+            response: Response,
+            x_desktop_bootstrap: Annotated[str | None, Header()] = None,
+        ) -> DesktopSessionGrantResponse:
+            if x_desktop_bootstrap is None:
+                raise PersistentAuthenticationBlocked("desktop bootstrap token is missing")
+            grant = dependencies.desktop_session_authority.exchange(
+                request=request,
+                bootstrap_token=x_desktop_bootstrap,
+            )
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            return DesktopSessionGrantResponse(
+                access_token=grant.access_token,
+                session_id=UUID(grant.session_id),
+                expires_at=grant.expires_at,
+            )
 
     @app.get(
         "/v1/matters/{matter_id}/snapshot",

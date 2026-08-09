@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "cn.lawcase.workbench",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "../backend/.venv/bin/python ../backend/scripts/prepare_desktop.py --dev",
     "devUrl": "http://localhost:3000",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "../backend/.venv/bin/python ../backend/scripts/prepare_desktop.py",
     "frontendDist": "../out",
     "removeUnusedCommands": true
   },
@@ -46,6 +46,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/lawcase-local-api"],
     "targets": ["app"],
     "category": "Business",
     "shortDescription": "证据驱动的律师案件工作台",

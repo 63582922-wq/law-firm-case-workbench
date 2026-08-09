@@ -79,6 +79,13 @@ class HealthResponse(BaseModel):
     persistence: str
 
 
+class DesktopSessionGrantResponse(BaseModel):
+    access_token: str = Field(min_length=32, max_length=160)
+    token_type: Literal["Bearer"] = "Bearer"
+    session_id: UUID
+    expires_at: datetime
+
+
 class CalculationEventRequest(SyntheticGuardedModel):
     event_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
     effective_date: date
