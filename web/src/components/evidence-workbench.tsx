@@ -1,23 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   approveEvidenceAnnotation,
   approveEvidencePageDecision,
   caseDataSourceConfig,
   enqueueEvidenceDerivativeRun,
   fetchEvidenceDerivative,
+  fetchOriginalPagePreview,
+  inspectLocalFolderSelection,
+  issueLocalFolderGrant,
   loadEvidenceReview,
   lockEvidenceManifest,
+  proposeEvidenceAnnotation,
   proposeEvidencePageDecision,
   resolveEvidenceDuplicateGroup,
   type EvidenceDerivative,
   type EvidenceReviewPage,
   type EvidenceReviewView,
+  type LocalFolderGrant,
+  type LocalFolderSelection,
 } from "@/lib/case-data-source";
 import styles from "./case-workbench.module.css";
 
 type DuplicateDecision = "pending" | "exclude" | "keep";
+type DraftBox = { x0: number; y0: number; x1: number; y1: number };
 
 function pageStatus(page: EvidenceReviewPage): string {
   if (page.pendingDecision) return `待批准${page.pendingDecision.disposition === "INCLUDE" ? "纳入" : "排除"}`;
@@ -50,12 +58,34 @@ export function EvidenceWorkbench() {
   const [manifestConfirmed, setManifestConfirmed] = useState(false);
   const [reviewBusy, setReviewBusy] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [folderSelection, setFolderSelection] = useState<LocalFolderSelection | null>(null);
+  const [folderGrant, setFolderGrant] = useState<LocalFolderGrant | null>(null);
+  const [folderBusy, setFolderBusy] = useState<"select" | "grant" | null>(null);
+  const [folderNotice, setFolderNotice] = useState<string | null>(null);
+  const [originalPreview, setOriginalPreview] = useState<{
+    pageId: string;
+    url: string;
+    sha256: string;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [previewedPageIds, setPreviewedPageIds] = useState<string[]>([]);
+  const [originalPreviewBusy, setOriginalPreviewBusy] = useState(false);
+  const [draftBox, setDraftBox] = useState<DraftBox | null>(null);
+  const [draftLabel, setDraftLabel] = useState("");
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     return () => {
       if (artifactPreview) URL.revokeObjectURL(artifactPreview.url);
     };
   }, [artifactPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (originalPreview) URL.revokeObjectURL(originalPreview.url);
+    };
+  }, [originalPreview]);
 
   useEffect(() => {
     let active = true;
@@ -106,6 +136,10 @@ export function EvidenceWorkbench() {
   const unresolvedDuplicateCount = review.duplicateGroups.filter((group) => group.status === "CANDIDATE").length;
   const duplicateGroup = review.duplicateGroups.find((group) => group.pageIds.includes(selected.pageId));
   const source = review.originals.find((item) => item.fileId === selected.fileId);
+  const hasCurrentOriginalPreview = originalPreview?.pageId === selected.pageId;
+  const duplicatePagesPreviewed = duplicateGroup
+    ? duplicateGroup.pageIds.every((pageId) => previewedPageIds.includes(pageId))
+    : true;
 
   function recordSyntheticDecision() {
     if (duplicateDecision === "pending") {
@@ -164,6 +198,114 @@ export function EvidenceWorkbench() {
     }
   }
 
+  async function selectCaseFolder() {
+    if (caseDataSourceConfig.kind !== "persistent-preview") return;
+    setFolderBusy("select");
+    setFolderNotice(null);
+    try {
+      if (!window.lawCaseDesktop) throw new Error("当前网页壳层尚未连接本机文件夹选择器；请从桌面版打开本案。");
+      const picked = await window.lawCaseDesktop.selectCaseFolder({ matterId: caseDataSourceConfig.matterId });
+      if (!picked) {
+        setFolderNotice("已取消选择，没有读取任何文件。");
+        return;
+      }
+      const selection = await inspectLocalFolderSelection(picked.selectedRoot);
+      setFolderSelection(selection);
+      setFolderGrant(null);
+      clearOriginalPagePreview();
+      setPreviewedPageIds([]);
+      setOriginalCompared(false);
+      setFolderNotice(`已选择“${selection.displayName}”，尚未授权读取。请核对名称后确认。`);
+    } catch (reason: unknown) {
+      setFolderNotice(reason instanceof Error ? reason.message : "案卷文件夹选择失败");
+    } finally {
+      setFolderBusy(null);
+    }
+  }
+
+  async function confirmCaseFolder() {
+    if (!folderSelection) return;
+    setFolderBusy("grant");
+    setFolderNotice(null);
+    try {
+      const grant = await issueLocalFolderGrant(folderSelection);
+      setFolderGrant(grant);
+      setPreviewedPageIds([]);
+      setFolderNotice(`“${grant.displayName}”已获得本机会话内的短时只读授权。`);
+    } catch (reason: unknown) {
+      setFolderNotice(reason instanceof Error ? reason.message : "案卷文件夹授权失败");
+    } finally {
+      setFolderBusy(null);
+    }
+  }
+
+  async function readOriginalPage() {
+    if (!folderGrant || !selected) {
+      setFolderNotice("请先选择并确认本案的本地案卷文件夹。");
+      return;
+    }
+    setOriginalPreviewBusy(true);
+    setFolderNotice(null);
+    const currentPage = selected;
+    try {
+      const delivery = await fetchOriginalPagePreview(currentPage.pageId, folderGrant.grantId);
+      const url = URL.createObjectURL(delivery.blob);
+      setOriginalPreview((prior) => {
+        if (prior) URL.revokeObjectURL(prior.url);
+        return {
+          pageId: delivery.pageId,
+          url,
+          sha256: delivery.contentSha256,
+          width: delivery.width,
+          height: delivery.height,
+        };
+      });
+      setPreviewedPageIds((prior) => prior.includes(currentPage.pageId) ? prior : [...prior, currentPage.pageId]);
+      setOriginalCompared(false);
+      setDraftBox(null);
+      setDraftLabel("");
+      setFolderNotice(`已在内存中打开第 ${currentPage.pageNumber} 页单页预览；未传出整份原件。`);
+    } catch (reason: unknown) {
+      setFolderNotice(reason instanceof Error ? reason.message : "原始证据页预览失败");
+    } finally {
+      setOriginalPreviewBusy(false);
+    }
+  }
+
+  function previewCoordinate(event: ReactPointerEvent<HTMLDivElement>): { x: number; y: number } {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height)),
+    };
+  }
+
+  function beginRedBox(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!review || !hasCurrentOriginalPreview || review.lockedManifest) return;
+    dragStart.current = previewCoordinate(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDraftBox(null);
+  }
+
+  function finishRedBox(event: ReactPointerEvent<HTMLDivElement>) {
+    const start = dragStart.current;
+    dragStart.current = null;
+    if (!review || !start || !hasCurrentOriginalPreview || review.lockedManifest) return;
+    const end = previewCoordinate(event);
+    const next = {
+      x0: Math.min(start.x, end.x),
+      y0: Math.min(start.y, end.y),
+      x1: Math.max(start.x, end.x),
+      y1: Math.max(start.y, end.y),
+    };
+    if (next.x1 - next.x0 < 0.005 || next.y1 - next.y0 < 0.005) {
+      setReviewNotice("红框范围太小，请在页图上重新拖选。");
+      return;
+    }
+    setDraftBox(next);
+    setReviewNotice("已形成红框草稿；填写说明并提交候选后，仍需律师批准。 ");
+  }
+
   async function refreshAfterEvidenceMutation(
     actionKey: string,
     action: () => Promise<{ matterVersion: number }>,
@@ -195,6 +337,15 @@ export function EvidenceWorkbench() {
     return page ? `${page.originalLabel} · 第 ${page.pageNumber} 页` : pageId;
   }
 
+  function clearOriginalPagePreview() {
+    setOriginalPreview((prior) => {
+      if (prior) URL.revokeObjectURL(prior.url);
+      return null;
+    });
+    setDraftBox(null);
+    setDraftLabel("");
+  }
+
   return (
     <section className={styles.evidenceArea} aria-label="证据核验台">
       <header className={styles.evidenceHeading}>
@@ -209,6 +360,26 @@ export function EvidenceWorkbench() {
         </div>
       </header>
 
+      {review.sourceKind === "persistent-preview" && (
+        <div className={styles.folderAccessBar}>
+          <div>
+            <strong>{folderGrant ? `已授权：${folderGrant.displayName}` : folderSelection ? `待确认：${folderSelection.displayName}` : "尚未选择本案案卷文件夹"}</strong>
+            <span>{folderGrant ? `短时只读授权至 ${new Date(folderGrant.expiresAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "绝对路径不会写入案卷数据库，原件不会被修改。"}</span>
+          </div>
+          <div>
+            <button disabled={folderBusy !== null} onClick={() => void selectCaseFolder()} type="button">
+              {folderBusy === "select" ? "正在选择…" : folderGrant ? "重新选择文件夹" : "选择案卷文件夹"}
+            </button>
+            {folderSelection && !folderGrant && (
+              <button disabled={folderBusy !== null} onClick={() => void confirmCaseFolder()} type="button">
+                {folderBusy === "grant" ? "正在授权…" : "确认短时只读授权"}
+              </button>
+            )}
+          </div>
+          {folderNotice && <p role="status">{folderNotice}</p>}
+        </div>
+      )}
+
       <div className={styles.evidenceColumns}>
         <aside className={styles.pageList}>
           <div className={styles.listHeading}><span>全部来源页</span><small>零静默排除</small></div>
@@ -222,6 +393,7 @@ export function EvidenceWorkbench() {
                 setPageReason(item.pendingDecision?.reason ?? item.reason ?? "");
                 setOriginalCompared(false);
                 setManifestConfirmed(false);
+                clearOriginalPagePreview();
                 const group = review.duplicateGroups.find((candidate) => candidate.pageIds.includes(item.pageId));
                 setCanonicalPageId(group?.canonicalPageId ?? group?.pageIds[0] ?? null);
               }}
@@ -238,7 +410,7 @@ export function EvidenceWorkbench() {
         <article className={styles.documentStage}>
           <div className={styles.documentToolbar}>
             <span>原始页定位 · 第 {selected.pageNumber} 页</span>
-            <span>{review.sourceKind === "synthetic-alpha" ? "合成预览" : "对象预览待安全接入"}</span>
+            <span>{review.sourceKind === "synthetic-alpha" ? "合成预览" : hasCurrentOriginalPreview ? "受控单页预览" : "等待本机单页预览"}</span>
           </div>
           {artifactPreview ? (
             <div className={styles.artifactPreview}>
@@ -250,6 +422,49 @@ export function EvidenceWorkbench() {
                 })}>关闭预览</button>
               </div>
               <iframe src={artifactPreview.url} title={`${artifactPreview.label} PDF 预览`} sandbox="" />
+            </div>
+          ) : hasCurrentOriginalPreview && originalPreview ? (
+            <div className={styles.originalPreviewFrame}>
+              <div className={styles.originalPreviewHeader}>
+                <div><strong>{selected.originalLabel} · 第 {selected.pageNumber} 页</strong><small>PNG {originalPreview.width} × {originalPreview.height} · {originalPreview.sha256.slice(0, 16)}…</small></div>
+                <button onClick={clearOriginalPagePreview} type="button">关闭单页预览</button>
+              </div>
+              <div
+                aria-label={`原始证据第 ${selected.pageNumber} 页，可拖选红框`}
+                className={styles.originalPageCanvas}
+                onPointerDown={beginRedBox}
+                onPointerUp={finishRedBox}
+                role="img"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element -- authenticated in-memory Blob has no stable Next image URL */}
+                <img alt={`原始证据 ${selected.originalLabel} 第 ${selected.pageNumber} 页`} draggable={false} src={originalPreview.url} />
+                {selected.annotations.map((annotation) => (
+                  <span
+                    aria-label={`${annotation.status === "APPROVED" ? "已批准" : "待批准"}红框：${annotation.label}`}
+                    className={annotation.status === "APPROVED" ? styles.approvedBox : styles.candidateBox}
+                    key={annotation.annotationId}
+                    style={{
+                      left: `${annotation.x0 * 100}%`,
+                      top: `${annotation.y0 * 100}%`,
+                      width: `${(annotation.x1 - annotation.x0) * 100}%`,
+                      height: `${(annotation.y1 - annotation.y0) * 100}%`,
+                    }}
+                  />
+                ))}
+                {draftBox && (
+                  <span
+                    aria-label="红框草稿"
+                    className={styles.draftBox}
+                    style={{
+                      left: `${draftBox.x0 * 100}%`,
+                      top: `${draftBox.y0 * 100}%`,
+                      width: `${(draftBox.x1 - draftBox.x0) * 100}%`,
+                      height: `${(draftBox.y1 - draftBox.y0) * 100}%`,
+                    }}
+                  />
+                )}
+              </div>
+              {!review.lockedManifest && <p>在页图上按住并拖动可建立红框草稿；红框不会写入原件，提交候选后仍需律师批准。</p>}
             </div>
           ) : selected.syntheticPreview ? (
             <div className={styles.documentPaper} aria-label={`合成交易记录第 ${selected.pageNumber} 页`}>
@@ -265,14 +480,17 @@ export function EvidenceWorkbench() {
             </div>
           ) : (
             <div className={styles.sourcePreviewUnavailable}>
-              <p className={styles.eyebrow}>原件影像未传到浏览器</p>
+              <p className={styles.eyebrow}>原件单页尚未打开</p>
               <h3>{selected.originalLabel}</h3>
-              <p>当前持久化快照只返回页标识、处置、重复组和红框坐标。对象存储签名读取与原件影像渲染尚未通过安全门，因此这里不会伪造预览。</p>
+              <p>{folderGrant ? "点击下方按钮后，系统会在本机核验原件哈希并只渲染当前一页，不会把整份 PDF 送到浏览器。" : "请先通过上方按钮选择并确认本案案卷文件夹；未授权前不会读取任何原件。"}</p>
               <dl>
                 <div><dt>文件哈希</dt><dd>{source?.originalFileSha256.slice(0, 18) ?? "—"}…</dd></div>
                 <div><dt>来源页</dt><dd>第 {selected.pageNumber} 页</dd></div>
                 <div><dt>批准标注</dt><dd>{selected.annotations.filter((item) => item.status === "APPROVED").length} 个</dd></div>
               </dl>
+              <button className={styles.originalPreviewAction} disabled={!folderGrant || originalPreviewBusy} onClick={() => void readOriginalPage()} type="button">
+                {originalPreviewBusy ? "正在核验并渲染…" : "打开当前原始页"}
+              </button>
             </div>
           )}
           <p className={styles.sourceNote}>来源层：原始文件与来源页不可修改；相关页 PDF、红框 PDF 和提交件只能从锁定 Manifest 派生。</p>
@@ -299,11 +517,11 @@ export function EvidenceWorkbench() {
                     <small>{selected.pendingDecision.reason}</small>
                   </div>
                   <label className={styles.confirmLine}>
-                    <input checked={originalCompared} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
-                    我已对照原始文件第 {selected.pageNumber} 页核验该决定
+                    <input checked={originalCompared} disabled={!hasCurrentOriginalPreview} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
+                    我已在上方受控单页预览中核验该决定
                   </label>
                   <button
-                    disabled={!originalCompared || reviewBusy !== null}
+                    disabled={!hasCurrentOriginalPreview || !originalCompared || reviewBusy !== null}
                     type="button"
                     onClick={() => void refreshAfterEvidenceMutation(
                       `approve-page:${selected.pageId}`,
@@ -324,7 +542,7 @@ export function EvidenceWorkbench() {
                   <label htmlFor="page-reason">处置理由</label>
                   <textarea id="page-reason" maxLength={2000} onChange={(event) => setPageReason(event.target.value)} placeholder="例如：与目标主体的微信交易相关；或该页与本案无关。" value={pageReason} />
                   <button
-                    disabled={!pageReason.trim() || reviewBusy !== null}
+                    disabled={!hasCurrentOriginalPreview || !pageReason.trim() || reviewBusy !== null}
                     type="button"
                     onClick={() => void refreshAfterEvidenceMutation(
                       `propose-page:${selected.pageId}`,
@@ -339,13 +557,33 @@ export function EvidenceWorkbench() {
             </div>
           )}
 
+          {review.sourceKind === "persistent-preview" && !review.lockedManifest && hasCurrentOriginalPreview && draftBox && (
+            <div className={styles.decisionPanel}>
+              <strong>红框草稿</strong>
+              <small>坐标：({draftBox.x0.toFixed(4)}, {draftBox.y0.toFixed(4)})—({draftBox.x1.toFixed(4)}, {draftBox.y1.toFixed(4)})</small>
+              <label htmlFor="draft-box-label">红框说明</label>
+              <input id="draft-box-label" maxLength={500} onChange={(event) => setDraftLabel(event.target.value)} placeholder="例如：与目标微信昵称相关的交易行" value={draftLabel} />
+              <button
+                disabled={!draftLabel.trim() || reviewBusy !== null}
+                onClick={() => void refreshAfterEvidenceMutation(
+                  `propose-annotation:${selected.pageId}`,
+                  () => proposeEvidenceAnnotation({ review, pageId: selected.pageId, ...draftBox, label: draftLabel }),
+                  "红框候选已建立，尚未批准",
+                )}
+                type="button"
+              >
+                {reviewBusy === `propose-annotation:${selected.pageId}` ? "正在建立红框候选…" : "提交红框候选"}
+              </button>
+            </div>
+          )}
+
           {selected.annotations.length > 0 && (
             <div className={styles.coordinateList}>
               <strong>红框坐标</strong>
               {review.sourceKind === "persistent-preview" && !review.lockedManifest && selected.annotations.some((item) => item.status === "CANDIDATE") && !selected.pendingDecision && duplicateGroup?.status !== "CANDIDATE" && (
                 <label className={styles.confirmLine}>
-                  <input checked={originalCompared} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
-                  我已对照原始文件第 {selected.pageNumber} 页核验候选红框
+                  <input checked={originalCompared} disabled={!hasCurrentOriginalPreview} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
+                  我已在上方受控单页预览中核验候选红框
                 </label>
               )}
               {selected.annotations.map((annotation) => (
@@ -353,7 +591,7 @@ export function EvidenceWorkbench() {
                   <span>{annotation.label} · ({annotation.x0}, {annotation.y0})—({annotation.x1}, {annotation.y1}) · {annotation.status === "APPROVED" ? "已批准" : "待批准"}</span>
                   {review.sourceKind === "persistent-preview" && !review.lockedManifest && annotation.status === "CANDIDATE" && (
                     <button
-                      disabled={!originalCompared || reviewBusy !== null}
+                      disabled={!hasCurrentOriginalPreview || !originalCompared || reviewBusy !== null}
                       type="button"
                       onClick={() => void refreshAfterEvidenceMutation(
                         `approve-annotation:${annotation.annotationId}`,
@@ -386,11 +624,12 @@ export function EvidenceWorkbench() {
                 </>
               )}
               <label className={styles.confirmLine}>
-                <input checked={originalCompared} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
-                我已逐页对照原始文件核验该重复页结论
+                <input checked={originalCompared} disabled={!duplicatePagesPreviewed} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
+                我已在受控单页预览中逐页核验本组全部 {duplicateGroup.pageIds.length} 页
               </label>
+              {!duplicatePagesPreviewed && <small>请从左侧依次打开本组每一页的原始单页预览后再裁决。</small>}
               <button
-                disabled={!originalCompared || reviewBusy !== null}
+                disabled={!duplicatePagesPreviewed || !originalCompared || reviewBusy !== null}
                 type="button"
                 onClick={() => void refreshAfterEvidenceMutation(
                   `resolve-duplicate:${duplicateGroup.groupId}`,

@@ -6,6 +6,7 @@ explicit dependencies this factory exposes only a disabled health response.
 
 from dataclasses import dataclass
 from datetime import datetime
+from ipaddress import ip_address
 from typing import Annotated, Protocol
 from uuid import UUID
 from uuid import uuid4
@@ -48,8 +49,16 @@ from case_kernel.official_source_capture_postgres import (
     PostgresOfficialSourceCaptureStore,
 )
 from case_kernel.models import Actor
-from case_kernel.local_access_grants import LocalSessionProof
+from case_kernel.local_access_grants import (
+    LocalFolderAccessBlocked,
+    LocalFolderGrantRegistry,
+    LocalSessionProof,
+)
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
+from case_kernel.original_page_access import (
+    OriginalPageAccessBlocked,
+    OriginalPageAccessBroker,
+)
 from case_kernel.submission_postgres import (
     PersistentSubmissionSnapshot,
     PostgresSubmissionStore,
@@ -79,6 +88,12 @@ from .schemas import (
     CaseLedgerReceiptResponse,
     PersistentArtifactAccessRequest,
     PersistentArtifactAccessResponse,
+    PersistentLocalFolderGrantRequest,
+    PersistentLocalFolderGrantResponse,
+    PersistentLocalFolderSelectionRequest,
+    PersistentLocalFolderSelectionResponse,
+    PersistentOriginalPageAccessRequest,
+    PersistentOriginalPageAccessResponse,
     PersistentCaseSnapshotResponse,
     PersistentApprovalRequest,
     PersistentClaimCandidateRequest,
@@ -194,6 +209,8 @@ class PersistentEvidenceManifestPort(Protocol):
 
     def get_verified_derivative_locator(self, *, matter_id: str, derivative_id: str, actor: Actor): ...
 
+    def get_original_page_locator(self, *, matter_id: str, evidence_page_id: str, actor: Actor): ...
+
 
 class PersistentFormalCalculationPort(Protocol):
     def create_formal_calculation(self, **kwargs) -> CaseLedgerCommandReceipt: ...
@@ -280,6 +297,8 @@ class PersistentApiDependencies:
     submission_access_broker: SubmissionExportAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
+    local_folder_grants: LocalFolderGrantRegistry | None = None
+    original_page_access_broker: OriginalPageAccessBroker | None = None
 
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
@@ -327,6 +346,13 @@ class PersistentApiDependencies:
             raise ValueError("artifact access requires the guarded evidence Manifest store")
         if self.submission_access_broker is not None and self.submission_store is None:
             raise ValueError("submission access requires the guarded submission store")
+        if (self.local_folder_grants is None) != (self.original_page_access_broker is None):
+            raise ValueError("original-page access requires both the folder grant registry and preview broker")
+        if self.original_page_access_broker is not None:
+            if self.evidence_manifest_store is None:
+                raise ValueError("original-page access requires the guarded evidence Manifest store")
+            if self.original_page_access_broker.folder_grants is not self.local_folder_grants:
+                raise ValueError("original-page access broker must use the configured folder grant registry")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
@@ -366,6 +392,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "submission": "configured" if dependencies.submission_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
+            "original_page_access": "configured" if dependencies.original_page_access_broker else "not-configured",
         }
 
     if dependencies is None:
@@ -429,6 +456,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "verified submission export access is not configured"
             )
         return dependencies.submission_access_broker, dependencies.artifact_store
+
+    def require_original_page_services() -> tuple[LocalFolderGrantRegistry, OriginalPageAccessBroker]:
+        if dependencies.local_folder_grants is None or dependencies.original_page_access_broker is None:
+            raise PersistentEvidenceServiceUnavailable("original-page preview access is not configured")
+        return dependencies.local_folder_grants, dependencies.original_page_access_broker
 
     @app.exception_handler(PersistentAuthenticationBlocked)
     async def authentication_handler(_: Request, exc: PersistentAuthenticationBlocked):
@@ -530,6 +562,24 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "ARTIFACT_INTEGRITY_BLOCKED",
             "证据派生件完整性核验未通过，系统已停止读取。",
+        )
+
+    @app.exception_handler(LocalFolderAccessBlocked)
+    async def local_folder_access_handler(_: Request, exc: LocalFolderAccessBlocked):
+        del exc
+        return _error(
+            status.HTTP_403_FORBIDDEN,
+            "LOCAL_FOLDER_ACCESS_DENIED",
+            "本地案卷文件夹授权无效、已过期或原件已发生变化。",
+        )
+
+    @app.exception_handler(OriginalPageAccessBlocked)
+    async def original_page_access_handler(_: Request, exc: OriginalPageAccessBlocked):
+        del exc
+        return _error(
+            status.HTTP_403_FORBIDDEN,
+            "ORIGINAL_PAGE_ACCESS_DENIED",
+            "原始证据页预览许可无效、已过期或完整性核验未通过。",
         )
 
     @app.exception_handler(SubmissionAccessBlocked)
@@ -1828,6 +1878,132 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         )
 
     @app.post(
+        "/v1/matters/{matter_id}/local-folder-selections/inspect",
+        response_model=PersistentLocalFolderSelectionResponse,
+        tags=["evidence-access"],
+    )
+    async def inspect_local_folder_selection(
+        matter_id: UUID,
+        request: Request,
+        body: PersistentLocalFolderSelectionRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+    ) -> PersistentLocalFolderSelectionResponse:
+        _require_loopback(request)
+        folder_grants, _ = require_original_page_services()
+        inspection = folder_grants.inspect_selection(
+            selected_root=body.selected_root,
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            session=_local_session(identity),
+        )
+        return PersistentLocalFolderSelectionResponse(
+            display_name=inspection.display_name,
+            root_fingerprint=inspection.root_fingerprint,
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/local-folder-grants",
+        response_model=PersistentLocalFolderGrantResponse,
+        tags=["evidence-access"],
+    )
+    async def issue_local_folder_grant(
+        matter_id: UUID,
+        request: Request,
+        body: PersistentLocalFolderGrantRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+    ) -> PersistentLocalFolderGrantResponse:
+        _require_loopback(request)
+        folder_grants, _ = require_original_page_services()
+        inspection = folder_grants.inspect_selection(
+            selected_root=body.selected_root,
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            session=_local_session(identity),
+        )
+        handle = folder_grants.issue_read_grant(
+            selected_root=body.selected_root,
+            confirmed_root_fingerprint=body.confirmed_root_fingerprint,
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            session=_local_session(identity),
+        )
+        return PersistentLocalFolderGrantResponse(
+            grant_id=handle.grant_id,
+            display_name=inspection.display_name,
+            root_fingerprint=handle.root_fingerprint,
+            expires_at=handle.expires_at,
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-pages/{evidence_page_id}/original-preview/access",
+        response_model=PersistentOriginalPageAccessResponse,
+        tags=["evidence-access"],
+    )
+    async def issue_original_page_access(
+        matter_id: UUID,
+        evidence_page_id: UUID,
+        request: Request,
+        body: PersistentOriginalPageAccessRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentOriginalPageAccessResponse:
+        _require_loopback(request)
+        _, broker = require_original_page_services()
+        locator = evidence_store.get_original_page_locator(
+            matter_id=str(matter_id),
+            evidence_page_id=str(evidence_page_id),
+            actor=identity.actor,
+        )
+        issued = broker.issue(
+            locator=locator,
+            folder_grant_id=str(body.folder_grant_id),
+            actor=identity.actor,
+            session=_local_session(identity),
+        )
+        return PersistentOriginalPageAccessResponse(
+            grant_id=issued.grant_id,
+            evidence_page_id=issued.evidence_page_id,
+            access_token=issued.access_token,
+            expires_at=issued.expires_at,
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-pages/{evidence_page_id}/original-preview/content",
+        response_class=Response,
+        tags=["evidence-access"],
+    )
+    async def deliver_original_page_preview(
+        matter_id: UUID,
+        evidence_page_id: UUID,
+        request: Request,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        _require_loopback(request)
+        _, broker = require_original_page_services()
+        delivery = broker.deliver(
+            access_token=_bearer_token(authorization),
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            evidence_page_id=str(evidence_page_id),
+            session=_local_session(identity),
+            client_ip=request.client.host if request.client else "",
+        )
+        return Response(
+            content=delivery.content,
+            media_type=delivery.media_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Content-Disposition": f'inline; filename="{delivery.file_name}"',
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-SHA256": delivery.content_sha256,
+                "X-Image-Width": str(delivery.width),
+                "X-Image-Height": str(delivery.height),
+            },
+        )
+
+    @app.post(
         "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/access",
         response_model=PersistentArtifactAccessResponse,
         tags=["evidence-access"],
@@ -1920,6 +2096,17 @@ def _bearer_token(value: str | None) -> str:
     if not token:
         raise PersistentRequestBlocked("artifact delivery requires a bearer token")
     return token
+
+
+def _require_loopback(request: Request) -> None:
+    if request.client is None:
+        raise OriginalPageAccessBlocked("original-page access requires a local client address")
+    try:
+        address = ip_address(request.client.host)
+    except ValueError as error:
+        raise OriginalPageAccessBlocked("original-page access requires a valid local client address") from error
+    if not address.is_loopback:
+        raise OriginalPageAccessBlocked("original-page access is restricted to the local device")
 
 
 def _evidence_links(items) -> tuple[EvidenceLink, ...]:

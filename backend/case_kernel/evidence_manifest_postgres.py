@@ -38,6 +38,7 @@ from .case_ledger_postgres import (
 from .artifact_access import VerifiedDerivativeLocator
 from .evidence_manifest import DuplicateResolution, PageDisposition, ReviewStatus
 from .models import Actor, Role
+from .original_page_access import OriginalPageLocator
 
 
 @dataclass(frozen=True)
@@ -1916,6 +1917,53 @@ class PostgresEvidenceManifestStore:
             artifact_sha256=row["artifact_sha256"],
             page_count=row["page_count"],
             status=row["status"],
+        )
+
+    def get_original_page_locator(
+        self,
+        *,
+        matter_id: str,
+        evidence_page_id: str,
+        actor: Actor,
+    ) -> OriginalPageLocator:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("evidence_page_id", evidence_page_id)
+        human_read_roles = self._READ_ROLES.difference({Role.SYSTEM_WORKER})
+        _require_roles(actor, human_read_roles)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=human_read_roles,
+            )
+            row = connection.execute(
+                """
+                SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
+                       source.original_label, source.original_file_sha256,
+                       source.byte_size, source.media_type, source.page_count
+                FROM evidence_pages page
+                JOIN evidence_original_files source
+                  ON source.evidence_file_id = page.evidence_file_id
+                 AND source.firm_id = page.firm_id AND source.matter_id = page.matter_id
+                WHERE page.evidence_page_id = %s
+                  AND page.matter_id = %s AND page.firm_id = %s
+                """,
+                (evidence_page_id, matter_id, actor.firm_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(evidence_page_id)
+        return OriginalPageLocator(
+            firm_id=actor.firm_id,
+            matter_id=matter_id,
+            evidence_page_id=str(row["evidence_page_id"]),
+            evidence_file_id=str(row["evidence_file_id"]),
+            original_label=row["original_label"],
+            original_file_sha256=row["original_file_sha256"],
+            byte_size=row["byte_size"],
+            media_type=row["media_type"],
+            page_count=row["page_count"],
+            page_number=row["page_number"],
         )
 
     def _begin_or_replay(

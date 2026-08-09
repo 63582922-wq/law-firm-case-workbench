@@ -664,6 +664,37 @@ class PersistentArtifactAccessResponse(BaseModel):
     expires_at: datetime
 
 
+class PersistentLocalFolderSelectionRequest(BaseModel):
+    selected_root: str = Field(min_length=1, max_length=4_096)
+
+
+class PersistentLocalFolderSelectionResponse(BaseModel):
+    display_name: str = Field(min_length=1, max_length=500)
+    root_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentLocalFolderGrantRequest(PersistentLocalFolderSelectionRequest):
+    confirmed_root_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentLocalFolderGrantResponse(BaseModel):
+    grant_id: UUID
+    display_name: str = Field(min_length=1, max_length=500)
+    root_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expires_at: datetime
+
+
+class PersistentOriginalPageAccessRequest(BaseModel):
+    folder_grant_id: UUID
+
+
+class PersistentOriginalPageAccessResponse(BaseModel):
+    grant_id: UUID
+    evidence_page_id: UUID
+    access_token: str = Field(min_length=20, max_length=200)
+    expires_at: datetime
+
+
 class PersistentFormalCalculationRequest(BaseModel):
     expected_version: int = Field(ge=1)
     obligation_id: str = Field(min_length=1, max_length=240)

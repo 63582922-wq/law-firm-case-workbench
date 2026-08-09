@@ -7,6 +7,8 @@
 - `case_api.app` 继续只服务 `alpha_*` 合成对象，不挂载任何持久化路由；
 - `case_api.persistent_app.create_persistent_app()` 未注入依赖时只返回“已禁用”健康状态，案件路由不存在；
 - 启用持久化路由必须使用 `postgres-internal-preview` 配置、受控 PostgreSQL 台账 Store 和服务端身份解析器；
+- 本地原件页预览要求成对注入 `LocalFolderGrantRegistry` 与使用同一 Registry 的 `OriginalPageAccessBroker`；缺任一依赖时接口按 503 阻断，不回退到整份 PDF 或浏览器直读；
+- 文件夹检查、短时授权和单页预览仅接受 loopback 请求及 `OS_BOUND_LOCAL_SESSION`。响应不返回绝对路径；预览许可绑定律所、案件、操作者、会话、文件夹授权、原件哈希和来源页，一次使用后立即失效；
 - 加密派生件访问必须与证据 Store、OS 绑定会话、Keychain 取钥和本机 loopback 同时配置；缺任一项返回 `503`，不回退公开对象路径、合成文件或环境密钥；
 - 客户端提交的姓名、角色或 `X-Actor` 等头部不形成身份，最终权限还必须由数据库内本案成员关系复核。
 

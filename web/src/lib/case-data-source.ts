@@ -77,6 +77,27 @@ export type EvidenceMutationReceipt = {
   requestId: string | null;
 };
 
+export type LocalFolderSelection = {
+  selectedRoot: string;
+  displayName: string;
+  rootFingerprint: string;
+};
+
+export type LocalFolderGrant = {
+  grantId: string;
+  displayName: string;
+  rootFingerprint: string;
+  expiresAt: string;
+};
+
+export type OriginalPagePreviewDelivery = {
+  pageId: string;
+  blob: Blob;
+  contentSha256: string;
+  width: number;
+  height: number;
+};
+
 export type CalculationReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1001,6 +1022,115 @@ export async function fetchEvidenceDerivative(
   };
 }
 
+export async function inspectLocalFolderSelection(
+  selectedRoot: string,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LocalFolderSelection> {
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以选择案卷文件夹。");
+  const normalizedRoot = selectedRoot.trim();
+  if (!normalizedRoot) throw new Error("本机没有返回已选择的案卷文件夹。");
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/local-folder-selections/inspect`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ selected_root: normalizedRoot }),
+  });
+  const payload = (await response.json()) as
+    | { display_name: string; root_fingerprint: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("root_fingerprint" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "无法核验所选案卷文件夹"));
+  }
+  return {
+    selectedRoot: normalizedRoot,
+    displayName: payload.display_name,
+    rootFingerprint: payload.root_fingerprint,
+  };
+}
+
+export async function issueLocalFolderGrant(
+  selection: LocalFolderSelection,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LocalFolderGrant> {
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以授权案卷文件夹。");
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/local-folder-grants`, {
+    method: "POST",
+    credentials: "include",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({
+      selected_root: selection.selectedRoot,
+      confirmed_root_fingerprint: selection.rootFingerprint,
+    }),
+  });
+  const payload = (await response.json()) as
+    | { grant_id: string; display_name: string; root_fingerprint: string; expires_at: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("grant_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案卷文件夹授权未建立"));
+  }
+  if (payload.root_fingerprint !== selection.rootFingerprint) {
+    throw new Error("案卷文件夹在确认前发生变化，已停止授权。");
+  }
+  return {
+    grantId: payload.grant_id,
+    displayName: payload.display_name,
+    rootFingerprint: payload.root_fingerprint,
+    expiresAt: payload.expires_at,
+  };
+}
+
+export async function fetchOriginalPagePreview(
+  pageId: string,
+  folderGrantId: string,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OriginalPagePreviewDelivery> {
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以预览原始证据页。");
+  const accessResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/access`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ folder_grant_id: folderGrantId }),
+    },
+  );
+  const accessPayload = (await accessResponse.json()) as
+    | { access_token: string; evidence_page_id: string }
+    | ErrorEnvelope;
+  if (!accessResponse.ok || !("access_token" in accessPayload)) {
+    throw new Error(errorMessage(accessPayload as ErrorEnvelope, "无法取得原始证据页的短时预览许可"));
+  }
+  if (accessPayload.evidence_page_id !== pageId) throw new Error("原始证据页预览许可与当前页面不一致。");
+  const contentResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/content`,
+    {
+      credentials: "include",
+      headers: { Accept: "image/png", Authorization: `Bearer ${accessPayload.access_token}` },
+      cache: "no-store",
+    },
+  );
+  if (!contentResponse.ok) {
+    const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new Error(errorMessage(payload, "原始证据页预览失败"));
+  }
+  if (contentResponse.headers.get("Content-Type")?.split(";", 1)[0] !== "image/png") {
+    throw new Error("原始证据页返回了非 PNG 内容，已停止预览。");
+  }
+  const contentLength = Number(contentResponse.headers.get("Content-Length") || "0");
+  if (contentLength > 30 * 1024 * 1024) throw new Error("原始证据页预览超过本机大小上限。");
+  const blob = await contentResponse.blob();
+  if (blob.size < 24 || blob.size > 30 * 1024 * 1024) throw new Error("原始证据页预览为空或超过本机大小上限。");
+  const returnedHash = contentResponse.headers.get("X-Artifact-SHA256");
+  const actualHash = await sha256Bytes(await blob.arrayBuffer());
+  if (!returnedHash || returnedHash !== actualHash) throw new Error("原始证据页预览哈希核验失败，已停止显示。");
+  const width = Number(contentResponse.headers.get("X-Image-Width") || "0");
+  const height = Number(contentResponse.headers.get("X-Image-Height") || "0");
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    throw new Error("原始证据页预览尺寸无效，已停止显示。");
+  }
+  return { pageId, blob, contentSha256: actualHash, width, height };
+}
+
 export async function proposeEvidencePageDecision(
   input: { review: EvidenceReviewView; pageId: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string },
   config: CaseDataSourceConfig = caseDataSourceConfig,
@@ -1072,6 +1202,45 @@ export async function approveEvidenceAnnotation(
     expectedObjectType: "EVIDENCE_ANNOTATION",
     fallback: "红框候选未获批准",
     interrupted: "连接在红框批准确认前中断。请先刷新证据快照；系统不会重复提交律师决定。",
+  });
+}
+
+export async function proposeEvidenceAnnotation(
+  input: {
+    review: EvidenceReviewView;
+    pageId: string;
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+    label: string;
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  const { matterVersion, persistentConfig } = requireEvidenceMutationContext(input.review, config);
+  const label = input.label.trim();
+  if (!label) throw new Error("请填写红框所标识内容的简短说明。");
+  const coordinates = [input.x0, input.y0, input.x1, input.y1];
+  if (coordinates.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) {
+    throw new Error("红框坐标不在当前原始页范围内。");
+  }
+  if (input.x1 - input.x0 < 0.005 || input.y1 - input.y0 < 0.005) {
+    throw new Error("红框范围太小，请重新拖选需要标识的区域。");
+  }
+  return postEvidenceMutation({
+    config: persistentConfig,
+    path: `evidence-pages/${input.pageId}/annotations`,
+    body: {
+      expected_version: matterVersion,
+      x0: input.x0.toFixed(9),
+      y0: input.y0.toFixed(9),
+      x1: input.x1.toFixed(9),
+      y1: input.y1.toFixed(9),
+      label,
+    },
+    expectedObjectType: "EVIDENCE_ANNOTATION",
+    fallback: "红框候选未建立",
+    interrupted: "连接在红框候选确认前中断。请先刷新证据快照；系统不会盲目重复提交。",
   });
 }
 
@@ -1937,5 +2106,11 @@ function isAllowedPreviewOrigin(value: string): boolean {
 async function sha256Text(value: string): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new Error("当前浏览器无法建立审批输入哈希。");
   const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Bytes(value: ArrayBuffer): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error("当前浏览器无法核验本机预览哈希。");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", value);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

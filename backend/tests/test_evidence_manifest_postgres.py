@@ -40,6 +40,7 @@ class FakeEvidenceConnection:
         manifest_row: dict | None = None,
         derivative_row: dict | None = None,
         verified_locator_row: dict | None = None,
+        original_page_locator_row: dict | None = None,
         derivative_run_row: dict | None = None,
         derivative_run_existing: dict | None = None,
         derivative_run_claimed: dict | None = None,
@@ -57,6 +58,7 @@ class FakeEvidenceConnection:
         self.manifest_row = manifest_row
         self.derivative_row = derivative_row
         self.verified_locator_row = verified_locator_row
+        self.original_page_locator_row = original_page_locator_row
         self.derivative_run_row = derivative_run_row
         self.derivative_run_existing = derivative_run_existing
         self.derivative_run_claimed = derivative_run_claimed
@@ -89,6 +91,8 @@ class FakeEvidenceConnection:
             )
         if "SELECT manifest_id FROM evidence_manifests" in normalized:
             return FakeResult(row=None)
+        if "source.byte_size, source.media_type, source.page_count" in normalized:
+            return FakeResult(row=self.original_page_locator_row)
         if "SELECT page.evidence_page_id, page.evidence_file_id" in normalized:
             return FakeResult(rows=self.lock_pages)
         if "SELECT duplicate_group_id, status, canonical_page_id" in normalized:
@@ -494,6 +498,38 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.assertIn("derivative.status = 'VERIFIED'", sql)
         self.assertIn("manifest.status = 'LOCKED'", sql)
         self.assertNotIn(object_key, repr(locator))
+
+    def test_original_page_locator_is_read_only_matter_scoped_and_contains_no_local_path(self) -> None:
+        page_id = str(uuid4())
+        file_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            original_page_locator_row={
+                "evidence_page_id": page_id,
+                "evidence_file_id": file_id,
+                "page_number": 2,
+                "original_label": "[合成] 微信账单.pdf",
+                "original_file_sha256": "9" * 64,
+                "byte_size": 2048,
+                "media_type": "application/pdf",
+                "page_count": 4,
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            locator = self.store.get_original_page_locator(
+                matter_id=self.matter_id,
+                evidence_page_id=page_id,
+                actor=self.actor,
+            )
+        self.assertEqual(locator.evidence_page_id, page_id)
+        self.assertEqual(locator.evidence_file_id, file_id)
+        self.assertEqual(locator.page_number, 2)
+        self.assertNotIn("relative_path", locator.__dict__)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("page.evidence_page_id = %s", sql)
+        self.assertIn("page.matter_id = %s AND page.firm_id = %s", sql)
 
     def test_lead_queues_only_one_hash_bound_manifest_run(self) -> None:
         manifest_id = str(uuid4())

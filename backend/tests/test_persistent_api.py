@@ -9,6 +9,7 @@ import unittest
 from zipfile import ZIP_STORED, ZipFile
 
 from fastapi.testclient import TestClient
+from reportlab.pdfgen import canvas
 
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_api.persistent_identity import AuthenticationMethod, ServerIdentityContext
@@ -19,6 +20,8 @@ from case_kernel.formal_calculation_postgres import PersistentFormalCalculationS
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
+from case_kernel.local_access_grants import LocalFolderGrantRegistry
+from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
 from case_kernel.official_source_capture_postgres import PersistentOfficialSourceCaptureSnapshot
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 from case_kernel.submission_postgres import PersistentSubmissionSnapshot
@@ -114,9 +117,15 @@ class FakePersistentFactStore:
 class FakePersistentEvidenceStore:
     persistent_test_double = True
 
-    def __init__(self, *, locator: VerifiedDerivativeLocator | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        locator: VerifiedDerivativeLocator | None = None,
+        original_page_locator: OriginalPageLocator | None = None,
+    ) -> None:
         self.calls: list[tuple[str, dict]] = []
         self.locator = locator
+        self.original_page_locator = original_page_locator
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor):
         self.calls.append(("snapshot", {"matter_id": matter_id, "actor": actor}))
@@ -154,6 +163,17 @@ class FakePersistentEvidenceStore:
         if self.locator is None or self.locator.derivative_id != derivative_id:
             raise KeyError(derivative_id)
         return self.locator
+
+    def get_original_page_locator(self, *, matter_id: str, evidence_page_id: str, actor: Actor):
+        self.calls.append(
+            (
+                "original_page_locator",
+                {"matter_id": matter_id, "evidence_page_id": evidence_page_id, "actor": actor},
+            )
+        )
+        if self.original_page_locator is None or self.original_page_locator.evidence_page_id != evidence_page_id:
+            raise KeyError(evidence_page_id)
+        return self.original_page_locator
 
     def enqueue_derivative_run(self, **kwargs):
         self.calls.append(("enqueue_derivative_run", kwargs))
@@ -652,6 +672,85 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(pending["decision_id"], decision_id)
         self.assertEqual(pending["disposition"], "EXCLUDE")
         self.assertEqual(pending["status"], "CANDIDATE")
+
+    def test_original_page_preview_uses_confirmed_folder_one_time_token_and_png_only(self) -> None:
+        with TemporaryDirectory(prefix="persistent-original-page-api-test-") as temporary:
+            root = Path(temporary) / "selected-case"
+            root.mkdir()
+            source = root / "synthetic-source.pdf"
+            document = canvas.Canvas(str(source), pagesize=(300, 400))
+            document.drawString(30, 350, "SYNTHETIC PAGE ONE")
+            document.showPage()
+            document.drawString(30, 350, "SYNTHETIC PAGE TWO")
+            document.showPage()
+            document.save()
+            page_id = str(uuid4())
+            locator = OriginalPageLocator(
+                firm_id=self.firm_id,
+                matter_id=self.matter_id,
+                evidence_page_id=page_id,
+                evidence_file_id=str(uuid4()),
+                original_label=source.name,
+                original_file_sha256=sha256(source.read_bytes()).hexdigest(),
+                byte_size=source.stat().st_size,
+                media_type="application/pdf",
+                page_count=2,
+                page_number=2,
+            )
+            evidence_store = FakePersistentEvidenceStore(original_page_locator=locator)
+            folder_grants = LocalFolderGrantRegistry()
+            preview_broker = OriginalPageAccessBroker(folder_grants=folder_grants)
+            client = TestClient(
+                create_persistent_app(
+                    PersistentApiDependencies(
+                        settings=self.settings,
+                        case_ledger_store=FakePersistentFactStore(),
+                        identity_resolver=StaticIdentityResolver(self.identity),
+                        evidence_manifest_store=evidence_store,
+                        local_folder_grants=folder_grants,
+                        original_page_access_broker=preview_broker,
+                    )
+                ),
+                client=("127.0.0.1", 51001),
+            )
+            inspected = client.post(
+                f"/v1/matters/{self.matter_id}/local-folder-selections/inspect",
+                json={"selected_root": str(root)},
+            )
+            self.assertEqual(inspected.status_code, 200, inspected.text)
+            self.assertEqual(inspected.json()["display_name"], "selected-case")
+            self.assertNotIn(str(root), inspected.text)
+            granted = client.post(
+                f"/v1/matters/{self.matter_id}/local-folder-grants",
+                json={
+                    "selected_root": str(root),
+                    "confirmed_root_fingerprint": inspected.json()["root_fingerprint"],
+                },
+            )
+            self.assertEqual(granted.status_code, 200, granted.text)
+            self.assertNotIn(str(root), granted.text)
+            issued = client.post(
+                f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/original-preview/access",
+                json={"folder_grant_id": granted.json()["grant_id"]},
+            )
+            self.assertEqual(issued.status_code, 200, issued.text)
+            token = issued.json()["access_token"]
+            delivered = client.get(
+                f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/original-preview/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(delivered.status_code, 200, delivered.text)
+            self.assertEqual(delivered.headers["content-type"], "image/png")
+            self.assertTrue(delivered.content.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(delivered.headers["cache-control"], "no-store, private")
+            self.assertEqual(sha256(delivered.content).hexdigest(), delivered.headers["x-artifact-sha256"])
+            self.assertGreater(int(delivered.headers["x-image-width"]), 0)
+            replay = client.get(
+                f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/original-preview/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(replay.status_code, 403)
+            self.assertEqual(replay.json()["code"], "ORIGINAL_PAGE_ACCESS_DENIED")
 
     def test_verified_derivative_uses_short_lived_bearer_and_one_time_loopback_delivery(self) -> None:
         with TemporaryDirectory(prefix="persistent-artifact-api-test-") as temporary:
