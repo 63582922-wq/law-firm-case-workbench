@@ -18,6 +18,11 @@ from case_kernel.case_ledger_postgres import (
     PostgresCaseLedgerStore,
 )
 from case_kernel.evidence_refs import EvidenceLink, EvidenceReferenceBlocked
+from case_kernel.evidence_manifest import PageDisposition
+from case_kernel.evidence_manifest_postgres import (
+    PersistentEvidenceSnapshot,
+    PostgresEvidenceManifestStore,
+)
 from case_kernel.errors import IdempotencyConflict, VersionConflict
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.models import Actor
@@ -47,6 +52,12 @@ from .schemas import (
     PersistentDisputeIssueCandidateRequest,
     PersistentDuplicateGroupCandidateRequest,
     PersistentDuplicateGroupResolutionRequest,
+    PersistentEvidenceAnnotationRequest,
+    PersistentEvidenceDuplicateGroupRequest,
+    PersistentEvidenceDuplicateResolutionRequest,
+    PersistentEvidenceOriginalRequest,
+    PersistentEvidencePageDecisionRequest,
+    PersistentEvidenceSnapshotResponse,
     PersistentFactCandidateRequest,
     PersistentFactDecisionRequest,
     PersistentFactResponse,
@@ -87,7 +98,31 @@ class PersistentFactLedgerPort(Protocol):
     def get_case_snapshot(self, *, matter_id: str, actor: Actor): ...
 
 
+class PersistentEvidenceManifestPort(Protocol):
+    def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def create_page_decision_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_page_decision(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def create_annotation_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_annotation(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def create_duplicate_group_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def resolve_duplicate_group(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def lock_manifest(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot: ...
+
+
 class PersistentRequestBlocked(ValueError):
+    pass
+
+
+class PersistentEvidenceServiceUnavailable(RuntimeError):
     pass
 
 
@@ -96,6 +131,7 @@ class PersistentApiDependencies:
     settings: RuntimeSettings
     case_ledger_store: PersistentFactLedgerPort
     identity_resolver: ServerIdentityResolver
+    evidence_manifest_store: PersistentEvidenceManifestPort | None = None
 
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
@@ -105,6 +141,11 @@ class PersistentApiDependencies:
             # objects cannot accidentally become a production persistence port.
             if not getattr(self.case_ledger_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL case ledger store")
+        if self.evidence_manifest_store is not None and not isinstance(
+            self.evidence_manifest_store, PostgresEvidenceManifestStore
+        ):
+            if not getattr(self.evidence_manifest_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL evidence Manifest store")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
@@ -137,6 +178,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "service": "persistent-case-api",
             "mode": "postgres-internal-preview",
             "persistence": "configured-not-probed",
+            "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
         }
 
     if dependencies is None:
@@ -153,6 +195,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         if idempotency_key is None or not idempotency_key.strip():
             raise PersistentRequestBlocked("Idempotency-Key header is required")
         return idempotency_key.strip()
+
+    def get_evidence_store() -> PersistentEvidenceManifestPort:
+        if dependencies.evidence_manifest_store is None:
+            raise PersistentEvidenceServiceUnavailable("evidence Manifest persistence is not configured")
+        return dependencies.evidence_manifest_store
 
     @app.exception_handler(PersistentAuthenticationBlocked)
     async def authentication_handler(_: Request, exc: PersistentAuthenticationBlocked):
@@ -209,6 +256,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_400_BAD_REQUEST,
             "REQUEST_PRECONDITION_BLOCKED",
             "本次操作缺少必要的请求标识，请重新提交。",
+        )
+
+    @app.exception_handler(PersistentEvidenceServiceUnavailable)
+    async def evidence_service_handler(_: Request, exc: PersistentEvidenceServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "EVIDENCE_SERVICE_UNAVAILABLE",
+            "证据持久化服务尚未启用，未回退到合成数据。",
         )
 
     @app.get(
@@ -571,6 +627,225 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 idempotency_key=idempotency_key,
                 same_economic_event=body.same_economic_event,
                 canonical_transaction_id=(str(body.canonical_transaction_id) if body.canonical_transaction_id else None),
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-snapshot",
+        response_model=PersistentEvidenceSnapshotResponse,
+        tags=["evidence"],
+    )
+    async def get_evidence_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceSnapshotResponse:
+        snapshot = evidence_store.get_evidence_snapshot(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentEvidenceSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-originals",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def register_evidence_original(
+        matter_id: UUID,
+        body: PersistentEvidenceOriginalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.register_original_file(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                original_label=body.original_label,
+                original_file_sha256=body.original_file_sha256,
+                byte_size=body.byte_size,
+                media_type=body.media_type,
+                page_count=body.page_count,
+                source_scan_fingerprint=body.source_scan_fingerprint,
+                supersedes_file_id=(str(body.supersedes_file_id) if body.supersedes_file_id else None),
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-pages/{evidence_page_id}/decisions",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def create_evidence_page_decision(
+        matter_id: UUID,
+        evidence_page_id: UUID,
+        body: PersistentEvidencePageDecisionRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.create_page_decision_candidate(
+                matter_id=str(matter_id),
+                evidence_page_id=str(evidence_page_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                disposition=PageDisposition(body.disposition),
+                reason=body.reason,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-page-decisions/{decision_id}/approve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence"],
+    )
+    async def approve_evidence_page_decision(
+        matter_id: UUID,
+        decision_id: UUID,
+        body: PersistentApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.approve_page_decision(
+                matter_id=str(matter_id),
+                decision_id=str(decision_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-pages/{evidence_page_id}/annotations",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def create_evidence_annotation(
+        matter_id: UUID,
+        evidence_page_id: UUID,
+        body: PersistentEvidenceAnnotationRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.create_annotation_candidate(
+                matter_id=str(matter_id),
+                evidence_page_id=str(evidence_page_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                x0=float(body.x0),
+                y0=float(body.y0),
+                x1=float(body.x1),
+                y1=float(body.y1),
+                label=body.label,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-annotations/{annotation_id}/approve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence"],
+    )
+    async def approve_evidence_annotation(
+        matter_id: UUID,
+        annotation_id: UUID,
+        body: PersistentApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.approve_annotation(
+                matter_id=str(matter_id),
+                annotation_id=str(annotation_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-duplicate-groups",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def create_evidence_duplicate_group(
+        matter_id: UUID,
+        body: PersistentEvidenceDuplicateGroupRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.create_duplicate_group_candidate(
+                matter_id=str(matter_id),
+                evidence_page_ids=tuple(str(value) for value in body.evidence_page_ids),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-duplicate-groups/{duplicate_group_id}/resolve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence"],
+    )
+    async def resolve_evidence_duplicate_group(
+        matter_id: UUID,
+        duplicate_group_id: UUID,
+        body: PersistentEvidenceDuplicateResolutionRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.resolve_duplicate_group(
+                matter_id=str(matter_id),
+                duplicate_group_id=str(duplicate_group_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                same_source_page=body.same_source_page,
+                canonical_page_id=(str(body.canonical_page_id) if body.canonical_page_id else None),
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-manifests/lock",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence"],
+    )
+    async def lock_evidence_manifest(
+        matter_id: UUID,
+        body: PersistentApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.lock_manifest(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
                 approval_hash=body.approval_hash,
             )
         )

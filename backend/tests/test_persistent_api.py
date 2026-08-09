@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_api.persistent_identity import AuthenticationMethod, ServerIdentityContext
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
+from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
@@ -40,7 +41,6 @@ class FakePersistentFactStore:
             object_type="FACT",
             object_id=str(uuid4()),
         )
-
     def decide_fact(self, **kwargs):
         self.calls.append(("decide", kwargs))
         return CaseLedgerCommandReceipt(
@@ -95,6 +95,37 @@ class FakePersistentFactStore:
             transactions=(),
             payment_classifications=(),
             duplicate_groups=(),
+        )
+
+
+class FakePersistentEvidenceStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def get_evidence_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentEvidenceSnapshot(
+            matter_id=matter_id,
+            version=5,
+            snapshot_hash="d" * 64,
+            original_files=(),
+            pages=(),
+            duplicate_groups=(),
+            locked_manifest=None,
+        )
+
+    def create_page_decision_candidate(self, **kwargs):
+        self.calls.append(("create_page_decision", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CREATE_EVIDENCE_PAGE_DECISION_CANDIDATE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="EVIDENCE_PAGE_DECISION",
+            object_id=str(uuid4()),
         )
 
 
@@ -262,6 +293,52 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(payload["version"], 4)
         self.assertEqual(payload["snapshot_hash"], "c" * 64)
         self.assertEqual(payload["payment_classifications"], [])
+
+    def test_evidence_routes_fail_closed_when_evidence_store_is_not_configured(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/evidence-snapshot")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "EVIDENCE_SERVICE_UNAVAILABLE")
+
+    def test_evidence_snapshot_and_page_decision_use_server_identity_and_uuid_scope(self) -> None:
+        evidence_store = FakePersistentEvidenceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    evidence_manifest_store=evidence_store,
+                )
+            )
+        )
+        snapshot = client.get(f"/v1/matters/{self.matter_id}/evidence-snapshot")
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertEqual(snapshot.json()["snapshot_hash"], "d" * 64)
+
+        page_id = str(uuid4())
+        decision = client.post(
+            f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/decisions",
+            headers={"Idempotency-Key": "evidence-page-decision-001", "X-Actor": "forged-and-ignored"},
+            json={
+                "expected_version": 5,
+                "disposition": "INCLUDE",
+                "reason": "[合成] 与目标微信昵称相关，纳入派生件。",
+            },
+        )
+        self.assertEqual(decision.status_code, 201, decision.text)
+        call = next(item for item in evidence_store.calls if item[0] == "create_page_decision")[1]
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["evidence_page_id"], page_id)
+        self.assertEqual(call["disposition"].value, "INCLUDE")
 
 
 if __name__ == "__main__":

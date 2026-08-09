@@ -15,6 +15,7 @@ from typing import Mapping
 from psycopg.conninfo import conninfo_to_dict
 
 from .case_ledger_postgres import PostgresCaseLedgerStore
+from .evidence_manifest_postgres import PostgresEvidenceManifestStore
 from .postgres_store import PostgresMatterStore
 from .store import InMemoryMatterStore, MatterStore
 
@@ -76,6 +77,7 @@ class RuntimeServices:
     settings: RuntimeSettings
     matter_store: MatterStore
     case_ledger_store: PostgresCaseLedgerStore | None
+    evidence_manifest_store: PostgresEvidenceManifestStore | None
     persistence_label: str
 
 
@@ -90,6 +92,7 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
             settings=settings,
             matter_store=InMemoryMatterStore(),
             case_ledger_store=None,
+            evidence_manifest_store=None,
             persistence_label="in-memory-synthetic-only",
         )
     dsn = settings.postgres_dsn
@@ -99,5 +102,6 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
         settings=settings,
         matter_store=PostgresMatterStore(dsn),
         case_ledger_store=PostgresCaseLedgerStore(dsn),
+        evidence_manifest_store=PostgresEvidenceManifestStore(dsn),
         persistence_label="postgres-internal-preview",
     )

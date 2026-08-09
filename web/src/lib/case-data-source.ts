@@ -1,4 +1,5 @@
 import { alphaCalculationApiBase } from "@/lib/synthetic-calculation";
+import { syntheticMatter } from "@/lib/synthetic-matter";
 
 export type CaseDataSourceConfig =
   | { kind: "synthetic-alpha"; label: "本机合成数据" }
@@ -18,6 +19,30 @@ export type CaseReviewView = {
   issues: { issueId: string; question: string; claimCount: number; factCount: number; status: string }[];
   transactions: { transactionId: string; date: string | null; amount: string; currency: string; nature: string; application: string; status: string }[];
   pendingFacts: { factId: string; text: string; origin: string; evidenceCount: number }[];
+};
+
+export type EvidenceReviewPage = {
+  pageId: string;
+  fileId: string;
+  originalLabel: string;
+  pageNumber: number;
+  decisionId: string | null;
+  disposition: "INCLUDE" | "EXCLUDE" | null;
+  reason: string | null;
+  annotations: { annotationId: string; x0: number; y0: number; x1: number; y1: number; label: string; status: string }[];
+  syntheticPreview: { date: string; amount: string; counterpart: string; confidence: string; note: string } | null;
+};
+
+export type EvidenceReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number | null;
+  snapshotHash: string;
+  requestId: string | null;
+  originals: { fileId: string; originalLabel: string; originalFileSha256: string; pageCount: number }[];
+  pages: EvidenceReviewPage[];
+  duplicateGroups: { groupId: string; status: string; canonicalPageId: string | null; pageIds: string[] }[];
+  lockedManifest: { manifestId: string; contentHash: string; totalPages: number; includedPages: number; excludedPages: number } | null;
 };
 
 type SyntheticReview = {
@@ -43,6 +68,22 @@ type PersistentSnapshot = {
   transactions: { transaction_id: string; local_date: string | null; amount: string; currency: string; status: string }[];
   payment_classifications: { transaction_id: string; nature: string; status: string }[];
   duplicate_groups: { duplicate_group_id: string; status: string; transaction_ids: string[]; canonical_transaction_id: string | null }[];
+};
+
+type PersistentEvidenceSnapshot = {
+  matter_id: string;
+  version: number;
+  snapshot_hash: string;
+  original_files: { evidence_file_id: string; original_label: string; original_file_sha256: string; page_count: number }[];
+  pages: {
+    evidence_page_id: string;
+    evidence_file_id: string;
+    page_number: number;
+    decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string } | null;
+    annotations: { annotation_id: string; x0: string; y0: string; x1: string; y1: string; label: string; status: string }[];
+  }[];
+  duplicate_groups: { duplicate_group_id: string; status: string; canonical_page_id: string | null; evidence_page_ids: string[] }[];
+  locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -92,6 +133,18 @@ export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSour
   return mapPersistentSnapshot(payload, response.headers.get("X-Request-ID"));
 }
 
+export async function loadEvidenceReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<EvidenceReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") return mapSyntheticEvidence();
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/evidence-snapshot`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+  });
+  const payload = (await response.json()) as PersistentEvidenceSnapshot | ErrorEnvelope;
+  if (!response.ok || !("pages" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化证据快照不可用"));
+  return mapPersistentEvidence(payload, response.headers.get("X-Request-ID"));
+}
+
 export async function confirmSyntheticFact(factId: string): Promise<CaseReviewView> {
   if (caseDataSourceConfig.kind !== "synthetic-alpha") throw new Error("持久化预览中的确认必须通过案件版本化命令完成。 ");
   const response = await fetch(`${alphaCalculationApiBase}/v1/alpha-review/facts/${factId}/confirm`, {
@@ -139,6 +192,55 @@ function mapPersistentSnapshot(payload: PersistentSnapshot, requestId: string | 
       return { transactionId: item.transaction_id, date: item.local_date, amount: item.amount, currency: item.currency, nature: classification?.nature ?? "待分类", application: paymentApplication(classification?.nature), status: classification?.status ?? item.status };
     }),
     pendingFacts: payload.facts.filter((item) => item.status === "CANDIDATE").map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, evidenceCount: item.evidence_count })),
+  };
+}
+
+function mapSyntheticEvidence(): EvidenceReviewView {
+  return {
+    sourceKind: "synthetic-alpha",
+    sourceLabel: "本机合成数据",
+    matterVersion: null,
+    snapshotHash: "synthetic-evidence-manifest-preview",
+    requestId: null,
+    originals: [{ fileId: "synthetic-wechat-ledger", originalLabel: "[合成] 微信交易记录.pdf", originalFileSha256: "synthetic-only", pageCount: syntheticMatter.evidence.length }],
+    pages: syntheticMatter.evidence.map((item) => ({
+      pageId: `synthetic-page-${item.page}`,
+      fileId: "synthetic-wechat-ledger",
+      originalLabel: "[合成] 微信交易记录.pdf",
+      pageNumber: item.page,
+      decisionId: item.confidence === "已核验" ? `synthetic-decision-${item.page}` : null,
+      disposition: item.confidence === "已核验" ? "INCLUDE" : null,
+      reason: item.confidence === "已核验" ? "[合成] 与目标主体相关。" : null,
+      annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[合成] 相关交易行", status: "APPROVED" }] : [],
+      syntheticPreview: { date: item.date, amount: item.amount, counterpart: item.counterpart, confidence: item.confidence, note: item.note },
+    })),
+    duplicateGroups: [{ groupId: "synthetic-duplicate-17-18", status: "CANDIDATE", canonicalPageId: null, pageIds: ["synthetic-page-17", "synthetic-page-18"] }],
+    lockedManifest: null,
+  };
+}
+
+function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: string | null): EvidenceReviewView {
+  const originals = new Map(payload.original_files.map((item) => [item.evidence_file_id, item]));
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "持久化内部预览",
+    matterVersion: payload.version,
+    snapshotHash: payload.snapshot_hash,
+    requestId,
+    originals: payload.original_files.map((item) => ({ fileId: item.evidence_file_id, originalLabel: item.original_label, originalFileSha256: item.original_file_sha256, pageCount: item.page_count })),
+    pages: payload.pages.map((item) => ({
+      pageId: item.evidence_page_id,
+      fileId: item.evidence_file_id,
+      originalLabel: originals.get(item.evidence_file_id)?.original_label ?? "原始文件",
+      pageNumber: item.page_number,
+      decisionId: item.decision?.decision_id ?? null,
+      disposition: item.decision?.disposition ?? null,
+      reason: item.decision?.reason ?? null,
+      annotations: item.annotations.map((annotation) => ({ annotationId: annotation.annotation_id, x0: Number(annotation.x0), y0: Number(annotation.y0), x1: Number(annotation.x1), y1: Number(annotation.y1), label: annotation.label, status: annotation.status })),
+      syntheticPreview: null,
+    })),
+    duplicateGroups: payload.duplicate_groups.map((item) => ({ groupId: item.duplicate_group_id, status: item.status, canonicalPageId: item.canonical_page_id, pageIds: item.evidence_page_ids })),
+    lockedManifest: payload.locked_manifest ? { manifestId: payload.locked_manifest.manifest_id, contentHash: payload.locked_manifest.content_hash, totalPages: payload.locked_manifest.total_pages, includedPages: payload.locked_manifest.included_pages, excludedPages: payload.locked_manifest.excluded_pages } : null,
   };
 }
 

@@ -6,7 +6,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
 
 
@@ -428,3 +428,134 @@ class PersistentCaseSnapshotResponse(BaseModel):
     transactions: tuple[PersistentSnapshotTransaction, ...]
     payment_classifications: tuple[PersistentSnapshotPaymentClassification, ...]
     duplicate_groups: tuple[PersistentSnapshotDuplicateGroup, ...]
+
+
+class PersistentEvidenceOriginalRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    original_label: str = Field(min_length=1, max_length=500)
+    original_file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(ge=1, le=2_147_483_648)
+    media_type: str = Field(min_length=1, max_length=160)
+    page_count: int = Field(ge=1, le=10_000)
+    source_scan_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    supersedes_file_id: UUID | None = None
+
+
+class PersistentEvidencePageDecisionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    disposition: Literal["INCLUDE", "EXCLUDE"]
+    reason: str = Field(min_length=1, max_length=2_000)
+
+
+class PersistentEvidenceAnnotationRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    x0: Decimal = Field(ge=0, le=1, max_digits=12, decimal_places=9)
+    y0: Decimal = Field(ge=0, le=1, max_digits=12, decimal_places=9)
+    x1: Decimal = Field(ge=0, le=1, max_digits=12, decimal_places=9)
+    y1: Decimal = Field(ge=0, le=1, max_digits=12, decimal_places=9)
+    label: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def coordinates_are_ordered(self):
+        if not (self.x0 < self.x1 and self.y0 < self.y1):
+            raise ValueError("annotation coordinates must form a positive-area rectangle")
+        return self
+
+
+class PersistentEvidenceDuplicateGroupRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    evidence_page_ids: list[UUID] = Field(min_length=2, max_length=200)
+
+
+class PersistentEvidenceDuplicateResolutionRequest(PersistentApprovalRequest):
+    same_source_page: bool
+    canonical_page_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def canonical_page_matches_resolution(self):
+        if self.same_source_page and self.canonical_page_id is None:
+            raise ValueError("same-source duplicate pages require a canonical page")
+        if not self.same_source_page and self.canonical_page_id is not None:
+            raise ValueError("distinct pages cannot select a canonical page")
+        return self
+
+
+class PersistentEvidenceDecisionSnapshot(BaseModel):
+    decision_id: UUID
+    disposition: str
+    reason: str
+    approval_hash: str
+    approved_by: UUID
+
+
+class PersistentEvidenceAnnotationSnapshot(BaseModel):
+    annotation_id: UUID
+    purpose: str
+    x0: Decimal
+    y0: Decimal
+    x1: Decimal
+    y1: Decimal
+    label: str
+    status: str
+    approval_hash: str | None
+    approved_by: UUID | None
+
+
+class PersistentEvidencePageSnapshot(BaseModel):
+    evidence_page_id: UUID
+    evidence_file_id: UUID
+    page_number: int
+    rendered_page_sha256: str | None
+    decision: PersistentEvidenceDecisionSnapshot | None
+    annotations: tuple[PersistentEvidenceAnnotationSnapshot, ...]
+
+
+class PersistentEvidenceOriginalSnapshot(BaseModel):
+    evidence_file_id: UUID
+    original_label: str
+    original_file_sha256: str
+    byte_size: int
+    media_type: str
+    page_count: int
+    source_scan_fingerprint: str
+    supersedes_file_id: UUID | None
+    created_at: str
+
+
+class PersistentEvidenceDuplicateGroupSnapshot(BaseModel):
+    duplicate_group_id: UUID
+    status: str
+    canonical_page_id: UUID | None
+    approval_hash: str | None
+    approved_by: UUID | None
+    evidence_page_ids: tuple[UUID, ...]
+
+
+class PersistentEvidenceManifestEntrySnapshot(BaseModel):
+    evidence_page_id: UUID
+    decision_id: UUID
+    disposition: str
+    derivative_sequence: int | None
+
+
+class PersistentEvidenceLockedManifestSnapshot(BaseModel):
+    manifest_id: UUID
+    ledger_version: int
+    status: str
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    total_pages: int
+    included_pages: int
+    excluded_pages: int
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_by: UUID
+    entries: tuple[PersistentEvidenceManifestEntrySnapshot, ...]
+
+
+class PersistentEvidenceSnapshotResponse(BaseModel):
+    matter_id: UUID
+    version: int
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    original_files: tuple[PersistentEvidenceOriginalSnapshot, ...]
+    pages: tuple[PersistentEvidencePageSnapshot, ...]
+    duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSnapshot, ...]
+    locked_manifest: PersistentEvidenceLockedManifestSnapshot | None
