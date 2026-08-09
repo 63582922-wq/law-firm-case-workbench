@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+from uuid import UUID
 
 
 class SyntheticGuardedModel(BaseModel):
@@ -205,3 +206,43 @@ class AlphaFactCandidateResponse(BaseModel):
 
 class AlphaFactConfirmationRequest(SyntheticGuardedModel):
     approval_hash: str = Field(min_length=8, max_length=128)
+
+
+class OriginalEvidenceLinkRequest(BaseModel):
+    evidence_id: str = Field(min_length=1, max_length=160)
+    original_file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    page_number: int | None = Field(default=None, ge=1)
+    region_id: str | None = Field(default=None, max_length=160)
+    original_label: str = Field(min_length=1, max_length=240)
+
+
+class PersistentFactCandidateRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    original_text: str = Field(min_length=1, max_length=10_000)
+    origin: Literal["PLAINTIFF_PLEADING", "DEFENDANT_STATEMENT", "AGENT_CANDIDATE", "ASSISTANT_ENTRY"]
+    evidence_links: list[OriginalEvidenceLinkRequest] = Field(min_length=1, max_length=30)
+
+
+class PersistentFactDecisionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    status: Literal["CONFIRMED", "DISPUTED", "DENIED", "INVALIDATED"]
+    decision_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CaseLedgerReceiptResponse(BaseModel):
+    command_name: str
+    idempotency_key: str
+    matter_id: UUID
+    matter_version: int
+    audit_event_id: UUID
+    object_type: str
+    object_id: UUID
+
+
+class PersistentFactResponse(BaseModel):
+    fact_id: UUID
+    original_text: str
+    origin: str
+    status: str
+    evidence_count: int
+    decision_hash: str | None
