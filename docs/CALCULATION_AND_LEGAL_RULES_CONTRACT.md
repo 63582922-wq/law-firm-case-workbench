@@ -43,6 +43,8 @@ CalculationScenario
 
 `allocation_policy_id` 不得由算法自行选择。它必须连接至律师批准的合同约定、法律规则或个案决定，并记录适用条件、优先级和来源。
 
+每笔付款事件还须声明经律师批准的 `payment_application`：`BY_POLICY`（适用情景冲抵顺序）、`INTEREST_ONLY`（仅用于未付利息）或 `PRINCIPAL_ONLY`（仅用于本金）。后两种模式的余额保留为未适用付款，禁止引擎为了“用完金额”自动冲抵另一类别；其来源和多债务分配由 [交易台账与付款性质契约](TRANSACTION_LEDGER_CONTRACT.md) 约束。
+
 ## 4. 法律适用锚点与规则包
 
 每个正式 `RuleVersion` 关联一个可验证 `ApplicabilityRule`：

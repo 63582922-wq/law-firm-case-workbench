@@ -12,9 +12,9 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
-from typing import Iterable
 from uuid import uuid4
 
+from .evidence_refs import EvidenceLink, EvidenceReferenceBlocked, validate_evidence_links
 from .models import Actor, Role
 
 
@@ -54,15 +54,6 @@ class IssueStatus(str, Enum):
     CANDIDATE = "CANDIDATE"
     CONFIRMED = "CONFIRMED"
     INVALIDATED = "INVALIDATED"
-
-
-@dataclass(frozen=True)
-class EvidenceLink:
-    evidence_id: str
-    original_file_sha256: str
-    page_number: int | None
-    region_id: str | None
-    original_label: str
 
 
 @dataclass(frozen=True)
@@ -385,15 +376,10 @@ def _require_lead(actor: Actor) -> None:
 
 
 def _validate_evidence(links: tuple[EvidenceLink, ...]) -> None:
-    if not links:
-        raise FactLedgerBlocked("at least one original evidence link is required")
-    for link in links:
-        _require_text(link.evidence_id, "evidence id")
-        _require_text(link.original_label, "evidence original label")
-        if len(link.original_file_sha256) != 64 or any(character not in "0123456789abcdef" for character in link.original_file_sha256):
-            raise FactLedgerBlocked("evidence link requires the original file SHA-256")
-        if link.page_number is not None and link.page_number < 1:
-            raise FactLedgerBlocked("evidence page numbers must be positive")
+    try:
+        validate_evidence_links(links)
+    except EvidenceReferenceBlocked as error:
+        raise FactLedgerBlocked(str(error)) from error
 
 
 def _validate_monetary_value(amount: Decimal | None, currency: str | None, label: str) -> None:

@@ -11,6 +11,7 @@ from case_kernel.calculation_engine import (
     CalculationBlocked,
     CalculationScenario,
     EventKind,
+    PaymentApplication,
     calculate,
     independently_check,
 )
@@ -152,6 +153,20 @@ class CalculationEngineTests(unittest.TestCase):
         self.assertEqual(run.payment_allocations[0].allocated_interest, Decimal("0.00"))
         self.assertEqual(run.line_items[1].opening_principal, Decimal("9000.00"))
         self.assertTrue(independently_check(scenario, run).matching)
+
+    def test_confirmed_interest_only_payment_does_not_silently_reduce_principal(self) -> None:
+        scenario = synthetic_scenario()
+        interest_only = replace(
+            scenario.events[1],
+            payment_application=PaymentApplication.INTEREST_ONLY,
+        )
+        run = calculate(replace(scenario, events=(scenario.events[0], interest_only)))
+
+        self.assertEqual(run.payment_allocations[0].allocated_interest, Decimal("41.10"))
+        self.assertEqual(run.payment_allocations[0].allocated_principal, Decimal("0.00"))
+        self.assertEqual(run.payment_allocations[0].unapplied_amount, Decimal("958.90"))
+        self.assertEqual(run.line_items[1].opening_principal, Decimal("10000.00"))
+        self.assertTrue(independently_check(replace(scenario, events=(scenario.events[0], interest_only)), run).matching)
 
     def test_leap_day_is_counted_under_actual_365_fixed_basis(self) -> None:
         start = date(2020, 2, 28)

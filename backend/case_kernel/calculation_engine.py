@@ -38,6 +38,20 @@ class AllocationPolicy(str, Enum):
     PRINCIPAL_THEN_INTEREST = "PRINCIPAL_THEN_INTEREST"
 
 
+class PaymentApplication(str, Enum):
+    """A lawyer-approved application instruction for one payment event.
+
+    BY_POLICY delegates the split to the scenario allocation policy.  The two
+    fixed modes preserve a confirmed "interest-only" or "principal-only"
+    classification; any remainder stays unapplied rather than being silently
+    moved to the other bucket.
+    """
+
+    BY_POLICY = "BY_POLICY"
+    INTEREST_ONLY = "INTEREST_ONLY"
+    PRINCIPAL_ONLY = "PRINCIPAL_ONLY"
+
+
 @dataclass(frozen=True)
 class ApprovedCalculationEvent:
     event_id: str
@@ -49,6 +63,7 @@ class ApprovedCalculationEvent:
     evidence_ids: tuple[str, ...]
     approved_by: str
     approval_hash: str
+    payment_application: PaymentApplication = PaymentApplication.BY_POLICY
 
 
 @dataclass(frozen=True)
@@ -87,6 +102,7 @@ class PaymentAllocation:
     allocated_principal: Decimal
     unapplied_amount: Decimal
     evidence_ids: tuple[str, ...]
+    payment_application: PaymentApplication
 
 
 @dataclass(frozen=True)
@@ -323,6 +339,8 @@ def _validate_scenario(scenario: CalculationScenario) -> None:
             raise CalculationBlocked(f"event {event.event_id} amount must be positive CNY cents")
         if not event.evidence_ids:
             raise CalculationBlocked(f"event {event.event_id} requires source evidence")
+        if event.kind is EventKind.DISBURSEMENT and event.payment_application is not PaymentApplication.BY_POLICY:
+            raise CalculationBlocked("a disbursement cannot use a payment application instruction")
         if not scenario.start_date <= event.effective_date < scenario.end_date:
             raise CalculationBlocked(f"event {event.event_id} falls outside the calculation interval")
         sequence_key = (event.effective_date, event.sequence)
@@ -387,7 +405,13 @@ def _allocate_payment(
     policy: AllocationPolicy,
 ) -> PaymentAllocation:
     remaining = event.amount
-    if policy is AllocationPolicy.INTEREST_THEN_PRINCIPAL:
+    if event.payment_application is PaymentApplication.INTEREST_ONLY:
+        allocated_interest = min(remaining, unpaid_interest)
+        allocated_principal = Decimal("0")
+    elif event.payment_application is PaymentApplication.PRINCIPAL_ONLY:
+        allocated_interest = Decimal("0")
+        allocated_principal = min(remaining, principal)
+    elif policy is AllocationPolicy.INTEREST_THEN_PRINCIPAL:
         allocated_interest = min(remaining, unpaid_interest)
         remaining = _money(remaining - allocated_interest)
         allocated_principal = min(remaining, principal)
@@ -404,6 +428,7 @@ def _allocate_payment(
         allocated_principal=_money(allocated_principal),
         unapplied_amount=_money(event.amount - applied),
         evidence_ids=event.evidence_ids,
+        payment_application=event.payment_application,
     )
 
 
@@ -416,7 +441,13 @@ def _reference_allocate_payment(
 ) -> PaymentAllocation:
     """Independent verifier's allocation path; intentionally does not call _allocate_payment."""
     amount = event.amount
-    if policy is AllocationPolicy.INTEREST_THEN_PRINCIPAL:
+    if event.payment_application is PaymentApplication.INTEREST_ONLY:
+        paid_interest = min(unpaid_interest, amount)
+        paid_principal = Decimal("0")
+    elif event.payment_application is PaymentApplication.PRINCIPAL_ONLY:
+        paid_principal = min(principal, amount)
+        paid_interest = Decimal("0")
+    elif policy is AllocationPolicy.INTEREST_THEN_PRINCIPAL:
         paid_interest = min(unpaid_interest, amount)
         paid_principal = min(principal, _money(amount - paid_interest))
     else:
@@ -431,6 +462,7 @@ def _reference_allocate_payment(
         allocated_principal=_money(paid_principal),
         unapplied_amount=unapplied,
         evidence_ids=event.evidence_ids,
+        payment_application=event.payment_application,
     )
 
 
