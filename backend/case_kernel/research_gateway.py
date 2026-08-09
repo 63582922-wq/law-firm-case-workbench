@@ -58,28 +58,42 @@ class ExternalResearchReceipt:
 
 PUBLIC_SOURCES: tuple[PublicSource, ...] = (
     PublicSource(
-        source_id="LAW-CN-CIVIL-CODE-680",
-        publisher="最高人民法院 / 国家法律法规数据库",
+        source_id="CN-CIVIL-CODE-680",
+        publisher="国家法律法规数据库 / 最高人民法院",
         source_tier="PRIMARY_LAW",
         allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "flk.npc.gov.cn", "wb.flk.npc.gov.cn"}),
         topics=frozenset({"民法典", "借款利息", "高利放贷"}),
     ),
     PublicSource(
-        source_id="JI-MINJIAN-2020-SECOND",
-        publisher="国家法律法规数据库 / 最高人民法院",
+        source_id="SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+        publisher="最高人民法院",
         source_tier="JUDICIAL_INTERPRETATION",
         allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn", "wb.flk.npc.gov.cn"}),
         topics=frozenset({"民间借贷", "利率保护", "过渡规则", "预扣利息", "逾期利息"}),
     ),
     PublicSource(
-        source_id="RATE-LPR-HISTORY",
+        source_id="SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+        publisher="最高人民法院",
+        source_tier="JUDICIAL_INTERPRETATION",
+        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn"}),
+        topics=frozenset({"民间借贷", "2020年第一次修正", "历史文本", "过渡规则"}),
+    ),
+    PublicSource(
+        source_id="SPC-PRIVATE-LENDING-2015-ORIGINAL",
+        publisher="最高人民法院公报",
+        source_tier="JUDICIAL_INTERPRETATION",
+        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn"}),
+        topics=frozenset({"民间借贷", "2015年司法解释", "年利率24%", "年利率36%", "已付利息"}),
+    ),
+    PublicSource(
+        source_id="CFETS-LPR-HISTORY",
         publisher="全国银行间同业拆借中心",
         source_tier="OFFICIAL_RATE_DATA",
         allowed_domains=frozenset({"shibor.org", "www.shibor.org", "chinamoney.com.cn", "www.chinamoney.com.cn"}),
         topics=frozenset({"LPR", "贷款市场报价利率", "一年期贷款市场报价利率"}),
     ),
     PublicSource(
-        source_id="CASE-PUBLIC-RESEARCH",
+        source_id="SPC-PUBLIC-CASE-RESEARCH",
         publisher="最高人民法院及依法公开裁判文书站点",
         source_tier="PUBLIC_CASE_RESEARCH",
         allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn", "cicc.court.gov.cn", "pccz.court.gov.cn"}),
@@ -182,6 +196,12 @@ class PublicResearchGateway:
 
     def receipt(self, request_id: str) -> ExternalResearchReceipt:
         return self._receipts[request_id]
+
+    def source(self, source_id: str) -> PublicSource:
+        try:
+            return self._sources[source_id]
+        except KeyError as error:
+            raise ResearchBlocked("unknown registered public source") from error
 
 
 def _required_text(value: str, field_name: str) -> str:

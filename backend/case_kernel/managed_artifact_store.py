@@ -114,6 +114,30 @@ class LocalEncryptedArtifactStore:
         actual_hash = sha256(plaintext).hexdigest()
         if actual_hash != expected_sha256:
             raise ManagedArtifactBlocked("managed artifact source hash differs from the verified worker output")
+        return self._store_plaintext(plaintext, actual_hash)
+
+    def put_bytes(
+        self,
+        plaintext: bytes,
+        *,
+        expected_sha256: str,
+        case_root: str | Path,
+    ) -> StoredArtifactObject:
+        """Encrypt verified in-memory worker output without a plaintext staging file."""
+
+        self.assert_separate_from_case_root(case_root)
+        _validate_sha256(expected_sha256)
+        if not isinstance(plaintext, bytes):
+            raise ManagedArtifactBlocked("managed artifact plaintext must be bytes")
+        if len(plaintext) < 1 or len(plaintext) > self._max_plaintext_bytes:
+            raise ManagedArtifactBlocked("managed artifact plaintext exceeds the configured byte boundary")
+        actual_hash = sha256(plaintext).hexdigest()
+        if actual_hash != expected_sha256:
+            raise ManagedArtifactBlocked("managed artifact plaintext hash differs from the verified worker output")
+        return self._store_plaintext(plaintext, actual_hash)
+
+    def _store_plaintext(self, plaintext: bytes, actual_hash: str) -> StoredArtifactObject:
+        size = len(plaintext)
         object_key = _object_key(actual_hash)
         destination = self._safe_object_path(object_key)
         if destination.exists():

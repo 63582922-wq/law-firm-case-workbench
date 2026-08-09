@@ -15,15 +15,15 @@ class PublicResearchGatewayTests(unittest.TestCase):
             issue="民间借贷利率保护与过渡规则",
             proposed_query="民间借贷 2020年8月20日 过渡规则 一年期LPR",
         )
-        self.assertIn("JI-MINJIAN-2020-SECOND", plan.candidate_source_ids)
-        self.assertIn("RATE-LPR-HISTORY", plan.candidate_source_ids)
+        self.assertIn("SPC-PRIVATE-LENDING-2020-SECOND-REVISION", plan.candidate_source_ids)
+        self.assertIn("CFETS-LPR-HISTORY", plan.candidate_source_ids)
 
     def test_external_request_requires_lawyer_confirmation_and_registered_https_domain(self) -> None:
         plan = self.gateway.prepare_plan(issue="LPR", proposed_query="一年期贷款市场报价利率 历史数据")
         with self.assertRaisesRegex(ResearchBlocked, "explicitly authorize"):
             self.gateway.authorize_public_request(
                 plan_id=plan.plan_id,
-                source_id="RATE-LPR-HISTORY",
+                source_id="CFETS-LPR-HISTORY",
                 target_url="https://www.shibor.org/r/cms/shibor/chinamoney/html/shiborOrg/lpr-shibor-history-download.html",
                 requested_by="alpha_lead_lawyer",
                 lawyer_confirmed=False,
@@ -31,7 +31,7 @@ class PublicResearchGatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(ResearchBlocked, "approved HTTPS"):
             self.gateway.authorize_public_request(
                 plan_id=plan.plan_id,
-                source_id="RATE-LPR-HISTORY",
+                source_id="CFETS-LPR-HISTORY",
                 target_url="https://example.com/lpr",
                 requested_by="alpha_lead_lawyer",
                 lawyer_confirmed=True,
@@ -41,7 +41,7 @@ class PublicResearchGatewayTests(unittest.TestCase):
         plan = self.gateway.prepare_plan(issue="LPR", proposed_query="一年期贷款市场报价利率 历史数据")
         request = self.gateway.authorize_public_request(
             plan_id=plan.plan_id,
-            source_id="RATE-LPR-HISTORY",
+            source_id="CFETS-LPR-HISTORY",
             target_url="https://www.shibor.org/r/cms/shibor/chinamoney/html/shiborOrg/lpr-shibor-history-download.html",
             requested_by="alpha_lead_lawyer",
             lawyer_confirmed=True,

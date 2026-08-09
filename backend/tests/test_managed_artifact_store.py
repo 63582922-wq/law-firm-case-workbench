@@ -52,9 +52,22 @@ class LocalEncryptedArtifactStoreTests(unittest.TestCase):
 
     def test_same_plaintext_reuses_object_without_creating_a_second_version(self) -> None:
         first = self.store.put_file(self.source, expected_sha256=self.plaintext_hash, case_root=self.case_root)
-        second = self.store.put_file(self.source, expected_sha256=self.plaintext_hash, case_root=self.case_root)
+        second = self.store.put_bytes(
+            self.plaintext,
+            expected_sha256=self.plaintext_hash,
+            case_root=self.case_root,
+        )
         self.assertEqual(first, second)
         self.assertEqual(len(list(self.managed_root.rglob("*.lca"))), 1)
+
+    def test_put_bytes_rejects_wrong_hash_without_writing_plaintext(self) -> None:
+        with self.assertRaisesRegex(ManagedArtifactBlocked, "plaintext hash differs"):
+            self.store.put_bytes(
+                self.plaintext,
+                expected_sha256="a" * 64,
+                case_root=self.case_root,
+            )
+        self.assertEqual(list(self.managed_root.rglob("*.lca")), [])
 
     def test_tamper_wrong_key_and_wrong_hash_fail_closed(self) -> None:
         stored = self.store.put_file(self.source, expected_sha256=self.plaintext_hash, case_root=self.case_root)

@@ -8,6 +8,7 @@
       "publisher": "国家法律法规数据库",
       "authority_level": "PRIMARY_LAW",
       "official_url": "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
+      "fallback_official_url": "https://www.court.gov.cn/zixun/xiangqing/233181.html",
       "provision_locator": "《中华人民共和国民法典》第六百七十九条至第六百八十条",
       "research_focus": [
         "自然人之间借款合同成立时间",
@@ -15,7 +16,12 @@
         "未约定或约定不明的借期内利息"
       ],
       "formal_snapshot_status": "NOT_CAPTURED",
-      "may_enter_formal_bundle": false
+      "may_enter_formal_bundle": false,
+      "capture_probe": {
+        "checked_at": "2026-08-10",
+        "canonical_pdf": "TLS_CERTIFICATE_EXPIRED_FAIL_CLOSED",
+        "fallback_html": "LIVE_CAPTURE_AND_ARTICLE_679_680_PARSE_OK"
+      }
     },
     {
       "source_id": "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
@@ -31,7 +37,11 @@
         "起诉时利率保护标准"
       ],
       "formal_snapshot_status": "NOT_CAPTURED",
-      "may_enter_formal_bundle": false
+      "may_enter_formal_bundle": false,
+      "capture_probe": {
+        "checked_at": "2026-08-10",
+        "result": "LIVE_CAPTURE_AND_ARTICLE_25_31_PARSE_OK"
+      }
     },
     {
       "source_id": "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
@@ -44,13 +54,39 @@
         "司法解释版本变更对照"
       ],
       "formal_snapshot_status": "NOT_CAPTURED",
-      "may_enter_formal_bundle": false
+      "may_enter_formal_bundle": false,
+      "capture_probe": {
+        "checked_at": "2026-08-10",
+        "result": "LIVE_CAPTURE_AND_ARTICLE_26_32_PARSE_OK"
+      }
+    },
+    {
+      "source_id": "SPC-PRIVATE-LENDING-2015-ORIGINAL",
+      "publisher": "最高人民法院公报",
+      "authority_level": "JUDICIAL_INTERPRETATION",
+      "official_url": "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
+      "fallback_official_url": "https://www.court.gov.cn/zixun/xiangqing/15147.html",
+      "provision_locator": "法释〔2015〕18号第二十六条、第三十一条",
+      "research_focus": [
+        "年利率24%的司法保护区",
+        "24%至36%的已自愿履行利息",
+        "超过年利率36%的已付利息返还",
+        "2019年至2020年历史付款处理"
+      ],
+      "formal_snapshot_status": "NOT_CAPTURED",
+      "may_enter_formal_bundle": false,
+      "capture_probe": {
+        "checked_at": "2026-08-10",
+        "canonical_full_text": "DISCOVERED_OFFICIAL_GAZETTE_BUT_LIVE_502",
+        "fallback_explanation": "OFFICIAL_DISCOVERY_ONLY_NOT_SUBSTITUTE_FOR_ARTICLE_TEXT"
+      }
     },
     {
       "source_id": "CFETS-LPR-HISTORY",
       "publisher": "全国银行间同业拆借中心（中国货币网）",
       "authority_level": "OFFICIAL_RATE_DATA",
       "official_url": "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
+      "official_data_api": "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN",
       "provision_locator": "一年期贷款市场报价利率历史数据",
       "research_focus": [
         "一年期LPR发布日期",
@@ -58,7 +94,13 @@
         "规则公式的基准利率输入"
       ],
       "formal_snapshot_status": "NOT_CAPTURED",
-      "may_enter_formal_bundle": false
+      "may_enter_formal_bundle": false,
+      "capture_probe": {
+        "checked_at": "2026-08-10",
+        "result": "LIVE_CAPTURE_AND_12_RECORD_PARSE_OK",
+        "observed_range": "2025-08-20/2026-07-20",
+        "limitation": "The official JSON endpoint exposes a rolling one-year window; older anchors require exact official announcement capture."
+      }
     }
   ]
 }

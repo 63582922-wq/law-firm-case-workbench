@@ -29,6 +29,7 @@
 - [编排架构决策](./decisions/ADR-0001-orchestration.md)
 - [Phase 2 执行台账](./docs/PHASE_2_EXECUTION_LEDGER.md)
 - [民间借贷利息时态规则研究](./research/PRIVATE_LENDING_INTEREST_TEMPORAL_RULES.md)
+- [官方法源抓取与解析契约](./docs/OFFICIAL_SOURCE_CAPTURE_CONTRACT.md)
 - [法院提交包编译契约](./docs/SUBMISSION_COMPILATION_CONTRACT.md)
 
 ## 不可突破的产品红线

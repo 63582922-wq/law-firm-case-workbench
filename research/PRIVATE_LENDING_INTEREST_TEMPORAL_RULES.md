@@ -38,6 +38,7 @@
 - `case_legal_fact_bindings` 要求规则事实条件绑定到同案、已有证据且由律师确认为 `CONFIRMED` 的事实；
 - `case_legal_bundle_segments` 只引用已批准规则版本、两类来源快照、事实条件和事件，年利率由服务器取值；
 - 正式计算 API 不接收浏览器提交的规则段或年利率，只读取当前案件法律规则包。
+- `official_source_capture.py` 已实现真实 TLS、公网对端、域名/类型/大小门禁和响应原字节加密捕获；`legal_provision_parser.py` 已对最高法第二次修正第 25/31 条、第一次修正第 26/32 条和《民法典》第 679/680 条完成真实网页解析，对 2015 原始第 26/31 条完成合成金标准解析；`lpr_source_parser.py` 已对中国货币网官方 JSON 完成 12 条真实数据解析。所有产物仍是 `HUMAN_REVIEW_REQUIRED`，不自动进入规则包。
 
 ## 官方来源
 
