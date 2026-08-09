@@ -44,6 +44,7 @@ export type EvidenceReviewView = {
   duplicateGroups: { groupId: string; status: string; canonicalPageId: string | null; pageIds: string[] }[];
   lockedManifest: { manifestId: string; contentHash: string; totalPages: number; includedPages: number; excludedPages: number } | null;
   derivatives: { derivativeId: string; artifactType: string; artifactSha256: string; pageCount: number; status: string }[];
+  derivativeRuns: { runId: string; manifestId: string; status: string; attemptCount: number; failureCode: string | null }[];
 };
 
 export type EvidenceDerivative = EvidenceReviewView["derivatives"][number];
@@ -52,6 +53,12 @@ export type EvidenceDerivativeDelivery = {
   blob: Blob;
   fileName: string;
   artifactSha256: string;
+};
+
+export type EvidenceDerivativeRunReceipt = {
+  runId: string;
+  matterVersion: number;
+  requestId: string | null;
 };
 
 type SyntheticReview = {
@@ -94,6 +101,7 @@ type PersistentEvidenceSnapshot = {
   duplicate_groups: { duplicate_group_id: string; status: string; canonical_page_id: string | null; evidence_page_ids: string[] }[];
   locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
   derivatives: { derivative_id: string; artifact_type: string; artifact_sha256: string; page_count: number; status: string }[];
+  derivative_runs: { run_id: string; manifest_id: string; status: string; attempt_count: number; failure_code: string | null }[];
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -218,6 +226,62 @@ export async function fetchEvidenceDerivative(
   };
 }
 
+export async function enqueueEvidenceDerivativeRun(
+  review: EvidenceReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceDerivativeRunReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有持久化工作台可以建立正式证据派生任务。");
+  }
+  if (!review.lockedManifest || review.matterVersion === null) {
+    throw new Error("必须先完成全部页级处置并锁定当前证据 Manifest。");
+  }
+  const approvalBinding = [
+    "evidence-derivative-run-approval-v1",
+    config.matterId,
+    review.lockedManifest.manifestId,
+    review.lockedManifest.contentHash,
+    String(review.matterVersion),
+  ].join("|");
+  const approvalHash = await sha256Text(approvalBinding);
+  let response: Response;
+  try {
+    response = await fetch(
+      `${config.apiBase}/v1/matters/${config.matterId}/evidence-manifests/${review.lockedManifest.manifestId}/derivative-runs`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          expected_version: review.matterVersion,
+          manifest_content_hash: review.lockedManifest.contentHash,
+          approval_hash: approvalHash,
+        }),
+      },
+    );
+  } catch {
+    throw new Error("连接在任务确认前中断。请先刷新案件状态；系统不会盲目重试或重复生成。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "证据派生任务未建立"));
+  }
+  if (payload.object_type !== "EVIDENCE_DERIVATIVE_RUN") {
+    throw new Error("任务回执类型不一致，已停止后续处理。");
+  }
+  return {
+    runId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
 export async function confirmSyntheticFact(factId: string): Promise<CaseReviewView> {
   if (caseDataSourceConfig.kind !== "synthetic-alpha") throw new Error("持久化预览中的确认必须通过案件版本化命令完成。 ");
   const response = await fetch(`${alphaCalculationApiBase}/v1/alpha-review/facts/${factId}/confirm`, {
@@ -290,6 +354,7 @@ function mapSyntheticEvidence(): EvidenceReviewView {
     duplicateGroups: [{ groupId: "synthetic-duplicate-17-18", status: "CANDIDATE", canonicalPageId: null, pageIds: ["synthetic-page-17", "synthetic-page-18"] }],
     lockedManifest: null,
     derivatives: [],
+    derivativeRuns: [],
   };
 }
 
@@ -316,6 +381,7 @@ function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: s
     duplicateGroups: payload.duplicate_groups.map((item) => ({ groupId: item.duplicate_group_id, status: item.status, canonicalPageId: item.canonical_page_id, pageIds: item.evidence_page_ids })),
     lockedManifest: payload.locked_manifest ? { manifestId: payload.locked_manifest.manifest_id, contentHash: payload.locked_manifest.content_hash, totalPages: payload.locked_manifest.total_pages, includedPages: payload.locked_manifest.included_pages, excludedPages: payload.locked_manifest.excluded_pages } : null,
     derivatives: payload.derivatives.map((item) => ({ derivativeId: item.derivative_id, artifactType: item.artifact_type, artifactSha256: item.artifact_sha256, pageCount: item.page_count, status: item.status })),
+    derivativeRuns: payload.derivative_runs.map((item) => ({ runId: item.run_id, manifestId: item.manifest_id, status: item.status, attemptCount: item.attempt_count, failureCode: item.failure_code })),
   };
 }
 
@@ -339,4 +405,10 @@ function isAllowedPreviewOrigin(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+async function sha256Text(value: string): Promise<string> {
+  if (!globalThis.crypto?.subtle) throw new Error("当前浏览器无法建立审批输入哈希。");
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

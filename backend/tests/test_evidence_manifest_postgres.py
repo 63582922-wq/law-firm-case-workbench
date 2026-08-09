@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -39,6 +40,12 @@ class FakeEvidenceConnection:
         manifest_row: dict | None = None,
         derivative_row: dict | None = None,
         verified_locator_row: dict | None = None,
+        derivative_run_row: dict | None = None,
+        derivative_run_existing: dict | None = None,
+        derivative_run_claimed: dict | None = None,
+        derivative_run_artifacts: list[dict] | None = None,
+        clock_comparison: bool = True,
+        heartbeat_expires_at: datetime | None = None,
     ) -> None:
         self.permitted = permitted
         self.prior_receipt = prior_receipt
@@ -50,6 +57,12 @@ class FakeEvidenceConnection:
         self.manifest_row = manifest_row
         self.derivative_row = derivative_row
         self.verified_locator_row = verified_locator_row
+        self.derivative_run_row = derivative_run_row
+        self.derivative_run_existing = derivative_run_existing
+        self.derivative_run_claimed = derivative_run_claimed
+        self.derivative_run_artifacts = derivative_run_artifacts or []
+        self.clock_comparison = clock_comparison
+        self.heartbeat_expires_at = heartbeat_expires_at
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -86,6 +99,25 @@ class FakeEvidenceConnection:
             return FakeResult(rows=self.annotations)
         if "SELECT content_hash, included_pages, status FROM evidence_manifests" in normalized:
             return FakeResult(row=self.manifest_row)
+        if "SELECT status, content_hash FROM evidence_manifests" in normalized:
+            return FakeResult(row=self.manifest_row)
+        if "SELECT status FROM evidence_derivative_runs" in normalized:
+            return FakeResult(row=self.derivative_run_existing)
+        if "SELECT run.status, run.attempt_count" in normalized or "SELECT run.status, run.lease_id" in normalized:
+            return FakeResult(row=self.derivative_run_row)
+        if normalized.startswith("SELECT %s <= now()") or normalized.startswith("SELECT %s > now()"):
+            key = "expired" if "expired" in normalized else "active"
+            return FakeResult(row={key: self.clock_comparison})
+        if "UPDATE evidence_derivative_runs SET status = 'RUNNING'" in normalized:
+            return FakeResult(row=self.derivative_run_claimed)
+        if "SET lease_expires_at = now()" in normalized:
+            return FakeResult(
+                row={"lease_expires_at": self.heartbeat_expires_at}
+                if self.heartbeat_expires_at is not None
+                else None
+            )
+        if "SELECT derivative_id, artifact_type, status, manifest_id" in normalized:
+            return FakeResult(rows=self.derivative_run_artifacts)
         if "SELECT derivative.status, derivative.manifest_id" in normalized:
             return FakeResult(row=self.derivative_row)
         if "SELECT derivative.derivative_id, derivative.manifest_id" in normalized:
@@ -439,6 +471,131 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.assertIn("derivative.status = 'VERIFIED'", sql)
         self.assertIn("manifest.status = 'LOCKED'", sql)
         self.assertNotIn(object_key, repr(locator))
+
+    def test_lead_queues_only_one_hash_bound_manifest_run(self) -> None:
+        manifest_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            manifest_row={"status": "LOCKED", "content_hash": "4" * 64},
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.enqueue_derivative_run(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-run-enqueue",
+                manifest_content_hash="4" * 64,
+                approval_hash="3" * 64,
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_derivative_runs", sql)
+        self.assertIn("EVIDENCE_DERIVATIVE_RUN_QUEUED", str(connection.executed))
+
+    def test_worker_claims_with_a_bounded_recoverable_lease(self) -> None:
+        run_id = str(uuid4())
+        manifest_id = str(uuid4())
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+        connection = FakeEvidenceConnection(
+            derivative_run_row={
+                "status": "QUEUED",
+                "attempt_count": 0,
+                "lease_id": None,
+                "lease_expires_at": None,
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "2" * 64,
+                "manifest_status": "LOCKED",
+                "current_manifest_hash": "2" * 64,
+            },
+            derivative_run_claimed={
+                "attempt_count": 1,
+                "lease_expires_at": expires_at,
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "2" * 64,
+            },
+        )
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            lease = self.store.claim_derivative_run(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                actor=worker,
+                expected_version=1,
+                idempotency_key="evidence-run-claim",
+                lease_seconds=120,
+            )
+        UUID(lease.lease_id)
+        self.assertEqual(lease.attempt_count, 1)
+        self.assertEqual(lease.lease_expires_at, expires_at)
+        self.assertEqual(lease.matter_version, 2)
+
+    def test_worker_completes_only_with_current_lease_and_both_verified_outputs(self) -> None:
+        run_id = str(uuid4())
+        lease_id = str(uuid4())
+        manifest_id = str(uuid4())
+        related_id = str(uuid4())
+        annotated_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            derivative_run_row={
+                "status": "RUNNING",
+                "lease_id": lease_id,
+                "lease_expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "1" * 64,
+                "manifest_status": "LOCKED",
+                "current_manifest_hash": "1" * 64,
+            },
+            derivative_run_artifacts=[
+                {"derivative_id": related_id, "artifact_type": "RELATED_PAGES_PDF", "status": "VERIFIED", "manifest_id": manifest_id},
+                {"derivative_id": annotated_id, "artifact_type": "ANNOTATED_RELATED_PAGES_PDF", "status": "VERIFIED", "manifest_id": manifest_id},
+            ],
+        )
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.complete_derivative_run(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                lease_id=lease_id,
+                related_derivative_id=related_id,
+                annotated_derivative_id=annotated_id,
+                actor=worker,
+                expected_version=1,
+                idempotency_key="evidence-run-complete",
+            )
+        self.assertEqual(receipt.object_id, run_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'SUCCEEDED'", sql)
+
+    def test_worker_heartbeat_renews_only_the_current_unexpired_lease_without_changing_matter_version(self) -> None:
+        run_id = str(uuid4())
+        lease_id = str(uuid4())
+        renewed_until = datetime.now(timezone.utc) + timedelta(minutes=2)
+        connection = FakeEvidenceConnection(heartbeat_expires_at=renewed_until)
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            result = self.store.renew_derivative_run_lease(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                lease_id=lease_id,
+                actor=worker,
+                lease_seconds=120,
+            )
+        self.assertEqual(result, renewed_until)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("lease_expires_at > now()", sql)
+        self.assertNotIn("UPDATE matters SET version", sql)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,7 @@ class FakePersistentEvidenceStore:
             duplicate_groups=(),
             locked_manifest=None,
             derivatives=(),
+            derivative_runs=(),
         )
 
     def create_page_decision_candidate(self, **kwargs):
@@ -145,6 +146,18 @@ class FakePersistentEvidenceStore:
         if self.locator is None or self.locator.derivative_id != derivative_id:
             raise KeyError(derivative_id)
         return self.locator
+
+    def enqueue_derivative_run(self, **kwargs):
+        self.calls.append(("enqueue_derivative_run", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="ENQUEUE_EVIDENCE_DERIVATIVE_RUN",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="EVIDENCE_DERIVATIVE_RUN",
+            object_id=str(uuid4()),
+        )
 
 
 class PersistentApiTests(unittest.TestCase):
@@ -424,6 +437,35 @@ class PersistentApiTests(unittest.TestCase):
             )
             self.assertEqual(replay.status_code, 403)
             self.assertEqual(replay.json()["code"], "PERMISSION_DENIED")
+
+    def test_lead_enqueues_a_version_and_manifest_hash_bound_derivative_run(self) -> None:
+        evidence_store = FakePersistentEvidenceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    evidence_manifest_store=evidence_store,
+                )
+            )
+        )
+        manifest_id = str(uuid4())
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/evidence-manifests/{manifest_id}/derivative-runs",
+            headers={"Idempotency-Key": "evidence-run-ui-001"},
+            json={
+                "expected_version": 5,
+                "manifest_content_hash": "8" * 64,
+                "approval_hash": "7" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        call = next(item for item in evidence_store.calls if item[0] == "enqueue_derivative_run")[1]
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["manifest_id"], manifest_id)
+        self.assertEqual(call["expected_version"], 5)
+        self.assertEqual(call["manifest_content_hash"], "8" * 64)
 
 
 if __name__ == "__main__":

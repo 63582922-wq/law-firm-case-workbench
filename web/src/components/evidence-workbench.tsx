@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   caseDataSourceConfig,
+  enqueueEvidenceDerivativeRun,
   fetchEvidenceDerivative,
   loadEvidenceReview,
   type EvidenceDerivative,
@@ -125,6 +126,22 @@ export function EvidenceWorkbench() {
     }
   }
 
+  async function enqueueDerivativeRun() {
+    if (!review) return;
+    setArtifactBusy("enqueue");
+    setArtifactNotice(null);
+    try {
+      const receipt = await enqueueEvidenceDerivativeRun(review);
+      const refreshed = await loadEvidenceReview();
+      setReview(refreshed);
+      setArtifactNotice(`证据派生任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。`);
+    } catch (reason: unknown) {
+      setArtifactNotice(reason instanceof Error ? reason.message : "证据派生任务未建立");
+    } finally {
+      setArtifactBusy(null);
+    }
+  }
+
   return (
     <section className={styles.evidenceArea} aria-label="证据核验台">
       <header className={styles.evidenceHeading}>
@@ -238,7 +255,13 @@ export function EvidenceWorkbench() {
             <strong>{review.lockedManifest ? "已锁定" : "尚未锁定"}</strong>
             <small>{review.lockedManifest ? `${review.lockedManifest.includedPages} 页纳入 / ${review.lockedManifest.excludedPages} 页排除` : `仍有 ${unresolvedCount} 页待律师处置`}</small>
             <small>派生件：{review.derivatives.length ? review.derivatives.map((item) => `${item.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "红框版" : "相关页版"} ${item.status}`).join("；") : "尚未生成"}</small>
+            <small>任务：{review.derivativeRuns.length ? review.derivativeRuns.map((item) => `${runStatusLabel(item.status)}（尝试 ${item.attemptCount}/3${item.failureCode ? ` · ${item.failureCode}` : ""}）`).join("；") : "尚未建立"}</small>
           </div>
+          {review.sourceKind === "persistent-preview" && review.lockedManifest && !review.derivativeRuns.some((item) => ["QUEUED", "RUNNING", "SUCCEEDED"].includes(item.status)) && (
+            <button className={styles.primaryArtifactAction} disabled={artifactBusy !== null} type="button" onClick={() => void enqueueDerivativeRun()}>
+              {artifactBusy === "enqueue" ? "正在建立任务…" : review.derivativeRuns.some((item) => item.status === "FAILED") ? "重新生成相关页 PDF" : "生成相关页 PDF"}
+            </button>
+          )}
           {review.sourceKind === "persistent-preview" && review.derivatives.some((item) => item.status === "VERIFIED") && (
             <div className={styles.artifactActions}>
               {review.derivatives.filter((item) => item.status === "VERIFIED").map((item) => (
@@ -261,4 +284,12 @@ export function EvidenceWorkbench() {
       </div>
     </section>
   );
+}
+
+function runStatusLabel(status: string): string {
+  if (status === "QUEUED") return "等待本机 Worker";
+  if (status === "RUNNING") return "正在生成并核验";
+  if (status === "SUCCEEDED") return "生成完成";
+  if (status === "FAILED") return "生成失败";
+  return status;
 }
