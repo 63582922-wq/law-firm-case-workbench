@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from datetime import date
+from decimal import Decimal
 import unittest
 from uuid import uuid4
 from unittest.mock import patch
@@ -13,10 +15,18 @@ from psycopg.conninfo import conninfo_to_dict
 
 from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
 from case_kernel.evidence_refs import EvidenceLink
-from case_kernel.fact_claim_ledger import AssertionOrigin, FactStatus
+from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.models import Actor, MatterStage, Role
 from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.workflow import MatterWorkflow
+from case_kernel.transaction_ledger import (
+    ClassificationOrigin,
+    DatePrecision,
+    ObligationAllocation,
+    PaymentNature,
+    TransactionChannel,
+    TransactionDirection,
+)
 
 
 TEST_DSN = os.environ.get("CASE_WORKBENCH_TEST_DATABASE_URL", "")
@@ -149,6 +159,155 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
         self.assertEqual(decided.matter_version, 3)
         self.assertEqual(len(facts), 1)
         self.assertEqual(facts[0].status, FactStatus.CONFIRMED)
+
+    def test_full_case_ledger_command_chain_preserves_versions_and_normalized_links(self) -> None:
+        matter_id = str(uuid4())
+        self.workflow.create_matter(
+            self.actor,
+            matter_id=matter_id,
+            title="Synthetic Full Persistent Ledger Matter",
+            idempotency_key="create-full-ledger-001",
+        )
+        with psycopg.connect(TEST_DSN) as connection:
+            connection.execute("SELECT set_config('app.firm_id', %s, true)", (self.firm_id,))
+            connection.execute(
+                """
+                INSERT INTO matter_actor_roles (matter_id, firm_id, user_id, role)
+                VALUES (%s, %s, %s, 'LEAD_LAWYER')
+                """,
+                (matter_id, self.firm_id, self.actor_id),
+            )
+        original = (
+            EvidenceLink(
+                evidence_id="synthetic-full-ledger-evidence",
+                original_file_sha256="c" * 64,
+                page_number=1,
+                region_id="synthetic-full-ledger-region",
+                original_label="[合成] 原始材料第1页",
+            ),
+        )
+        fact = self.case_ledger_store.create_fact_candidate(
+            matter_id=matter_id,
+            actor=self.actor,
+            expected_version=1,
+            idempotency_key="full-fact-create",
+            original_text="[合成] 被告主张已支付一笔款项。",
+            origin=AssertionOrigin.DEFENDANT_STATEMENT,
+            evidence_links=original,
+        )
+        self.case_ledger_store.decide_fact(
+            matter_id=matter_id,
+            fact_id=fact.object_id,
+            actor=self.actor,
+            expected_version=2,
+            idempotency_key="full-fact-confirm",
+            status=FactStatus.CONFIRMED,
+            decision_hash="d" * 64,
+        )
+        claim = self.case_ledger_store.create_claim_candidate(
+            matter_id=matter_id,
+            actor=self.actor,
+            expected_version=3,
+            idempotency_key="full-claim-create",
+            original_claim_text="[合成] 原告主张本金1,000.00元。",
+            claimed_amount=Decimal("1000.00"),
+            currency="CNY",
+            evidence_links=original,
+        )
+        self.case_ledger_store.confirm_claim_scope(
+            matter_id=matter_id,
+            claim_id=claim.object_id,
+            actor=self.actor,
+            expected_version=4,
+            idempotency_key="full-claim-confirm",
+            confirmation_hash="e" * 64,
+        )
+        self.case_ledger_store.set_claim_response(
+            matter_id=matter_id,
+            claim_id=claim.object_id,
+            actor=self.actor,
+            expected_version=5,
+            idempotency_key="full-response-set",
+            position=ClaimResponsePosition.PARTIALLY_ADMIT,
+            confirmed_fact_ids=(fact.object_id,),
+            partial_amount=Decimal("800.00"),
+            currency="CNY",
+            approval_hash="f" * 64,
+        )
+        issue = self.case_ledger_store.create_dispute_issue_candidate(
+            matter_id=matter_id,
+            actor=self.actor,
+            expected_version=6,
+            idempotency_key="full-issue-create",
+            question="[合成] 已付款项应如何计入？",
+            claim_ids=(claim.object_id,),
+            confirmed_fact_ids=(fact.object_id,),
+        )
+        self.case_ledger_store.confirm_dispute_issue(
+            matter_id=matter_id,
+            issue_id=issue.object_id,
+            actor=self.actor,
+            expected_version=7,
+            idempotency_key="full-issue-confirm",
+            approval_hash="1" * 64,
+        )
+        transaction = self.case_ledger_store.create_transaction_candidate(
+            matter_id=matter_id,
+            actor=self.actor,
+            expected_version=8,
+            idempotency_key="full-transaction-create",
+            local_date=date(2020, 8, 20),
+            date_precision=DatePrecision.EXACT_DATE,
+            amount=Decimal("1000.00"),
+            currency="CNY",
+            direction=TransactionDirection.OUTGOING,
+            payer_label="[合成] 被告",
+            payee_label="[合成] 原告",
+            channel=TransactionChannel.WECHAT,
+            transaction_reference="synthetic-full-ledger-reference",
+            evidence_links=original,
+        )
+        self.case_ledger_store.confirm_transaction(
+            matter_id=matter_id,
+            transaction_id=transaction.object_id,
+            actor=self.actor,
+            expected_version=9,
+            idempotency_key="full-transaction-confirm",
+            confirmation_hash="2" * 64,
+        )
+        classification = self.case_ledger_store.create_payment_classification_candidate(
+            matter_id=matter_id,
+            transaction_id=transaction.object_id,
+            actor=self.actor,
+            expected_version=10,
+            idempotency_key="full-classification-create",
+            origin=ClassificationOrigin.DEFENDANT_STATEMENT,
+            nature=PaymentNature.INTEREST_PAYMENT,
+            allocations=(ObligationAllocation("synthetic-obligation", Decimal("1000.00"), "CNY"),),
+            same_day_sequence=1,
+            evidence_links=original,
+        )
+        final = self.case_ledger_store.approve_payment_classification(
+            matter_id=matter_id,
+            classification_id=classification.object_id,
+            actor=self.actor,
+            expected_version=11,
+            idempotency_key="full-classification-approve",
+            approval_hash="3" * 64,
+        )
+        self.assertEqual(final.matter_version, 12)
+        with psycopg.connect(TEST_DSN) as connection:
+            connection.execute("SELECT set_config('app.firm_id', %s, true)", (self.firm_id,))
+            response_links = connection.execute(
+                "SELECT count(*) AS count FROM case_claim_response_facts WHERE matter_id = %s",
+                (matter_id,),
+            ).fetchone()["count"]
+            allocation_links = connection.execute(
+                "SELECT count(*) AS count FROM case_payment_allocations WHERE matter_id = %s",
+                (matter_id,),
+            ).fetchone()["count"]
+        self.assertEqual(response_links, 1)
+        self.assertEqual(allocation_links, 1)
 
 class PostgresMatterStoreBoundaryTests(unittest.TestCase):
     def test_alpha_identifiers_are_rejected_before_connection(self) -> None:

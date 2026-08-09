@@ -4,7 +4,7 @@
 
 ## 目的与边界
 
-`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 是事实与交易台账的首段命令适配器。它们要求 PostgreSQL 16+、顺序执行 `backend/migrations/0001_core.sql` 与 `backend/migrations/0002_case_ledgers.sql`，并由身份/成员关系服务预先创建 UUID 律所、用户及案件角色数据。
+`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。它们要求 PostgreSQL 16+、顺序执行 `backend/migrations/0001_core.sql` 与 `backend/migrations/0002_case_ledgers.sql`，并由身份/成员关系服务预先创建 UUID 律所、用户及案件角色数据。
 
 它们不属于当前 Web/API 的合成 Alpha 运行路径。`alpha_*` 标识符会在建立数据库连接之前被拒绝；这条限制防止测试页面意外写入持久化环境。台账适配器还会在数据库内复核调用人具有本案未撤销且用户状态有效的角色，不能只信任请求携带的角色声明。
 
@@ -20,6 +20,8 @@
 8. 写入幂等回执并一次提交。
 
 任何错误导致整笔事务回滚。全部 SQL 使用参数绑定；不得用字符串拼接案件内容、身份或输入金额。
+
+事实、诉请、交易等候选不会直接成为正式结论；律师确认、回应、争点确认、付款分类批准和重复组结论才触发正式上游失效。诉请回应到事实、争点到事实/诉请、付款分类到债务分配、重复组到原交易均使用同律所同案件的正规化关联表；重复候选的处理只选择规范交易，不删除任何来源交易。
 
 ## 受控集成测试
 
