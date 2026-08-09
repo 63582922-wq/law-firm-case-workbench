@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -12,10 +13,11 @@ from reportlab.pdfgen import canvas
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt
 from case_kernel.evidence_derivative_coordinator import (
     EvidenceDerivativeCoordinationBlocked,
+    coordinate_claimed_evidence_derivative_run,
     coordinate_evidence_derivatives,
 )
 from case_kernel.evidence_derivative_worker import SourcePdfBinding
-from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
+from case_kernel.evidence_manifest_postgres import DerivativeRunLease, PersistentEvidenceSnapshot
 from case_kernel.local_case_folder import root_fingerprint
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.models import Actor, Role
@@ -47,6 +49,18 @@ class FakeDerivativePersistence:
             audit_event_id=str(uuid4()),
             object_type="EVIDENCE_DERIVATIVE",
             object_id=kwargs["derivative_id"],
+        )
+
+    def complete_derivative_run(self, **kwargs):
+        self.calls.append(("complete_run", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="COMPLETE_EVIDENCE_DERIVATIVE_RUN",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="EVIDENCE_DERIVATIVE_RUN",
+            object_id=kwargs["run_id"],
         )
 
 
@@ -145,6 +159,7 @@ class EvidenceDerivativeCoordinatorTests(unittest.TestCase):
                 ),
             },
             derivatives=(),
+            derivative_runs=(),
         )
 
     def tearDown(self) -> None:
@@ -225,6 +240,50 @@ class EvidenceDerivativeCoordinatorTests(unittest.TestCase):
                 idempotency_prefix="synthetic-derivative-run-003",
             )
         self.assertEqual(persistence.calls, [])
+
+    def test_claimed_run_completes_only_after_both_outputs_are_verified(self) -> None:
+        persistence = FakeDerivativePersistence()
+        store = LocalEncryptedArtifactStore(
+            self.root / "managed",
+            key_id="synthetic-key-v1",
+            encryption_key=b"q" * 32,
+        )
+        lease = DerivativeRunLease(
+            run_id=str(uuid4()),
+            lease_id=str(uuid4()),
+            matter_id=self.matter_id,
+            manifest_id=self.manifest_id,
+            manifest_content_hash="b" * 64,
+            attempt_count=1,
+            lease_expires_at=datetime.now(timezone.utc) + timedelta(minutes=2),
+            matter_version=self.snapshot.version,
+        )
+        result = coordinate_claimed_evidence_derivative_run(
+            lease=lease,
+            snapshot=self.snapshot,
+            source_bindings=(
+                SourcePdfBinding(
+                    evidence_file_id=self.file_id,
+                    relative_path="synthetic.pdf",
+                    expected_sha256=self.source_hash,
+                    expected_page_count=2,
+                ),
+            ),
+            case_root=self.case_root,
+            confirmed_case_root_fingerprint=root_fingerprint(self.case_root),
+            staging_root=self.root / "staging",
+            artifact_store=store,
+            persistence=persistence,
+            system_actor=self.actor,
+        )
+        self.assertEqual(result.completion_receipt.matter_version, 15)
+        self.assertEqual(
+            [name for name, _ in persistence.calls],
+            ["register", "verify", "register", "verify", "complete_run"],
+        )
+        complete = persistence.calls[-1][1]
+        self.assertEqual(complete["run_id"], lease.run_id)
+        self.assertNotEqual(complete["related_derivative_id"], complete["annotated_derivative_id"])
 
 
 if __name__ == "__main__":

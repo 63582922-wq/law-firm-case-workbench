@@ -10,9 +10,10 @@ the current submission bundle in the same transaction.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from typing import Any, Iterator
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import psycopg
 from psycopg.rows import dict_row
@@ -49,6 +50,19 @@ class PersistentEvidenceSnapshot:
     duplicate_groups: tuple[dict[str, Any], ...]
     locked_manifest: dict[str, Any] | None
     derivatives: tuple[dict[str, Any], ...]
+    derivative_runs: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class DerivativeRunLease:
+    run_id: str
+    lease_id: str
+    matter_id: str
+    manifest_id: str
+    manifest_content_hash: str
+    attempt_count: int
+    lease_expires_at: datetime
+    matter_version: int
 
 
 class PostgresEvidenceManifestStore:
@@ -1142,6 +1156,454 @@ class PostgresEvidenceManifestStore:
                 stale_submission=False,
             )
 
+    def enqueue_derivative_run(
+        self,
+        *,
+        matter_id: str,
+        manifest_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        manifest_content_hash: str,
+        approval_hash: str,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("manifest_id", manifest_id)
+        _require_roles(actor, self._DECISION_ROLES)
+        _require_positive_version(expected_version)
+        _validate_sha256("manifest_content_hash", manifest_content_hash)
+        _validate_sha256("approval_hash", approval_hash)
+        command_name = "ENQUEUE_EVIDENCE_DERIVATIVE_RUN"
+        payload = {
+            "matter_id": matter_id,
+            "manifest_id": manifest_id,
+            "expected_version": expected_version,
+            "manifest_content_hash": manifest_content_hash,
+            "approval_hash": approval_hash,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=self._DECISION_ROLES,
+            )
+            if prior is not None:
+                return prior
+            manifest = connection.execute(
+                """
+                SELECT status, content_hash
+                FROM evidence_manifests
+                WHERE manifest_id = %s AND matter_id = %s AND firm_id = %s
+                FOR UPDATE
+                """,
+                (manifest_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if manifest is None:
+                raise KeyError(manifest_id)
+            if manifest["status"] != "LOCKED" or manifest["content_hash"] != manifest_content_hash:
+                raise CaseLedgerPersistenceBlocked("derivative run requires the current hash-bound locked Manifest")
+            existing = connection.execute(
+                """
+                SELECT status FROM evidence_derivative_runs
+                WHERE manifest_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED')
+                LIMIT 1
+                """,
+                (manifest_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if existing is not None:
+                raise CaseLedgerPersistenceBlocked("the locked Manifest already has an active or successful derivative run")
+            run_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO evidence_derivative_runs (
+                    run_id, firm_id, matter_id, manifest_id, manifest_content_hash,
+                    input_matter_version, status, created_by, approval_hash
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED', %s, %s)
+                """,
+                (
+                    run_id,
+                    actor.firm_id,
+                    matter_id,
+                    manifest_id,
+                    manifest_content_hash,
+                    expected_version,
+                    actor.actor_id,
+                    approval_hash,
+                ),
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_RUN_QUEUED",
+                object_type="EVIDENCE_DERIVATIVE_RUN",
+                object_id=run_id,
+                audit_payload={
+                    "run_id": run_id,
+                    "manifest_id": manifest_id,
+                    "manifest_content_hash": manifest_content_hash,
+                    "approval_hash": approval_hash,
+                },
+                stale_submission=False,
+            )
+
+    def claim_derivative_run(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        lease_seconds: int = 120,
+    ) -> DerivativeRunLease:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("run_id", run_id)
+        _require_roles(actor, frozenset({Role.SYSTEM_WORKER}))
+        _require_positive_version(expected_version)
+        if lease_seconds < 30 or lease_seconds > 300:
+            raise CaseLedgerPersistenceBlocked("derivative run lease must be between 30 and 300 seconds")
+        command_name = "CLAIM_EVIDENCE_DERIVATIVE_RUN"
+        lease_id = str(uuid5(NAMESPACE_URL, f"lawcase:{actor.firm_id}:{matter_id}:{run_id}:{idempotency_key}"))
+        payload = {
+            "matter_id": matter_id,
+            "run_id": run_id,
+            "expected_version": expected_version,
+            "lease_id": lease_id,
+            "lease_seconds": lease_seconds,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=frozenset({Role.SYSTEM_WORKER}),
+            )
+            run = connection.execute(
+                """
+                SELECT run.status, run.attempt_count, run.lease_id, run.lease_expires_at,
+                       run.manifest_id, run.manifest_content_hash,
+                       manifest.status AS manifest_status,
+                       manifest.content_hash AS current_manifest_hash
+                FROM evidence_derivative_runs run
+                JOIN evidence_manifests manifest
+                  ON manifest.manifest_id = run.manifest_id
+                 AND manifest.matter_id = run.matter_id AND manifest.firm_id = run.firm_id
+                WHERE run.run_id = %s AND run.matter_id = %s AND run.firm_id = %s
+                FOR UPDATE OF run
+                """,
+                (run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            if prior is not None:
+                if str(run["lease_id"]) != lease_id or run["status"] != "RUNNING":
+                    raise CaseLedgerPersistenceBlocked("the replayed derivative run claim has already progressed")
+                return DerivativeRunLease(
+                    run_id=run_id,
+                    lease_id=lease_id,
+                    matter_id=matter_id,
+                    manifest_id=str(run["manifest_id"]),
+                    manifest_content_hash=run["manifest_content_hash"],
+                    attempt_count=run["attempt_count"],
+                    lease_expires_at=run["lease_expires_at"],
+                    matter_version=prior.matter_version,
+                )
+            if run["manifest_status"] != "LOCKED" or run["current_manifest_hash"] != run["manifest_content_hash"]:
+                raise CaseLedgerPersistenceBlocked("derivative run Manifest is no longer current")
+            if run["attempt_count"] >= 3:
+                raise CaseLedgerPersistenceBlocked("derivative run has exhausted its recovery attempts")
+            claimable = run["status"] == "QUEUED" or (
+                run["status"] == "RUNNING"
+                and run["lease_expires_at"] is not None
+                and connection.execute("SELECT %s <= now() AS expired", (run["lease_expires_at"],)).fetchone()["expired"]
+            )
+            if not claimable:
+                raise CaseLedgerPersistenceBlocked("derivative run is not claimable")
+            claimed = connection.execute(
+                """
+                UPDATE evidence_derivative_runs
+                SET status = 'RUNNING', attempt_count = attempt_count + 1,
+                    lease_id = %s, lease_expires_at = now() + (%s * interval '1 second'),
+                    updated_at = now()
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s
+                RETURNING attempt_count, lease_expires_at, manifest_id, manifest_content_hash
+                """,
+                (lease_id, lease_seconds, run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if claimed is None:
+                raise CaseLedgerPersistenceBlocked("derivative run changed before claim")
+            receipt = _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_RUN_CLAIMED",
+                object_type="EVIDENCE_DERIVATIVE_RUN",
+                object_id=run_id,
+                audit_payload={
+                    "run_id": run_id,
+                    "manifest_id": str(claimed["manifest_id"]),
+                    "attempt_count": claimed["attempt_count"],
+                    "lease_id": lease_id,
+                },
+                stale_submission=False,
+            )
+            return DerivativeRunLease(
+                run_id=run_id,
+                lease_id=lease_id,
+                matter_id=matter_id,
+                manifest_id=str(claimed["manifest_id"]),
+                manifest_content_hash=claimed["manifest_content_hash"],
+                attempt_count=claimed["attempt_count"],
+                lease_expires_at=claimed["lease_expires_at"],
+                matter_version=receipt.matter_version,
+            )
+
+    def complete_derivative_run(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        lease_id: str,
+        related_derivative_id: str,
+        annotated_derivative_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        for label, value in (
+            ("run_id", run_id),
+            ("lease_id", lease_id),
+            ("related_derivative_id", related_derivative_id),
+            ("annotated_derivative_id", annotated_derivative_id),
+        ):
+            _validate_uuid(label, value)
+        _require_roles(actor, frozenset({Role.SYSTEM_WORKER}))
+        _require_positive_version(expected_version)
+        command_name = "COMPLETE_EVIDENCE_DERIVATIVE_RUN"
+        payload = {
+            "matter_id": matter_id,
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "related_derivative_id": related_derivative_id,
+            "annotated_derivative_id": annotated_derivative_id,
+            "expected_version": expected_version,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=frozenset({Role.SYSTEM_WORKER}),
+            )
+            if prior is not None:
+                return prior
+            run = connection.execute(
+                """
+                SELECT run.status, run.lease_id, run.lease_expires_at, run.manifest_id,
+                       run.manifest_content_hash, manifest.status AS manifest_status,
+                       manifest.content_hash AS current_manifest_hash
+                FROM evidence_derivative_runs run
+                JOIN evidence_manifests manifest
+                  ON manifest.manifest_id = run.manifest_id
+                 AND manifest.matter_id = run.matter_id AND manifest.firm_id = run.firm_id
+                WHERE run.run_id = %s AND run.matter_id = %s AND run.firm_id = %s
+                FOR UPDATE OF run
+                """,
+                (run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            if (
+                run["status"] != "RUNNING"
+                or str(run["lease_id"]) != lease_id
+                or run["lease_expires_at"] is None
+                or connection.execute("SELECT %s > now() AS active", (run["lease_expires_at"],)).fetchone()["active"] is not True
+            ):
+                raise CaseLedgerPersistenceBlocked("derivative run lease is missing, expired, or replaced")
+            if run["manifest_status"] != "LOCKED" or run["current_manifest_hash"] != run["manifest_content_hash"]:
+                raise CaseLedgerPersistenceBlocked("derivative run Manifest is no longer current")
+            artifacts = connection.execute(
+                """
+                SELECT derivative_id, artifact_type, status, manifest_id
+                FROM evidence_derivative_artifacts
+                WHERE derivative_id = ANY(%s) AND matter_id = %s AND firm_id = %s
+                """,
+                ([related_derivative_id, annotated_derivative_id], matter_id, actor.firm_id),
+            ).fetchall()
+            artifact_map = {row["artifact_type"]: row for row in artifacts if row["status"] == "VERIFIED"}
+            expected = {
+                "RELATED_PAGES_PDF": related_derivative_id,
+                "ANNOTATED_RELATED_PAGES_PDF": annotated_derivative_id,
+            }
+            if set(artifact_map) != set(expected) or any(
+                str(artifact_map[artifact_type]["derivative_id"]) != derivative_id
+                or str(artifact_map[artifact_type]["manifest_id"]) != str(run["manifest_id"])
+                for artifact_type, derivative_id in expected.items()
+            ):
+                raise CaseLedgerPersistenceBlocked("derivative run outputs are not both verified and Manifest-bound")
+            updated = connection.execute(
+                """
+                UPDATE evidence_derivative_runs
+                SET status = 'SUCCEEDED', lease_id = NULL, lease_expires_at = NULL,
+                    related_derivative_id = %s, annotated_derivative_id = %s,
+                    completed_at = now(), updated_at = now()
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s AND status = 'RUNNING'
+                """,
+                (related_derivative_id, annotated_derivative_id, run_id, matter_id, actor.firm_id),
+            )
+            if updated.rowcount != 1:
+                raise CaseLedgerPersistenceBlocked("derivative run changed before completion")
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_RUN_SUCCEEDED",
+                object_type="EVIDENCE_DERIVATIVE_RUN",
+                object_id=run_id,
+                audit_payload={
+                    "run_id": run_id,
+                    "manifest_id": str(run["manifest_id"]),
+                    "related_derivative_id": related_derivative_id,
+                    "annotated_derivative_id": annotated_derivative_id,
+                },
+                stale_submission=False,
+            )
+
+    def renew_derivative_run_lease(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        lease_id: str,
+        actor: Actor,
+        lease_seconds: int = 120,
+    ) -> datetime:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("run_id", run_id)
+        _validate_uuid("lease_id", lease_id)
+        worker_roles = frozenset({Role.SYSTEM_WORKER})
+        _require_roles(actor, worker_roles)
+        if lease_seconds < 30 or lease_seconds > 300:
+            raise CaseLedgerPersistenceBlocked("derivative run lease must be between 30 and 300 seconds")
+        with self._transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=worker_roles,
+            )
+            renewed = connection.execute(
+                """
+                UPDATE evidence_derivative_runs
+                SET lease_expires_at = now() + (%s * interval '1 second'), updated_at = now()
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status = 'RUNNING' AND lease_id = %s AND lease_expires_at > now()
+                RETURNING lease_expires_at
+                """,
+                (lease_seconds, run_id, matter_id, actor.firm_id, lease_id),
+            ).fetchone()
+            if renewed is None:
+                raise CaseLedgerPersistenceBlocked("derivative run lease is missing, expired, or replaced")
+            return renewed["lease_expires_at"]
+
+    def fail_derivative_run(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        lease_id: str,
+        failure_code: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("run_id", run_id)
+        _validate_uuid("lease_id", lease_id)
+        _require_roles(actor, frozenset({Role.SYSTEM_WORKER}))
+        _require_positive_version(expected_version)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]{2,79}", failure_code):
+            raise CaseLedgerPersistenceBlocked("derivative run failure_code is invalid")
+        command_name = "FAIL_EVIDENCE_DERIVATIVE_RUN"
+        payload = {
+            "matter_id": matter_id,
+            "run_id": run_id,
+            "lease_id": lease_id,
+            "failure_code": failure_code,
+            "expected_version": expected_version,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=frozenset({Role.SYSTEM_WORKER}),
+            )
+            if prior is not None:
+                return prior
+            updated = connection.execute(
+                """
+                UPDATE evidence_derivative_runs
+                SET status = 'FAILED', lease_id = NULL, lease_expires_at = NULL,
+                    failure_code = %s, completed_at = now(), updated_at = now()
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status = 'RUNNING' AND lease_id = %s AND lease_expires_at > now()
+                """,
+                (failure_code, run_id, matter_id, actor.firm_id, lease_id),
+            )
+            if updated.rowcount != 1:
+                raise CaseLedgerPersistenceBlocked("derivative run lease is missing, expired, or replaced")
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="EVIDENCE_DERIVATIVE_RUN_FAILED",
+                object_type="EVIDENCE_DERIVATIVE_RUN",
+                object_id=run_id,
+                audit_payload={"run_id": run_id, "failure_code": failure_code},
+                stale_submission=False,
+            )
+
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)
         _require_roles(actor, self._READ_ROLES)
@@ -1268,6 +1730,18 @@ class PostgresEvidenceManifestStore:
                 """,
                 (matter_id, actor.firm_id),
             ).fetchall()
+            derivative_run_rows = connection.execute(
+                """
+                SELECT run_id, manifest_id, manifest_content_hash, input_matter_version,
+                       status, attempt_count, failure_code, related_derivative_id,
+                       annotated_derivative_id, created_by, created_at, updated_at, completed_at
+                FROM evidence_derivative_runs
+                WHERE matter_id = %s AND firm_id = %s
+                  AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+                ORDER BY created_at DESC, run_id DESC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
         original_payload = tuple(
             {
                 **{key: row[key] for key in ("original_label", "original_file_sha256", "byte_size", "media_type", "page_count", "source_scan_fingerprint")},
@@ -1323,6 +1797,24 @@ class PostgresEvidenceManifestStore:
             }
             for row in derivative_rows
         )
+        derivative_runs = tuple(
+            {
+                "run_id": str(row["run_id"]),
+                "manifest_id": str(row["manifest_id"]),
+                "manifest_content_hash": row["manifest_content_hash"],
+                "input_matter_version": row["input_matter_version"],
+                "status": row["status"],
+                "attempt_count": row["attempt_count"],
+                "failure_code": row["failure_code"],
+                "related_derivative_id": str(row["related_derivative_id"]) if row["related_derivative_id"] else None,
+                "annotated_derivative_id": str(row["annotated_derivative_id"]) if row["annotated_derivative_id"] else None,
+                "created_by": str(row["created_by"]),
+                "created_at": row["created_at"].isoformat(),
+                "updated_at": row["updated_at"].isoformat(),
+                "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+            }
+            for row in derivative_run_rows
+        )
         snapshot_payload = {
             "matter_id": matter_id,
             "version": matter["version"],
@@ -1331,6 +1823,7 @@ class PostgresEvidenceManifestStore:
             "duplicate_groups": groups,
             "locked_manifest": manifest_payload,
             "derivatives": derivatives,
+            "derivative_runs": derivative_runs,
         }
         return PersistentEvidenceSnapshot(snapshot_hash=_payload_hash(snapshot_payload), **snapshot_payload)
 
@@ -1484,6 +1977,24 @@ def _invalidate_current_evidence_outputs(
     firm_id: str,
     reason: str,
 ) -> None:
+    connection.execute(
+        """
+        UPDATE evidence_derivative_runs run
+        SET status = 'STALE', lease_id = NULL, lease_expires_at = NULL,
+            related_derivative_id = NULL, annotated_derivative_id = NULL,
+            stale_at = now(), stale_reason = %s, updated_at = now()
+        WHERE run.matter_id = %s AND run.firm_id = %s
+          AND run.status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+          AND EXISTS (
+              SELECT 1 FROM evidence_manifests manifest
+              WHERE manifest.manifest_id = run.manifest_id
+                AND manifest.matter_id = run.matter_id
+                AND manifest.firm_id = run.firm_id
+                AND manifest.status = 'LOCKED'
+          )
+        """,
+        (reason, matter_id, firm_id),
+    )
     connection.execute(
         """
         UPDATE evidence_derivative_artifacts derivative

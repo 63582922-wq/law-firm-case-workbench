@@ -494,6 +494,51 @@ class PersistentEvidenceDerivativeVerificationRequest(BaseModel):
     verification_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class PersistentEvidenceDerivativeRunRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    manifest_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentEvidenceDerivativeRunClaimRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_seconds: int = Field(default=120, ge=30, le=300)
+
+
+class PersistentEvidenceDerivativeRunLeaseResponse(BaseModel):
+    run_id: UUID
+    lease_id: UUID
+    matter_id: UUID
+    manifest_id: UUID
+    manifest_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    attempt_count: int = Field(ge=1, le=3)
+    lease_expires_at: datetime
+    matter_version: int = Field(ge=1)
+
+
+class PersistentEvidenceDerivativeRunCompleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_id: UUID
+    related_derivative_id: UUID
+    annotated_derivative_id: UUID
+
+
+class PersistentEvidenceDerivativeRunHeartbeatRequest(BaseModel):
+    lease_id: UUID
+    lease_seconds: int = Field(default=120, ge=30, le=300)
+
+
+class PersistentEvidenceDerivativeRunHeartbeatResponse(BaseModel):
+    run_id: UUID
+    lease_expires_at: datetime
+
+
+class PersistentEvidenceDerivativeRunFailureRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_id: UUID
+    failure_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{2,79}$")
+
+
 class PersistentEvidenceDecisionSnapshot(BaseModel):
     decision_id: UUID
     disposition: str
@@ -577,6 +622,22 @@ class PersistentEvidenceDerivativeSnapshot(BaseModel):
     verified_at: str | None
 
 
+class PersistentEvidenceDerivativeRunSnapshot(BaseModel):
+    run_id: UUID
+    manifest_id: UUID
+    manifest_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_matter_version: int = Field(ge=1)
+    status: Literal["QUEUED", "RUNNING", "SUCCEEDED", "FAILED"]
+    attempt_count: int = Field(ge=0, le=3)
+    failure_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,79}$")
+    related_derivative_id: UUID | None
+    annotated_derivative_id: UUID | None
+    created_by: UUID
+    created_at: str
+    updated_at: str
+    completed_at: str | None
+
+
 class PersistentEvidenceSnapshotResponse(BaseModel):
     matter_id: UUID
     version: int
@@ -586,6 +647,7 @@ class PersistentEvidenceSnapshotResponse(BaseModel):
     duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSnapshot, ...]
     locked_manifest: PersistentEvidenceLockedManifestSnapshot | None
     derivatives: tuple[PersistentEvidenceDerivativeSnapshot, ...]
+    derivative_runs: tuple[PersistentEvidenceDerivativeRunSnapshot, ...]
 
 
 class PersistentArtifactAccessRequest(BaseModel):

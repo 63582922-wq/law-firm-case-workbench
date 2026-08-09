@@ -25,7 +25,7 @@ from .evidence_derivative_worker import (
     build_evidence_derivatives,
     verify_evidence_derivatives,
 )
-from .evidence_manifest_postgres import PersistentEvidenceSnapshot
+from .evidence_manifest_postgres import DerivativeRunLease, PersistentEvidenceSnapshot
 from .managed_artifact_store import LocalEncryptedArtifactStore, StoredArtifactObject
 from .models import Actor, Role
 
@@ -38,6 +38,8 @@ class EvidenceDerivativePersistencePort(Protocol):
     def register_derivative_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def verify_derivative(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def complete_derivative_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,64 @@ class EvidenceDerivativeCoordinationResult:
     final_matter_version: int
     verification: DerivativeVerification
     artifacts: tuple[CoordinatedDerivativeArtifact, ...]
+
+
+@dataclass(frozen=True)
+class CompletedEvidenceDerivativeRun:
+    coordination: EvidenceDerivativeCoordinationResult
+    completion_receipt: CaseLedgerCommandReceipt
+
+
+def coordinate_claimed_evidence_derivative_run(
+    *,
+    lease: DerivativeRunLease,
+    snapshot: PersistentEvidenceSnapshot,
+    source_bindings: tuple[SourcePdfBinding, ...],
+    case_root: str | Path,
+    confirmed_case_root_fingerprint: str,
+    staging_root: str | Path,
+    artifact_store: LocalEncryptedArtifactStore,
+    persistence: EvidenceDerivativePersistencePort,
+    system_actor: Actor,
+) -> CompletedEvidenceDerivativeRun:
+    if (
+        lease.matter_id != snapshot.matter_id
+        or lease.matter_version != snapshot.version
+        or snapshot.locked_manifest is None
+        or lease.manifest_id != snapshot.locked_manifest.get("manifest_id")
+        or lease.manifest_content_hash != snapshot.locked_manifest.get("content_hash")
+    ):
+        raise EvidenceDerivativeCoordinationBlocked(
+            "claimed derivative run requires a fresh matching post-claim evidence snapshot"
+        )
+    coordination = coordinate_evidence_derivatives(
+        snapshot=snapshot,
+        source_bindings=source_bindings,
+        case_root=case_root,
+        confirmed_case_root_fingerprint=confirmed_case_root_fingerprint,
+        staging_root=staging_root,
+        artifact_store=artifact_store,
+        persistence=persistence,
+        system_actor=system_actor,
+        idempotency_prefix=f"evidence-run:{lease.run_id}",
+    )
+    artifacts = {item.artifact_type: item for item in coordination.artifacts}
+    if set(artifacts) != {"RELATED_PAGES_PDF", "ANNOTATED_RELATED_PAGES_PDF"}:
+        raise EvidenceDerivativeCoordinationBlocked("derivative run did not produce both required artifact types")
+    completion = persistence.complete_derivative_run(
+        matter_id=lease.matter_id,
+        run_id=lease.run_id,
+        lease_id=lease.lease_id,
+        related_derivative_id=artifacts["RELATED_PAGES_PDF"].derivative_id,
+        annotated_derivative_id=artifacts["ANNOTATED_RELATED_PAGES_PDF"].derivative_id,
+        actor=system_actor,
+        expected_version=coordination.final_matter_version,
+        idempotency_key=f"evidence-run:{lease.run_id}:complete",
+    )
+    return CompletedEvidenceDerivativeRun(
+        coordination=coordination,
+        completion_receipt=completion,
+    )
 
 
 def coordinate_evidence_derivatives(

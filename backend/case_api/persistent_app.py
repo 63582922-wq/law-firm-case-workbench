@@ -5,6 +5,7 @@ explicit dependencies this factory exposes only a disabled health response.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Protocol
 from uuid import UUID
 from uuid import uuid4
@@ -64,6 +65,13 @@ from .schemas import (
     PersistentEvidenceDuplicateGroupRequest,
     PersistentEvidenceDuplicateResolutionRequest,
     PersistentEvidenceDerivativeCandidateRequest,
+    PersistentEvidenceDerivativeRunClaimRequest,
+    PersistentEvidenceDerivativeRunCompleteRequest,
+    PersistentEvidenceDerivativeRunFailureRequest,
+    PersistentEvidenceDerivativeRunHeartbeatRequest,
+    PersistentEvidenceDerivativeRunHeartbeatResponse,
+    PersistentEvidenceDerivativeRunLeaseResponse,
+    PersistentEvidenceDerivativeRunRequest,
     PersistentEvidenceDerivativeVerificationRequest,
     PersistentEvidenceOriginalRequest,
     PersistentEvidencePageDecisionRequest,
@@ -128,6 +136,16 @@ class PersistentEvidenceManifestPort(Protocol):
     def register_derivative_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def verify_derivative(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def enqueue_derivative_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def claim_derivative_run(self, **kwargs): ...
+
+    def complete_derivative_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def renew_derivative_run_lease(self, **kwargs) -> datetime: ...
+
+    def fail_derivative_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot: ...
 
@@ -913,6 +931,130 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 storage_object_key=body.storage_object_key,
                 artifact_sha256=body.artifact_sha256,
                 page_count=body.page_count,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-manifests/{manifest_id}/derivative-runs",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence"],
+    )
+    async def enqueue_evidence_derivative_run(
+        matter_id: UUID,
+        manifest_id: UUID,
+        body: PersistentEvidenceDerivativeRunRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.enqueue_derivative_run(
+                matter_id=str(matter_id),
+                manifest_id=str(manifest_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                manifest_content_hash=body.manifest_content_hash,
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivative-runs/{run_id}/claim",
+        response_model=PersistentEvidenceDerivativeRunLeaseResponse,
+        tags=["evidence-worker"],
+    )
+    async def claim_evidence_derivative_run(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceDerivativeRunClaimRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceDerivativeRunLeaseResponse:
+        lease = evidence_store.claim_derivative_run(
+            matter_id=str(matter_id),
+            run_id=str(run_id),
+            actor=identity.actor,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
+            lease_seconds=body.lease_seconds,
+        )
+        return PersistentEvidenceDerivativeRunLeaseResponse.model_validate(lease.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivative-runs/{run_id}/complete",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def complete_evidence_derivative_run(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceDerivativeRunCompleteRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.complete_derivative_run(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                lease_id=str(body.lease_id),
+                related_derivative_id=str(body.related_derivative_id),
+                annotated_derivative_id=str(body.annotated_derivative_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivative-runs/{run_id}/heartbeat",
+        response_model=PersistentEvidenceDerivativeRunHeartbeatResponse,
+        tags=["evidence-worker"],
+    )
+    async def heartbeat_evidence_derivative_run(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceDerivativeRunHeartbeatRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceDerivativeRunHeartbeatResponse:
+        expires_at = evidence_store.renew_derivative_run_lease(
+            matter_id=str(matter_id),
+            run_id=str(run_id),
+            lease_id=str(body.lease_id),
+            actor=identity.actor,
+            lease_seconds=body.lease_seconds,
+        )
+        return PersistentEvidenceDerivativeRunHeartbeatResponse(
+            run_id=run_id,
+            lease_expires_at=expires_at,
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivative-runs/{run_id}/fail",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def fail_evidence_derivative_run(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceDerivativeRunFailureRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.fail_derivative_run(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                lease_id=str(body.lease_id),
+                failure_code=body.failure_code,
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
             )
         )
 
