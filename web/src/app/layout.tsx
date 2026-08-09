@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { DesktopBridgeInstaller } from "@/components/desktop-bridge-installer";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -9,7 +10,10 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        <DesktopBridgeInstaller />
+        {children}
+      </body>
     </html>
   );
 }
