@@ -11,6 +11,9 @@ from unittest.mock import patch
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 
+from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
+from case_kernel.evidence_refs import EvidenceLink
+from case_kernel.fact_claim_ledger import AssertionOrigin, FactStatus
 from case_kernel.models import Actor, MatterStage, Role
 from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.workflow import MatterWorkflow
@@ -53,6 +56,7 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
                 (self.actor_id, self.firm_id, f"subject-{self.actor_id}", "Synthetic Lead"),
             )
         self.store = PostgresMatterStore(TEST_DSN)
+        self.case_ledger_store = PostgresCaseLedgerStore(TEST_DSN)
         self.workflow = MatterWorkflow(self.store)
 
     def test_command_is_idempotent_and_audited_under_tenant_scope(self) -> None:
@@ -97,6 +101,54 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (other_firm_id,))
             row = connection.execute("SELECT count(*) AS count FROM matters WHERE matter_id = %s", (matter_id,)).fetchone()
         self.assertEqual(row["count"], 0)
+
+    def test_fact_candidate_and_decision_share_matter_version_audit_and_rls_boundary(self) -> None:
+        matter_id = str(uuid4())
+        self.workflow.create_matter(
+            self.actor,
+            matter_id=matter_id,
+            title="Synthetic Persistent Fact Matter",
+            idempotency_key="create-ledger-001",
+        )
+        with psycopg.connect(TEST_DSN) as connection:
+            connection.execute("SELECT set_config('app.firm_id', %s, true)", (self.firm_id,))
+            connection.execute(
+                """
+                INSERT INTO matter_actor_roles (matter_id, firm_id, user_id, role)
+                VALUES (%s, %s, %s, 'LEAD_LAWYER')
+                """,
+                (matter_id, self.firm_id, self.actor_id),
+            )
+        candidate = self.case_ledger_store.create_fact_candidate(
+            matter_id=matter_id,
+            actor=self.actor,
+            expected_version=1,
+            idempotency_key="persist-fact-001",
+            original_text="[合成] 被告主张已支付一笔款项。",
+            origin=AssertionOrigin.DEFENDANT_STATEMENT,
+            evidence_links=(
+                EvidenceLink(
+                    evidence_id="synthetic-integration-evidence",
+                    original_file_sha256="a" * 64,
+                    page_number=1,
+                    region_id="synthetic-integration-region",
+                    original_label="[合成] 原始账单第1页",
+                ),
+            ),
+        )
+        decided = self.case_ledger_store.decide_fact(
+            matter_id=matter_id,
+            fact_id=candidate.object_id,
+            actor=self.actor,
+            expected_version=2,
+            idempotency_key="persist-fact-decision-001",
+            status=FactStatus.CONFIRMED,
+            decision_hash="b" * 64,
+        )
+        facts = self.case_ledger_store.list_facts(matter_id=matter_id, actor=self.actor)
+        self.assertEqual(decided.matter_version, 3)
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].status, FactStatus.CONFIRMED)
 
 class PostgresMatterStoreBoundaryTests(unittest.TestCase):
     def test_alpha_identifiers_are_rejected_before_connection(self) -> None:
