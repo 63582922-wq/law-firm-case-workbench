@@ -10,7 +10,18 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 
+from case_kernel.calculation_engine import (
+    AllocationPolicy,
+    ApprovedCalculationEvent,
+    ApprovedRuleSegment,
+    CalculationBlocked,
+    CalculationScenario,
+    EventKind,
+    calculate,
+    independently_check,
+)
 from case_kernel.errors import AuthorizationDenied, IdempotencyConflict, InvalidTransition, PreconditionBlocked, VersionConflict
 from case_kernel.models import Actor, Role
 from case_kernel.store import InMemoryMatterStore
@@ -18,11 +29,15 @@ from case_kernel.workflow import MatterWorkflow
 
 from .schemas import (
     ApprovalRequest,
+    CalculationLineItemResponse,
+    CalculationPreviewRequest,
+    CalculationPreviewResponse,
     CreateMatterRequest,
     HealthResponse,
     InvalidateRequest,
     LockSubmissionRequest,
     MatterResponse,
+    PaymentAllocationResponse,
     ReceiptResponse,
     VersionedCommand,
 )
@@ -83,6 +98,65 @@ def to_matter_response(matter) -> MatterResponse:
     )
 
 
+def to_calculation_preview(body: CalculationPreviewRequest, actor: Actor) -> CalculationPreviewResponse:
+    if Role.LEAD_LAWYER not in actor.roles:
+        raise AuthorizationDenied("only the lead lawyer can request an approved calculation preview")
+    scenario = CalculationScenario(
+        scenario_id=body.scenario_id,
+        version=body.version,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        events=tuple(
+            ApprovedCalculationEvent(
+                event_id=event.event_id,
+                effective_date=event.effective_date,
+                sequence=event.sequence,
+                kind=EventKind(event.kind),
+                amount=event.amount,
+                currency=event.currency,
+                evidence_ids=tuple(event.evidence_ids),
+                approved_by=actor.actor_id,
+                approval_hash=event.approval_hash,
+            )
+            for event in body.events
+        ),
+        rule_segments=tuple(
+            ApprovedRuleSegment(
+                segment_id=segment.segment_id,
+                start_date=segment.start_date,
+                end_date=segment.end_date,
+                annual_rate=segment.annual_rate,
+                source_rule_version=segment.source_rule_version,
+                applicability_anchor=segment.applicability_anchor,
+                approved_by=actor.actor_id,
+                approval_hash=segment.approval_hash,
+            )
+            for segment in body.rule_segments
+        ),
+        allocation_policy=AllocationPolicy(body.allocation_policy),
+        approved_by=actor.actor_id,
+        approval_hash=body.approval_hash,
+    )
+    run = calculate(scenario)
+    independent_check = independently_check(scenario, run)
+    if not independent_check.matching:
+        raise RuntimeError("independent calculation check did not match")
+    return CalculationPreviewResponse(
+        run_id=run.run_id,
+        engine_version=run.engine_version,
+        input_hash=run.input_hash,
+        output_hash=run.output_hash,
+        independent_check_match=independent_check.matching,
+        total_interest_accrued=run.total_interest_accrued,
+        total_interest_paid=run.total_interest_paid,
+        remaining_principal=run.remaining_principal,
+        remaining_unpaid_interest=run.remaining_unpaid_interest,
+        unapplied_payments=run.unapplied_payments,
+        line_items=tuple(CalculationLineItemResponse(**item.__dict__) for item in run.line_items),
+        payment_allocations=tuple(PaymentAllocationResponse(**item.__dict__) for item in run.payment_allocations),
+    )
+
+
 def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
     """Create a contract-testable API with an injected test repository."""
     workflow = MatterWorkflow(store or InMemoryMatterStore())
@@ -92,6 +166,15 @@ def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
         description="只允许合成数据的内部 API；无生产认证、无真实材料接入。",
         docs_url="/docs",
         redoc_url=None,
+    )
+    # Synthetic Alpha only. Production origins are configured by the desktop
+    # application after authenticated local IPC and must not inherit this list.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["http://localhost:3000", "http://[::1]:3000"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-Alpha-Actor", "Idempotency-Key"],
     )
 
     @app.exception_handler(AuthorizationDenied)
@@ -109,6 +192,10 @@ def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
     @app.exception_handler(InvalidTransition)
     @app.exception_handler(PreconditionBlocked)
     async def precondition_handler(_: Request, exc: InvalidTransition | PreconditionBlocked):
+        return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+
+    @app.exception_handler(CalculationBlocked)
+    async def calculation_handler(_: Request, exc: CalculationBlocked):
         return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
 
     @app.get("/healthz", response_model=HealthResponse, tags=["system"])
@@ -184,6 +271,14 @@ def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
             idempotency_key=idempotency_key,
             change_kind=body.change_kind,
         ))
+
+    @app.post("/v1/calculation-previews", response_model=CalculationPreviewResponse, tags=["calculation"])
+    async def calculation_preview(
+        body: CalculationPreviewRequest,
+        actor: Annotated[Actor, Depends(get_synthetic_actor)],
+    ) -> CalculationPreviewResponse:
+        """Non-persistent synthetic preview. Formal CalculationRun storage comes after PostgreSQL integration."""
+        return to_calculation_preview(body, actor)
 
     return app
 

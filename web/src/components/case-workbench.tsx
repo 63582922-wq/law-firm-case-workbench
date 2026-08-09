@@ -1,19 +1,20 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { stageLabels, syntheticMatter, type EvidencePage } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
-type View = "overview" | "evidence";
+type View = "overview" | "evidence" | "calculation";
 type DuplicateDecision = "pending" | "exclude" | "keep";
 
-const navItems = [
-  ["overview", "案件总览"],
-  ["evidence", "证据核验"],
-  ["facts", "事实与争点"],
-  ["interest", "利息测算"],
-  ["bundle", "提交材料"],
-] as const;
+const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
+  { id: "overview", label: "案件总览", href: "/" },
+  { id: "evidence", label: "证据核验", href: "/evidence" },
+  { id: "facts", label: "事实与争点" },
+  { id: "calculation", label: "利息测算", href: "/calculation" },
+  { id: "bundle", label: "提交材料" },
+];
 
 function confidenceClass(confidence: EvidencePage["confidence"]) {
   if (confidence === "已核验") return styles.verified;
@@ -32,6 +33,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
     [selectedPage],
   );
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
+  const currentStageIndex = view === "calculation" ? 2 : 1;
 
   function recordDecision() {
     if (duplicateDecision === "pending") {
@@ -74,30 +76,29 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
         <aside className={styles.sidebar} aria-label="案件导航">
           <p className={styles.sideLabel}>工作区</p>
           <nav>
-            {navItems.map(([id, label]) => {
-              const enabled = id === "overview" || id === "evidence";
-              const active = id === view;
-              if (enabled) {
+            {navItems.map((item) => {
+              const active = item.id === view;
+              if (item.href) {
                 return (
                   <a
                     aria-current={active ? "page" : undefined}
                     className={`${styles.navItem} ${active ? styles.navActive : ""}`}
-                    href={id === "overview" ? "/" : "/evidence"}
-                    key={id}
+                    href={item.href}
+                    key={item.id}
                   >
-                    <span>{label}</span>
+                    <span>{item.label}</span>
                   </a>
                 );
               }
               return (
                 <button
                   className={`${styles.navItem} ${active ? styles.navActive : ""}`}
-                  key={id}
+                  key={item.id}
                   disabled
                   type="button"
                 >
-                  <span>{label}</span>
-                  {!enabled && <small>开发中</small>}
+                  <span>{item.label}</span>
+                  <small>开发中</small>
                 </button>
               );
             })}
@@ -106,7 +107,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <p className={styles.sideLabel}>流程位置</p>
           <ol className={styles.stageList}>
             {stageLabels.map((label, index) => (
-              <li className={index === 1 ? styles.stageCurrent : index < 1 ? styles.stageDone : ""} key={label}>
+              <li className={index === currentStageIndex ? styles.stageCurrent : index < currentStageIndex ? styles.stageDone : ""} key={label}>
                 <span>{String(index + 1).padStart(2, "0")}</span>{label}
               </li>
             ))}
@@ -115,7 +116,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
 
         {view === "overview" ? (
           <Overview unresolvedCount={unresolvedCount} />
-        ) : (
+        ) : view === "evidence" ? (
           <EvidenceWorkbench
             auditNotice={auditNotice}
             duplicateDecision={duplicateDecision}
@@ -126,6 +127,8 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
             selectedPage={selectedPage}
             unresolvedCount={unresolvedCount}
           />
+        ) : (
+          <CalculationWorkbench />
         )}
       </div>
 

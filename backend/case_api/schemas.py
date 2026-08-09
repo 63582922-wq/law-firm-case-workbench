@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -72,3 +76,74 @@ class HealthResponse(BaseModel):
     service: str
     mode: str
     persistence: str
+
+
+class CalculationEventRequest(SyntheticGuardedModel):
+    event_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
+    effective_date: date
+    sequence: int = Field(ge=0)
+    kind: Literal["DISBURSEMENT", "PAYMENT"]
+    amount: Decimal = Field(gt=0, max_digits=18, decimal_places=2)
+    currency: Literal["CNY"]
+    evidence_ids: list[str] = Field(min_length=1, max_length=30)
+    approval_hash: str = Field(min_length=8, max_length=128)
+
+
+class CalculationRuleSegmentRequest(SyntheticGuardedModel):
+    segment_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
+    start_date: date
+    end_date: date
+    annual_rate: Decimal = Field(ge=0, le=1, max_digits=12, decimal_places=10)
+    source_rule_version: str = Field(pattern=r"^SYNTHETIC-[A-Z0-9_-]{3,80}$")
+    applicability_anchor: str = Field(min_length=3, max_length=80)
+    approval_hash: str = Field(min_length=8, max_length=128)
+
+
+class CalculationPreviewRequest(SyntheticGuardedModel):
+    scenario_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
+    version: int = Field(ge=1)
+    start_date: date
+    end_date: date
+    events: list[CalculationEventRequest] = Field(min_length=1, max_length=100)
+    rule_segments: list[CalculationRuleSegmentRequest] = Field(min_length=1, max_length=100)
+    allocation_policy: Literal["INTEREST_THEN_PRINCIPAL", "PRINCIPAL_THEN_INTEREST"]
+    approval_hash: str = Field(min_length=8, max_length=128)
+
+
+class PaymentAllocationResponse(BaseModel):
+    payment_event_id: str
+    effective_date: date
+    payment_amount: Decimal
+    allocated_interest: Decimal
+    allocated_principal: Decimal
+    unapplied_amount: Decimal
+    evidence_ids: tuple[str, ...]
+
+
+class CalculationLineItemResponse(BaseModel):
+    period_start: date
+    period_end: date
+    opening_principal: Decimal
+    annual_rate: Decimal
+    day_count: int
+    accrued_interest: Decimal
+    closing_principal: Decimal
+    accrued_unpaid_interest: Decimal
+    rule_segment_id: str
+    source_rule_version: str
+    evidence_ids: tuple[str, ...]
+
+
+class CalculationPreviewResponse(BaseModel):
+    run_id: str
+    engine_version: str
+    input_hash: str
+    output_hash: str
+    independent_check_match: bool
+    total_interest_accrued: Decimal
+    total_interest_paid: Decimal
+    remaining_principal: Decimal
+    remaining_unpaid_interest: Decimal
+    unapplied_payments: Decimal
+    line_items: tuple[CalculationLineItemResponse, ...]
+    payment_allocations: tuple[PaymentAllocationResponse, ...]

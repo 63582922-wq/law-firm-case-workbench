@@ -105,6 +105,77 @@ class SyntheticAlphaApiTests(unittest.TestCase):
         )
         self.assertEqual(locked.status_code, 200, locked.text)
 
+    def test_calculation_preview_is_lead_only_and_self_checks(self) -> None:
+        payload = {
+            "scenario_id": "alpha_interest_001",
+            "version": 1,
+            "start_date": "2020-08-20",
+            "end_date": "2020-09-20",
+            "allocation_policy": "INTEREST_THEN_PRINCIPAL",
+            "approval_hash": "scenario-approval",
+            "events": [
+                {
+                    "event_id": "alpha_disbursement_001",
+                    "effective_date": "2020-08-20",
+                    "sequence": 1,
+                    "kind": "DISBURSEMENT",
+                    "amount": "10000.00",
+                    "currency": "CNY",
+                    "evidence_ids": ["alpha_evidence_disbursement"],
+                    "approval_hash": "event-approval-1",
+                },
+                {
+                    "event_id": "alpha_payment_001",
+                    "effective_date": "2020-09-04",
+                    "sequence": 1,
+                    "kind": "PAYMENT",
+                    "amount": "1000.00",
+                    "currency": "CNY",
+                    "evidence_ids": ["alpha_evidence_payment"],
+                    "approval_hash": "event-approval-2",
+                },
+            ],
+            "rule_segments": [
+                {
+                    "segment_id": "alpha_segment_001",
+                    "start_date": "2020-08-20",
+                    "end_date": "2020-09-05",
+                    "annual_rate": "0.10",
+                    "source_rule_version": "SYNTHETIC-RULE-1",
+                    "applicability_anchor": "CONTRACT_FORMED_AT",
+                    "approval_hash": "rule-approval-1",
+                },
+                {
+                    "segment_id": "alpha_segment_002",
+                    "start_date": "2020-09-05",
+                    "end_date": "2020-09-20",
+                    "annual_rate": "0.05",
+                    "source_rule_version": "SYNTHETIC-RULE-2",
+                    "applicability_anchor": "FILED_AT",
+                    "approval_hash": "rule-approval-2",
+                },
+            ],
+        }
+        denied = self.client.post("/v1/calculation-previews", headers={"X-Alpha-Actor": "alpha_assistant"}, json=payload)
+        self.assertEqual(denied.status_code, 403)
+
+        preview = self.client.post("/v1/calculation-previews", headers=self.lead_headers, json=payload)
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertTrue(preview.json()["independent_check_match"])
+        self.assertEqual(preview.json()["remaining_principal"], "9041.10")
+        self.assertEqual(preview.json()["payment_allocations"][0]["allocated_principal"], "958.90")
+
+    def test_alpha_local_preview_origin_is_explicitly_allowed(self) -> None:
+        response = self.client.options(
+            "/v1/calculation-previews",
+            headers={
+                "Origin": "http://[::1]:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["access-control-allow-origin"], "http://[::1]:3000")
+
 
 if __name__ == "__main__":
     unittest.main()
