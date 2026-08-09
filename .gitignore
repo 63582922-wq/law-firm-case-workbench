@@ -35,6 +35,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+tmp/
 
 # Local tools and OS
 .DS_Store
