@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from uuid import UUID
@@ -662,22 +662,6 @@ class PersistentArtifactAccessResponse(BaseModel):
     expires_at: datetime
 
 
-class PersistentFormalRuleSegmentRequest(BaseModel):
-    segment_id: UUID
-    start_date: date
-    end_date: date
-    annual_rate: Decimal = Field(ge=0, le=1, max_digits=18, decimal_places=12)
-    source_rule_version: str = Field(min_length=1, max_length=240)
-    applicability_anchor: str = Field(min_length=1, max_length=500)
-    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @model_validator(mode="after")
-    def interval_is_non_empty(self):
-        if self.start_date >= self.end_date:
-            raise ValueError("formal rule segment interval must be non-empty")
-        return self
-
-
 class PersistentFormalCalculationRequest(BaseModel):
     expected_version: int = Field(ge=1)
     obligation_id: str = Field(min_length=1, max_length=240)
@@ -686,19 +670,12 @@ class PersistentFormalCalculationRequest(BaseModel):
     legal_bundle_id: UUID
     legal_bundle_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     allocation_policy: Literal["INTEREST_THEN_PRINCIPAL", "PRINCIPAL_THEN_INTEREST"]
-    rule_segments: list[PersistentFormalRuleSegmentRequest] = Field(min_length=1, max_length=500)
     approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def interval_and_segments_match(self):
+    def interval_is_non_empty(self):
         if self.start_date >= self.end_date:
             raise ValueError("formal calculation interval must be non-empty")
-        ordered = sorted(self.rule_segments, key=lambda item: (item.start_date, item.end_date))
-        if ordered[0].start_date != self.start_date or ordered[-1].end_date != self.end_date:
-            raise ValueError("formal rule segments must cover the requested calculation interval")
-        for previous, current in zip(ordered, ordered[1:]):
-            if previous.end_date != current.start_date:
-                raise ValueError("formal rule segments must be continuous without gaps or overlap")
         return self
 
 
@@ -770,4 +747,125 @@ class PersistentFormalCalculationSnapshotResponse(BaseModel):
     matter_version: int = Field(ge=1)
     scenario: PersistentFormalCalculationScenarioResponse | None
     run: PersistentFormalCalculationRunResponse | None
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentOfficialLegalSourceSnapshotRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    source_id: str = Field(min_length=1, max_length=240)
+    publisher: str = Field(min_length=1, max_length=240)
+    authority_level: Literal["PRIMARY_LAW", "JUDICIAL_INTERPRETATION", "OFFICIAL_RATE_DATA", "OFFICIAL_CASE"]
+    official_url: str = Field(pattern=r"^https://", max_length=2_000)
+    provision_locator: str = Field(min_length=1, max_length=1_000)
+    retrieved_at: datetime
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_media_type: str = Field(min_length=1, max_length=160)
+    storage_object_key: str = Field(pattern=r"^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]{64}\.lca$")
+    verification_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    supersedes_snapshot_id: UUID | None = None
+
+
+class PersistentLegalRuleVersionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    rule_id: str = Field(min_length=1, max_length=240)
+    rule_version: str = Field(min_length=1, max_length=240)
+    issue_key: str = Field(min_length=1, max_length=240)
+    source_snapshot_id: UUID
+    parameter_source_snapshot_id: UUID | None = None
+    parameter_evidence_locator: str | None = Field(default=None, max_length=1_000)
+    effective_from: date
+    effective_to: date | None = None
+    trigger_event_kind: Literal["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"]
+    formula_kind: Literal["FIXED_ANNUAL_RATE", "LPR_MULTIPLE", "NO_INTEREST"]
+    base_annual_rate: Decimal | None = Field(default=None, ge=0, le=1, max_digits=18, decimal_places=12)
+    rate_multiplier: Decimal | None = Field(default=None, gt=0, le=100, max_digits=18, decimal_places=12)
+    required_fact_keys: list[str] = Field(default_factory=list, max_length=200)
+    transition_rule_versions: list[str] = Field(default_factory=list, max_length=200)
+    conflict_set: str | None = Field(default=None, max_length=240)
+    priority: int = Field(ge=0, le=1_000_000)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def effective_interval_and_formula_are_valid(self):
+        if self.effective_to is not None and self.effective_from >= self.effective_to:
+            raise ValueError("legal rule effective interval must be non-empty")
+        if self.formula_kind == "NO_INTEREST" and (
+            self.base_annual_rate is not None or self.rate_multiplier is not None
+        ):
+            raise ValueError("NO_INTEREST cannot carry rate operands")
+        if self.formula_kind == "FIXED_ANNUAL_RATE" and (
+            self.base_annual_rate is None or self.rate_multiplier is not None
+        ):
+            raise ValueError("FIXED_ANNUAL_RATE requires only a base annual rate")
+        if self.formula_kind == "LPR_MULTIPLE" and (
+            self.base_annual_rate is None
+            or self.rate_multiplier is None
+            or self.parameter_source_snapshot_id is None
+            or not self.parameter_evidence_locator
+        ):
+            raise ValueError(
+                "LPR_MULTIPLE requires a base annual rate, multiplier, official rate snapshot and locator"
+            )
+        if self.formula_kind != "LPR_MULTIPLE" and (
+            self.parameter_source_snapshot_id is not None
+            or self.parameter_evidence_locator is not None
+        ):
+            raise ValueError("only LPR_MULTIPLE may carry an external rate parameter source")
+        return self
+
+
+class PersistentCaseLegalEventRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    event_kind: Literal["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"]
+    local_date: date
+    evidence_ids: list[UUID] = Field(min_length=1, max_length=500)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentCaseLegalFactBindingRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    fact_key: str = Field(min_length=1, max_length=240)
+    fact_id: UUID
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentCaseLegalBundleSegmentRequest(BaseModel):
+    segment_id: UUID
+    issue_key: str = Field(min_length=1, max_length=240)
+    rule_version_id: UUID
+    trigger_event_id: UUID
+    start_date: date
+    end_date: date
+    applicability_anchor: str = Field(min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def segment_interval_is_non_empty(self):
+        if self.start_date >= self.end_date:
+            raise ValueError("legal bundle segment interval must be non-empty")
+        return self
+
+
+class PersistentCaseLegalBundleApprovalRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    segments: list[PersistentCaseLegalBundleSegmentRequest] = Field(min_length=1, max_length=500)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def segments_are_continuous(self):
+        ordered = sorted(self.segments, key=lambda item: (item.start_date, item.end_date))
+        for previous, current in zip(ordered, ordered[1:]):
+            if previous.end_date != current.start_date:
+                raise ValueError("legal bundle segments must be continuous without gaps or overlap")
+        return self
+
+
+class PersistentLegalReviewSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    sources: tuple[dict[str, Any], ...]
+    rule_versions: tuple[dict[str, Any], ...]
+    legal_events: tuple[dict[str, Any], ...]
+    fact_bindings: tuple[dict[str, Any], ...]
+    current_bundle: dict[str, Any] | None
+    bundle_segments: tuple[dict[str, Any], ...]
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

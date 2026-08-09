@@ -1,0 +1,64 @@
+{
+  "schema_version": "official-source-discovery-registry-v1",
+  "last_discovery_verified": "2026-08-10",
+  "formal_use_policy": "Each source remains discovery-only until the exact response bytes are encrypted, SHA-256 bound, verified by an authorized human, and registered as an official_legal_source_snapshot.",
+  "sources": [
+    {
+      "source_id": "CN-CIVIL-CODE-680",
+      "publisher": "国家法律法规数据库",
+      "authority_level": "PRIMARY_LAW",
+      "official_url": "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
+      "provision_locator": "《中华人民共和国民法典》第六百七十九条至第六百八十条",
+      "research_focus": [
+        "自然人之间借款合同成立时间",
+        "禁止高利放贷",
+        "未约定或约定不明的借期内利息"
+      ],
+      "formal_snapshot_status": "NOT_CAPTURED",
+      "may_enter_formal_bundle": false
+    },
+    {
+      "source_id": "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+      "publisher": "最高人民法院",
+      "authority_level": "JUDICIAL_INTERPRETATION",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+      "provision_locator": "《最高人民法院关于审理民间借贷案件适用法律若干问题的规定》第二十四条至第三十一条（2020年第二次修正）",
+      "research_focus": [
+        "合同成立时一年期LPR四倍",
+        "预先扣除利息与本金",
+        "逾期利率及费用总上限",
+        "2020年8月20日前后过渡规则",
+        "起诉时利率保护标准"
+      ],
+      "formal_snapshot_status": "NOT_CAPTURED",
+      "may_enter_formal_bundle": false
+    },
+    {
+      "source_id": "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+      "publisher": "最高人民法院",
+      "authority_level": "JUDICIAL_INTERPRETATION",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/249031.html",
+      "provision_locator": "法释〔2020〕6号及修正后第二十五条至第三十二条",
+      "research_focus": [
+        "2020年8月20日首次修正历史文本",
+        "司法解释版本变更对照"
+      ],
+      "formal_snapshot_status": "NOT_CAPTURED",
+      "may_enter_formal_bundle": false
+    },
+    {
+      "source_id": "CFETS-LPR-HISTORY",
+      "publisher": "全国银行间同业拆借中心（中国货币网）",
+      "authority_level": "OFFICIAL_RATE_DATA",
+      "official_url": "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
+      "provision_locator": "一年期贷款市场报价利率历史数据",
+      "research_focus": [
+        "一年期LPR发布日期",
+        "历史LPR数值",
+        "规则公式的基准利率输入"
+      ],
+      "formal_snapshot_status": "NOT_CAPTURED",
+      "may_enter_formal_bundle": false
+    }
+  ]
+}

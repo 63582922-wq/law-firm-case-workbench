@@ -10,7 +10,6 @@ import unittest
 from case_kernel.calculation_engine import AllocationPolicy
 from case_kernel.case_ledger_postgres import CaseLedgerPersistenceBlocked
 from case_kernel.formal_calculation_postgres import (
-    FormalRuleSegmentInput,
     PostgresFormalCalculationStore,
 )
 from case_kernel.models import Actor, Role
@@ -37,6 +36,7 @@ class FakeCalculationConnection:
         self.first_classification_id = str(uuid4())
         self.second_classification_id = str(uuid4())
         self.approved_by = str(uuid4())
+        self.segment_id = str(uuid4())
         self.duplicate_status = duplicate_status
         self.currency = currency
         self.executed: list[tuple[str, tuple | None]] = []
@@ -52,6 +52,21 @@ class FakeCalculationConnection:
             return FakeResult(row={"bundle_id": self.bundle_id, "bundle_hash": "a" * 64, "status": "APPROVED"})
         if "SELECT rule_version FROM case_legal_bundle_rule_versions" in normalized:
             return FakeResult(rows=[{"rule_version": "SYNTHETIC-RULE-2020"}])
+        if "FROM case_legal_bundle_segments" in normalized:
+            return FakeResult(
+                rows=[
+                    {
+                        "segment_id": self.segment_id,
+                        "start_date": date(2020, 1, 1),
+                        "end_date": date(2021, 1, 1),
+                        "annual_rate": Decimal("0.12"),
+                        "source_rule_version": "SYNTHETIC-RULE-2020",
+                        "applicability_anchor": "synthetic approved event",
+                        "approval_hash": "c" * 64,
+                        "trigger_event_id": str(uuid4()),
+                    }
+                ]
+            )
         if "FROM case_payment_allocations allocation" in normalized:
             common = {
                 "date_precision": "EXACT_DATE",
@@ -139,17 +154,6 @@ class FormalCalculationStoreTests(unittest.TestCase):
                 legal_bundle_id=connection.bundle_id,
                 legal_bundle_hash="a" * 64,
                 allocation_policy=AllocationPolicy.INTEREST_THEN_PRINCIPAL,
-                rule_segments=(
-                    FormalRuleSegmentInput(
-                        segment_id=str(uuid4()),
-                        start_date=date(2020, 1, 1),
-                        end_date=date(2021, 1, 1),
-                        annual_rate=Decimal("0.12"),
-                        source_rule_version="SYNTHETIC-RULE-2020",
-                        applicability_anchor="synthetic approved event",
-                        approval_hash="c" * 64,
-                    ),
-                ),
                 approval_hash="d" * 64,
             )
 

@@ -33,6 +33,7 @@ class FormalCalculationMigrationTests(unittest.TestCase):
         self.assertIn("transaction_snapshot_hash", self.sql)
         self.assertIn("approval_hash", self.sql)
         self.assertIn("calculation_scenarios_one_approved_per_obligation", self.sql)
+        self.assertIn("PRIMARY KEY (bundle_id, issue_key, rule_version)", self.sql)
 
     def test_run_requires_independent_check_and_persists_each_period_and_payment(self) -> None:
         self.assertIn("independent_check_hash", self.sql)

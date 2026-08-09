@@ -17,6 +17,7 @@ from psycopg.conninfo import conninfo_to_dict
 from .case_ledger_postgres import PostgresCaseLedgerStore
 from .evidence_manifest_postgres import PostgresEvidenceManifestStore
 from .formal_calculation_postgres import PostgresFormalCalculationStore
+from .legal_source_postgres import PostgresLegalSourceStore
 from .postgres_store import PostgresMatterStore
 from .store import InMemoryMatterStore, MatterStore
 
@@ -80,6 +81,7 @@ class RuntimeServices:
     case_ledger_store: PostgresCaseLedgerStore | None
     evidence_manifest_store: PostgresEvidenceManifestStore | None
     formal_calculation_store: PostgresFormalCalculationStore | None
+    legal_source_store: PostgresLegalSourceStore | None
     persistence_label: str
 
 
@@ -96,6 +98,7 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
             case_ledger_store=None,
             evidence_manifest_store=None,
             formal_calculation_store=None,
+            legal_source_store=None,
             persistence_label="in-memory-synthetic-only",
         )
     dsn = settings.postgres_dsn
@@ -107,5 +110,6 @@ def build_runtime_services(settings: RuntimeSettings) -> RuntimeServices:
         case_ledger_store=PostgresCaseLedgerStore(dsn),
         evidence_manifest_store=PostgresEvidenceManifestStore(dsn),
         formal_calculation_store=PostgresFormalCalculationStore(dsn),
+        legal_source_store=PostgresLegalSourceStore(dsn),
         persistence_label="postgres-internal-preview",
     )

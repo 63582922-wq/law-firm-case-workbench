@@ -4,16 +4,18 @@ import { useState } from "react";
 import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { EvidenceWorkbench as EvidenceManifestWorkbench } from "@/components/evidence-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
+import { LegalWorkbench } from "@/components/legal-workbench";
 import { caseDataSourceConfig } from "@/lib/case-data-source";
 import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
-type View = "overview" | "evidence" | "facts" | "calculation";
+type View = "overview" | "evidence" | "facts" | "legal" | "calculation";
 
 const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
   { id: "overview", label: "案件总览", href: "/" },
   { id: "evidence", label: "证据核验", href: "/evidence" },
   { id: "facts", label: "事实与争点", href: "/facts" },
+  { id: "legal", label: "法律规则", href: "/legal" },
   { id: "calculation", label: "利息测算", href: "/calculation" },
   { id: "bundle", label: "提交材料" },
 ];
@@ -21,7 +23,7 @@ const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; hr
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
   const [view] = useState<View>(initialView);
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
-  const currentStageIndex = view === "calculation" ? 2 : 1;
+  const currentStageIndex = view === "legal" || view === "calculation" ? 2 : 1;
   const syntheticSource = caseDataSourceConfig.kind === "synthetic-alpha";
 
   return (
@@ -98,7 +100,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <Overview unresolvedCount={unresolvedCount} />
         ) : view === "evidence" ? (
           <EvidenceManifestWorkbench />
-        ) : view === "facts" ? <FactsWorkbench /> : (
+        ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : (
           <CalculationWorkbench />
         )}
       </div>

@@ -32,9 +32,16 @@ from case_kernel.errors import IdempotencyConflict, VersionConflict
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.calculation_engine import AllocationPolicy
 from case_kernel.formal_calculation_postgres import (
-    FormalRuleSegmentInput,
     PersistentFormalCalculationSnapshot,
     PostgresFormalCalculationStore,
+)
+from case_kernel.legal_rules import LegalEventKind
+from case_kernel.legal_source_postgres import (
+    LegalAuthorityLevel,
+    LegalBundleSegmentSelection,
+    LegalRateFormulaKind,
+    PersistentLegalReviewSnapshot,
+    PostgresLegalSourceStore,
 )
 from case_kernel.models import Actor
 from case_kernel.local_access_grants import LocalSessionProof
@@ -85,8 +92,14 @@ from .schemas import (
     PersistentFactCandidateRequest,
     PersistentFactDecisionRequest,
     PersistentFactResponse,
+    PersistentCaseLegalBundleApprovalRequest,
+    PersistentCaseLegalEventRequest,
+    PersistentCaseLegalFactBindingRequest,
     PersistentFormalCalculationRequest,
     PersistentFormalCalculationSnapshotResponse,
+    PersistentLegalRuleVersionRequest,
+    PersistentLegalReviewSnapshotResponse,
+    PersistentOfficialLegalSourceSnapshotRequest,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
 )
@@ -168,6 +181,22 @@ class PersistentFormalCalculationPort(Protocol):
     ) -> PersistentFormalCalculationSnapshot: ...
 
 
+class PersistentLegalSourcePort(Protocol):
+    def register_official_source_snapshot(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_rule_version(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_legal_event(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_legal_fact_binding(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_case_legal_bundle(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_legal_review_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentLegalReviewSnapshot: ...
+
+
 class PersistentRequestBlocked(ValueError):
     pass
 
@@ -180,6 +209,10 @@ class PersistentCalculationServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentLegalSourceServiceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PersistentApiDependencies:
     settings: RuntimeSettings
@@ -187,6 +220,7 @@ class PersistentApiDependencies:
     identity_resolver: ServerIdentityResolver
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
     formal_calculation_store: PersistentFormalCalculationPort | None = None
+    legal_source_store: PersistentLegalSourcePort | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
 
@@ -208,6 +242,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.formal_calculation_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL formal calculation store")
+        if self.legal_source_store is not None and not isinstance(
+            self.legal_source_store, PostgresLegalSourceStore
+        ):
+            if not getattr(self.legal_source_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL legal source store")
         if (self.artifact_access_broker is None) != (self.artifact_store is None):
             raise ValueError("artifact access broker and encrypted artifact store must be configured together")
         if self.artifact_access_broker is not None and self.evidence_manifest_store is None:
@@ -246,6 +285,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "persistence": "configured-not-probed",
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
             "formal_calculation": "configured" if dependencies.formal_calculation_store else "not-configured",
+            "legal_source": "configured" if dependencies.legal_source_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
         }
 
@@ -275,6 +315,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "formal calculation persistence is not configured"
             )
         return dependencies.formal_calculation_store
+
+    def get_legal_source_store() -> PersistentLegalSourcePort:
+        if dependencies.legal_source_store is None:
+            raise PersistentLegalSourceServiceUnavailable(
+                "official legal source persistence is not configured"
+            )
+        return dependencies.legal_source_store
 
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
@@ -354,6 +401,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "FORMAL_CALCULATION_SERVICE_UNAVAILABLE",
             "正式利息计算服务尚未启用，未回退到合成测算。",
+        )
+
+    @app.exception_handler(PersistentLegalSourceServiceUnavailable)
+    async def legal_source_service_handler(_: Request, exc: PersistentLegalSourceServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "LEGAL_SOURCE_SERVICE_UNAVAILABLE",
+            "官方法源与案件规则包服务尚未启用，未使用模型记忆或网页摘要替代。",
         )
 
     @app.exception_handler(ManagedArtifactBlocked)
@@ -448,21 +504,188 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             legal_bundle_id=str(body.legal_bundle_id),
             legal_bundle_hash=body.legal_bundle_hash,
             allocation_policy=AllocationPolicy(body.allocation_policy),
-            rule_segments=tuple(
-                FormalRuleSegmentInput(
-                    segment_id=str(segment.segment_id),
-                    start_date=segment.start_date,
-                    end_date=segment.end_date,
-                    annual_rate=segment.annual_rate,
-                    source_rule_version=segment.source_rule_version,
-                    applicability_anchor=segment.applicability_anchor,
-                    approval_hash=segment.approval_hash,
-                )
-                for segment in body.rule_segments
-            ),
             approval_hash=body.approval_hash,
         )
         return _receipt(receipt)
+
+    @app.post(
+        "/v1/matters/{matter_id}/official-legal-source-snapshots",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def register_official_legal_source_snapshot(
+        matter_id: UUID,
+        body: PersistentOfficialLegalSourceSnapshotRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.register_official_source_snapshot(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                source_id=body.source_id,
+                publisher=body.publisher,
+                authority_level=LegalAuthorityLevel(body.authority_level),
+                official_url=body.official_url,
+                provision_locator=body.provision_locator,
+                retrieved_at=body.retrieved_at,
+                content_sha256=body.content_sha256,
+                content_media_type=body.content_media_type,
+                storage_object_key=body.storage_object_key,
+                verification_hash=body.verification_hash,
+                supersedes_snapshot_id=(
+                    str(body.supersedes_snapshot_id) if body.supersedes_snapshot_id else None
+                ),
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/legal-review",
+        response_model=PersistentLegalReviewSnapshotResponse,
+        tags=["legal-sources"],
+    )
+    async def get_legal_review_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> PersistentLegalReviewSnapshotResponse:
+        snapshot = legal_store.get_legal_review_snapshot(
+            matter_id=str(matter_id), actor=identity.actor
+        )
+        return PersistentLegalReviewSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/legal-rule-versions",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def approve_legal_rule_version(
+        matter_id: UUID,
+        body: PersistentLegalRuleVersionRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.approve_rule_version(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                rule_id=body.rule_id,
+                rule_version=body.rule_version,
+                issue_key=body.issue_key,
+                source_snapshot_id=str(body.source_snapshot_id),
+                parameter_source_snapshot_id=(
+                    str(body.parameter_source_snapshot_id)
+                    if body.parameter_source_snapshot_id
+                    else None
+                ),
+                parameter_evidence_locator=body.parameter_evidence_locator,
+                effective_from=body.effective_from,
+                effective_to=body.effective_to,
+                trigger_event_kind=LegalEventKind(body.trigger_event_kind),
+                formula_kind=LegalRateFormulaKind(body.formula_kind),
+                base_annual_rate=body.base_annual_rate,
+                rate_multiplier=body.rate_multiplier,
+                required_fact_keys=tuple(body.required_fact_keys),
+                transition_rule_versions=tuple(body.transition_rule_versions),
+                conflict_set=body.conflict_set,
+                priority=body.priority,
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/legal-events",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def approve_case_legal_event(
+        matter_id: UUID,
+        body: PersistentCaseLegalEventRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.approve_legal_event(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                event_kind=LegalEventKind(body.event_kind),
+                local_date=body.local_date,
+                evidence_ids=tuple(str(value) for value in body.evidence_ids),
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/legal-fact-bindings",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def approve_case_legal_fact_binding(
+        matter_id: UUID,
+        body: PersistentCaseLegalFactBindingRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.approve_legal_fact_binding(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                fact_key=body.fact_key,
+                fact_id=str(body.fact_id),
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/legal-bundles",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["legal-sources"],
+    )
+    async def approve_case_legal_bundle(
+        matter_id: UUID,
+        body: PersistentCaseLegalBundleApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        legal_store: Annotated[PersistentLegalSourcePort, Depends(get_legal_source_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            legal_store.approve_case_legal_bundle(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                segments=tuple(
+                    LegalBundleSegmentSelection(
+                        segment_id=str(segment.segment_id),
+                        issue_key=segment.issue_key,
+                        rule_version_id=str(segment.rule_version_id),
+                        trigger_event_id=str(segment.trigger_event_id),
+                        start_date=segment.start_date,
+                        end_date=segment.end_date,
+                        applicability_anchor=segment.applicability_anchor,
+                    )
+                    for segment in body.segments
+                ),
+                approval_hash=body.approval_hash,
+            )
+        )
 
     @app.post(
         "/v1/matters/{matter_id}/facts",

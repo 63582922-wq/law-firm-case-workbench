@@ -41,7 +41,7 @@ CREATE TABLE case_legal_bundle_rule_versions (
     trigger_event_id text NOT NULL CHECK (length(trim(trigger_event_id)) > 0),
     trigger_date date NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (bundle_id, issue_key),
+    PRIMARY KEY (bundle_id, issue_key, rule_version),
     UNIQUE (bundle_id, rule_version),
     FOREIGN KEY (matter_id, firm_id) REFERENCES matters(matter_id, firm_id),
     FOREIGN KEY (bundle_id, firm_id, matter_id)

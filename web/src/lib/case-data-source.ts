@@ -115,6 +115,56 @@ export type CalculationReviewView = {
   }[];
 };
 
+export type LegalReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  status: "discovery-only" | "reviewable";
+  statusReason: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  sources: {
+    snapshotId: string | null;
+    sourceId: string;
+    publisher: string;
+    authorityLevel: string;
+    officialUrl: string;
+    provisionLocator: string;
+    verificationStatus: string;
+    licenseStatus: string;
+    contentSha256: string | null;
+  }[];
+  ruleVersions: {
+    ruleVersionId: string;
+    ruleVersion: string;
+    issueKey: string;
+    triggerEventKind: string;
+    formulaKind: string;
+    parameterSourceSnapshotId: string | null;
+    parameterEvidenceLocator: string | null;
+    baseAnnualRate: string | null;
+    rateMultiplier: string | null;
+    derivedAnnualRate: string;
+    requiredFactKeys: string[];
+    status: string;
+  }[];
+  legalEvents: { legalEventId: string; eventKind: string; localDate: string; status: string; evidenceIds: string[] }[];
+  factBindings: { bindingId: string; factKey: string; factId: string; status: string; approvalHash: string }[];
+  currentBundle: { bundleId: string; version: number; bundleHash: string; approvalHash: string } | null;
+  bundleSegments: {
+    segmentId: string;
+    issueKey: string;
+    ruleVersionId: string;
+    sourceSnapshotId: string;
+    parameterSourceSnapshotId: string | null;
+    parameterEvidenceLocator: string | null;
+    startDate: string;
+    endDate: string;
+    annualRate: string;
+    applicabilityAnchor: string;
+  }[];
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -210,6 +260,64 @@ type PersistentFormalCalculationSnapshot = {
       evidence_ids: string[];
     }[];
   } | null;
+};
+
+type PersistentLegalReviewSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  sources: {
+    snapshot_id: string;
+    source_id: string;
+    publisher: string;
+    authority_level: string;
+    official_url: string;
+    provision_locator: string;
+    verification_status: string;
+    license_status: string;
+    content_sha256: string;
+  }[];
+  rule_versions: {
+    rule_version_id: string;
+    rule_version: string;
+    issue_key: string;
+    trigger_event_kind: string;
+    formula_kind: string;
+    parameter_source_snapshot_id: string | null;
+    parameter_evidence_locator: string | null;
+    base_annual_rate: string | null;
+    rate_multiplier: string | null;
+    derived_annual_rate: string;
+    required_fact_keys: string[];
+    status: string;
+  }[];
+  legal_events: {
+    legal_event_id: string;
+    event_kind: string;
+    local_date: string;
+    status: string;
+    evidence_ids: string[];
+  }[];
+  fact_bindings: {
+    binding_id: string;
+    fact_key: string;
+    fact_id: string;
+    status: string;
+    approval_hash: string;
+  }[];
+  current_bundle: { bundle_id: string; version: number; bundle_hash: string; approval_hash: string } | null;
+  bundle_segments: {
+    segment_id: string;
+    issue_key: string;
+    rule_version_id: string;
+    source_snapshot_id: string;
+    parameter_source_snapshot_id: string | null;
+    parameter_evidence_locator: string | null;
+    start_date: string;
+    end_date: string;
+    annual_rate: string;
+    applicability_anchor: string;
+  }[];
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -310,6 +418,23 @@ export async function loadCalculationReview(
     );
   }
   return mapPersistentCalculation(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function loadLegalReview(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LegalReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") return syntheticLegalDiscoveryView();
+  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/legal-review`, {
+    credentials: "include",
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const payload = (await response.json()) as PersistentLegalReviewSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "法律依据审查快照不可用"));
+  }
+  return mapPersistentLegalReview(payload, response.headers.get("X-Request-ID"));
 }
 
 export async function fetchEvidenceDerivative(
@@ -675,6 +800,137 @@ function emptyPersistentCalculation(
     unappliedPayments: null,
     lineItems: [],
     paymentAllocations: [],
+  };
+}
+
+function syntheticLegalDiscoveryView(): LegalReviewView {
+  const shared = {
+    snapshotId: null,
+    verificationStatus: "NOT_CAPTURED",
+    licenseStatus: "DISCOVERY_ONLY",
+    contentSha256: null,
+  };
+  return {
+    sourceKind: "synthetic-alpha",
+    sourceLabel: "官方来源发现清单",
+    status: "discovery-only",
+    statusReason: "这些链接已定位到官方发布站点，但尚未抓取、加密、计算哈希并由律师核验，不能进入正式规则包或利息计算。",
+    matterVersion: null,
+    snapshotHash: null,
+    requestId: null,
+    sources: [
+      {
+        ...shared,
+        sourceId: "CN-CIVIL-CODE-680",
+        publisher: "国家法律法规数据库",
+        authorityLevel: "PRIMARY_LAW",
+        officialUrl: "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
+        provisionLocator: "《中华人民共和国民法典》第六百七十九条至第六百八十条",
+      },
+      {
+        ...shared,
+        sourceId: "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+        publisher: "最高人民法院",
+        authorityLevel: "JUDICIAL_INTERPRETATION",
+        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+        provisionLocator: "民间借贷司法解释第二十四条至第三十一条（2020年第二次修正）",
+      },
+      {
+        ...shared,
+        sourceId: "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+        publisher: "最高人民法院",
+        authorityLevel: "JUDICIAL_INTERPRETATION",
+        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/249031.html",
+        provisionLocator: "法释〔2020〕6号及修正后第二十五条至第三十二条",
+      },
+      {
+        ...shared,
+        sourceId: "CFETS-LPR-HISTORY",
+        publisher: "全国银行间同业拆借中心（中国货币网）",
+        authorityLevel: "OFFICIAL_RATE_DATA",
+        officialUrl: "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
+        provisionLocator: "一年期贷款市场报价利率历史数据",
+      },
+    ],
+    ruleVersions: [],
+    legalEvents: [],
+    factBindings: [],
+    currentBundle: null,
+    bundleSegments: [],
+  };
+}
+
+function mapPersistentLegalReview(
+  payload: PersistentLegalReviewSnapshot,
+  requestId: string | null,
+): LegalReviewView {
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "持久化法律依据快照",
+    status: "reviewable",
+    statusReason: "仅展示已由服务端读取的来源、规则、关键事实绑定和当前规则包；批准动作仍受案件版本与角色权限控制。",
+    matterVersion: payload.matter_version,
+    snapshotHash: payload.snapshot_hash,
+    requestId,
+    sources: payload.sources.map((item) => ({
+      snapshotId: item.snapshot_id,
+      sourceId: item.source_id,
+      publisher: item.publisher,
+      authorityLevel: item.authority_level,
+      officialUrl: item.official_url,
+      provisionLocator: item.provision_locator,
+      verificationStatus: item.verification_status,
+      licenseStatus: item.license_status,
+      contentSha256: item.content_sha256,
+    })),
+    ruleVersions: payload.rule_versions.map((item) => ({
+      ruleVersionId: item.rule_version_id,
+      ruleVersion: item.rule_version,
+      issueKey: item.issue_key,
+      triggerEventKind: item.trigger_event_kind,
+      formulaKind: item.formula_kind,
+      parameterSourceSnapshotId: item.parameter_source_snapshot_id,
+      parameterEvidenceLocator: item.parameter_evidence_locator,
+      baseAnnualRate: item.base_annual_rate,
+      rateMultiplier: item.rate_multiplier,
+      derivedAnnualRate: item.derived_annual_rate,
+      requiredFactKeys: item.required_fact_keys,
+      status: item.status,
+    })),
+    legalEvents: payload.legal_events.map((item) => ({
+      legalEventId: item.legal_event_id,
+      eventKind: item.event_kind,
+      localDate: item.local_date,
+      status: item.status,
+      evidenceIds: item.evidence_ids,
+    })),
+    factBindings: payload.fact_bindings.map((item) => ({
+      bindingId: item.binding_id,
+      factKey: item.fact_key,
+      factId: item.fact_id,
+      status: item.status,
+      approvalHash: item.approval_hash,
+    })),
+    currentBundle: payload.current_bundle
+      ? {
+          bundleId: payload.current_bundle.bundle_id,
+          version: payload.current_bundle.version,
+          bundleHash: payload.current_bundle.bundle_hash,
+          approvalHash: payload.current_bundle.approval_hash,
+        }
+      : null,
+    bundleSegments: payload.bundle_segments.map((item) => ({
+      segmentId: item.segment_id,
+      issueKey: item.issue_key,
+      ruleVersionId: item.rule_version_id,
+      sourceSnapshotId: item.source_snapshot_id,
+      parameterSourceSnapshotId: item.parameter_source_snapshot_id,
+      parameterEvidenceLocator: item.parameter_evidence_locator,
+      startDate: item.start_date,
+      endDate: item.end_date,
+      annualRate: item.annual_rate,
+      applicabilityAnchor: item.applicability_anchor,
+    })),
   };
 }
 

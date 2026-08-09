@@ -46,17 +46,6 @@ from .models import Actor, Role
 
 
 @dataclass(frozen=True)
-class FormalRuleSegmentInput:
-    segment_id: str
-    start_date: date
-    end_date: date
-    annual_rate: Decimal
-    source_rule_version: str
-    applicability_anchor: str
-    approval_hash: str
-
-
-@dataclass(frozen=True)
 class PersistentFormalCalculationSnapshot:
     matter_id: str
     matter_version: int
@@ -89,7 +78,6 @@ class PostgresFormalCalculationStore:
         legal_bundle_id: str,
         legal_bundle_hash: str,
         allocation_policy: AllocationPolicy,
-        rule_segments: tuple[FormalRuleSegmentInput, ...],
         approval_hash: str,
     ) -> CaseLedgerCommandReceipt:
         _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
@@ -101,13 +89,6 @@ class PostgresFormalCalculationStore:
         _validate_sha256("approval_hash", approval_hash)
         if start_date >= end_date:
             raise CaseLedgerPersistenceBlocked("formal calculation interval must be non-empty")
-        if not rule_segments:
-            raise CaseLedgerPersistenceBlocked("formal calculation requires approved rule segments")
-        for segment in rule_segments:
-            _validate_uuid("segment_id", segment.segment_id)
-            _require_text(segment.source_rule_version, "source_rule_version")
-            _require_text(segment.applicability_anchor, "applicability_anchor")
-            _validate_sha256("segment approval_hash", segment.approval_hash)
         command_name = "CREATE_FORMAL_CALCULATION"
         request_payload = {
             "matter_id": matter_id,
@@ -118,7 +99,6 @@ class PostgresFormalCalculationStore:
             "legal_bundle_id": legal_bundle_id,
             "legal_bundle_hash": legal_bundle_hash,
             "allocation_policy": allocation_policy,
-            "rule_segments": tuple(asdict(segment) for segment in rule_segments),
             "approval_hash": approval_hash,
         }
         request_hash = _payload_hash(request_payload)
@@ -171,6 +151,21 @@ class PostgresFormalCalculationStore:
             approved_rule_versions = tuple(row["rule_version"] for row in rule_rows)
             if not approved_rule_versions:
                 raise CaseLedgerPersistenceBlocked("approved legal bundle contains no rule versions")
+            segment_rows = connection.execute(
+                """
+                SELECT segment_id, start_date, end_date, annual_rate,
+                       rule_version AS source_rule_version, applicability_anchor,
+                       approval_hash, trigger_event_id
+                FROM case_legal_bundle_segments
+                WHERE bundle_id = %s AND matter_id = %s AND firm_id = %s
+                ORDER BY start_date, segment_id
+                """,
+                (legal_bundle_id, matter_id, actor.firm_id),
+            ).fetchall()
+            if not segment_rows:
+                raise CaseLedgerPersistenceBlocked(
+                    "approved legal bundle contains no server-derived calculation segments"
+                )
             transaction_rows = connection.execute(
                 """
                 SELECT transaction.transaction_id, transaction.local_date,
@@ -233,16 +228,16 @@ class PostgresFormalCalculationStore:
                 events=events,
                 rule_segments=tuple(
                     ApprovedRuleSegment(
-                        segment_id=segment.segment_id,
-                        start_date=segment.start_date,
-                        end_date=segment.end_date,
-                        annual_rate=segment.annual_rate,
-                        source_rule_version=segment.source_rule_version,
-                        applicability_anchor=segment.applicability_anchor,
+                        segment_id=str(segment["segment_id"]),
+                        start_date=segment["start_date"],
+                        end_date=segment["end_date"],
+                        annual_rate=Decimal(segment["annual_rate"]),
+                        source_rule_version=segment["source_rule_version"],
+                        applicability_anchor=segment["applicability_anchor"],
                         approved_by=actor.actor_id,
-                        approval_hash=segment.approval_hash,
+                        approval_hash=segment["approval_hash"],
                     )
-                    for segment in rule_segments
+                    for segment in segment_rows
                 ),
                 legal_bundle=ApprovedLegalBundleReference(
                     bundle_id=legal_bundle_id,

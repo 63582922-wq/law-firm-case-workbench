@@ -245,6 +245,37 @@ class FakePersistentFormalCalculationStore:
             snapshot_hash="9" * 64,
         )
 
+
+class FakePersistentLegalSourceStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def approve_case_legal_bundle(self, **kwargs):
+        self.calls.append(("approve_case_legal_bundle", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="APPROVE_CASE_LEGAL_BUNDLE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="CASE_LEGAL_BUNDLE",
+            object_id=str(uuid4()),
+        )
+
+    def approve_legal_fact_binding(self, **kwargs):
+        self.calls.append(("approve_legal_fact_binding", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="APPROVE_CASE_LEGAL_FACT_BINDING",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="CASE_LEGAL_FACT_BINDING",
+            object_id=str(uuid4()),
+        )
+
 class PersistentApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.firm_id = str(uuid4())
@@ -587,7 +618,6 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(current.json()["run"]["engine_version"], "lawcase-calc-1")
         self.assertEqual(current.json()["scenario"]["currency"], "CNY")
 
-        segment_id = str(uuid4())
         created = client.post(
             f"/v1/matters/{self.matter_id}/formal-calculations",
             headers={"Idempotency-Key": "formal-calculation-api-001"},
@@ -599,17 +629,6 @@ class PersistentApiTests(unittest.TestCase):
                 "legal_bundle_id": calculation_store.bundle_id,
                 "legal_bundle_hash": "a" * 64,
                 "allocation_policy": "INTEREST_THEN_PRINCIPAL",
-                "rule_segments": [
-                    {
-                        "segment_id": segment_id,
-                        "start_date": "2020-01-01",
-                        "end_date": "2021-01-01",
-                        "annual_rate": "0.12",
-                        "source_rule_version": "SYNTHETIC-RULE-2020",
-                        "applicability_anchor": "synthetic approved event",
-                        "approval_hash": "b" * 64,
-                    }
-                ],
                 "approval_hash": "c" * 64,
             },
         )
@@ -618,9 +637,8 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(call["actor"], self.identity.actor)
         self.assertEqual(call["expected_version"], 6)
         self.assertEqual(call["allocation_policy"].value, "INTEREST_THEN_PRINCIPAL")
-        self.assertEqual(call["rule_segments"][0].segment_id, segment_id)
 
-    def test_formal_calculation_rejects_gapped_rule_segments_before_store_call(self) -> None:
+    def test_formal_calculation_rejects_empty_interval_before_store_call(self) -> None:
         calculation_store = FakePersistentFormalCalculationStore()
         client = TestClient(
             create_persistent_app(
@@ -638,36 +656,148 @@ class PersistentApiTests(unittest.TestCase):
             json={
                 "expected_version": 6,
                 "obligation_id": "synthetic-obligation",
-                "start_date": "2020-01-01",
-                "end_date": "2021-01-01",
+                "start_date": "2021-01-01",
+                "end_date": "2020-01-01",
                 "legal_bundle_id": calculation_store.bundle_id,
                 "legal_bundle_hash": "a" * 64,
                 "allocation_policy": "INTEREST_THEN_PRINCIPAL",
-                "rule_segments": [
-                    {
-                        "segment_id": str(uuid4()),
-                        "start_date": "2020-01-01",
-                        "end_date": "2020-06-01",
-                        "annual_rate": "0.12",
-                        "source_rule_version": "SYNTHETIC-RULE-1",
-                        "applicability_anchor": "synthetic approved event",
-                        "approval_hash": "b" * 64,
-                    },
-                    {
-                        "segment_id": str(uuid4()),
-                        "start_date": "2020-06-02",
-                        "end_date": "2021-01-01",
-                        "annual_rate": "0.10",
-                        "source_rule_version": "SYNTHETIC-RULE-2",
-                        "applicability_anchor": "synthetic approved event",
-                        "approval_hash": "c" * 64,
-                    },
-                ],
                 "approval_hash": "d" * 64,
             },
         )
         self.assertEqual(response.status_code, 422)
         self.assertFalse(any(name == "create_formal_calculation" for name, _ in calculation_store.calls))
+
+    def test_legal_bundle_route_fails_closed_without_official_source_store(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/legal-bundles",
+            headers={"Idempotency-Key": "legal-bundle-disabled"},
+            json={
+                "expected_version": 1,
+                "segments": [
+                    {
+                        "segment_id": str(uuid4()),
+                        "issue_key": "interest_cap",
+                        "rule_version_id": str(uuid4()),
+                        "trigger_event_id": str(uuid4()),
+                        "start_date": "2020-08-20",
+                        "end_date": "2021-01-01",
+                        "applicability_anchor": "起诉时司法保护标准",
+                    }
+                ],
+                "approval_hash": "a" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "LEGAL_SOURCE_SERVICE_UNAVAILABLE")
+
+    def test_legal_bundle_api_accepts_only_rule_and_event_ids_not_client_rate(self) -> None:
+        legal_store = FakePersistentLegalSourceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    legal_source_store=legal_store,
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/legal-bundles",
+            headers={"Idempotency-Key": "legal-bundle-api-001"},
+            json={
+                "expected_version": 7,
+                "segments": [
+                    {
+                        "segment_id": str(uuid4()),
+                        "issue_key": "interest_cap",
+                        "rule_version_id": str(uuid4()),
+                        "trigger_event_id": str(uuid4()),
+                        "start_date": "2020-08-20",
+                        "end_date": "2021-01-01",
+                        "applicability_anchor": "起诉时司法保护标准",
+                    }
+                ],
+                "approval_hash": "a" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        call = legal_store.calls[0][1]
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["expected_version"], 7)
+        self.assertFalse(hasattr(call["segments"][0], "annual_rate"))
+
+    def test_legal_fact_binding_api_uses_server_identity_and_confirmed_fact_id(self) -> None:
+        legal_store = FakePersistentLegalSourceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    legal_source_store=legal_store,
+                )
+            )
+        )
+        fact_id = str(uuid4())
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/legal-fact-bindings",
+            headers={"Idempotency-Key": "legal-fact-binding-api-001"},
+            json={
+                "expected_version": 7,
+                "fact_key": "contract_before_2020_08_20",
+                "fact_id": fact_id,
+                "approval_hash": "a" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        name, call = legal_store.calls[0]
+        self.assertEqual(name, "approve_legal_fact_binding")
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["fact_id"], fact_id)
+
+    def test_lpr_rule_api_requires_a_distinct_official_rate_snapshot_locator(self) -> None:
+        legal_store = FakePersistentLegalSourceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    legal_source_store=legal_store,
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/legal-rule-versions",
+            headers={"Idempotency-Key": "lpr-rule-missing-rate-source"},
+            json={
+                "expected_version": 7,
+                "rule_id": "private-lending-cap",
+                "rule_version": "PRIVATE-LENDING-LPR-2020-08",
+                "issue_key": "interest_cap_after_2020_08_20",
+                "source_snapshot_id": str(uuid4()),
+                "effective_from": "2020-08-20",
+                "trigger_event_kind": "CLAIM_FILED",
+                "formula_kind": "LPR_MULTIPLE",
+                "base_annual_rate": "0.0385",
+                "rate_multiplier": "4",
+                "required_fact_keys": ["contract_before_2020_08_20"],
+                "priority": 100,
+                "approval_hash": "a" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(legal_store.calls, [])
 
 
 if __name__ == "__main__":

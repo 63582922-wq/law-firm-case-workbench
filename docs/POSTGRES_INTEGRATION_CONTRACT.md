@@ -1,10 +1,10 @@
 # PostgreSQL 集成契约（内部 Alpha 后续阶段）
 
-状态：`已实现案件核心、事实/交易、证据 Manifest 及正式计算适配器；未配置或执行集成测试数据库`
+状态：`已实现案件核心、事实/交易、证据 Manifest、正式计算及法律来源/规则包适配器；未配置或执行集成测试数据库`
 
 ## 目的与边界
 
-`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据 Manifest 使用独立持久化适配器，保存不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest、派生件谱系和可恢复 Worker 任务。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 只从同案已确认交易、已批准付款分类、明确债务分配及当前已批准法律规则包构造正式计算，保存逐期本金、利息、逐笔冲抵和独立复算谱系。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0005_formal_calculations.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
+`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据 Manifest 使用独立持久化适配器，保存不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest、派生件谱系和可恢复 Worker 任务。`case_kernel.legal_source_postgres.PostgresLegalSourceStore` 保存经人工核验的官方来源快照、服务端派生的规则版本、案件法律事件、关键事实绑定和不可变规则包。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 只从同案已确认交易、已批准付款分类、明确债务分配及当前已批准法律规则包构造正式计算，保存逐期本金、利息、逐笔冲抵和独立复算谱系。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0006_legal_source_rules.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
 
 它们不属于当前 Web/API 的合成 Alpha 运行路径。`alpha_*` 标识符会在建立数据库连接之前被拒绝；这条限制防止测试页面意外写入持久化环境。台账适配器还会在数据库内复核调用人具有本案未撤销且用户状态有效的角色，不能只信任请求携带的角色声明。
 
@@ -21,7 +21,9 @@
 
 任何错误导致整笔事务回滚。全部 SQL 使用参数绑定；不得用字符串拼接案件内容、身份或输入金额。
 
-正式计算命令还要求：币种为 `CNY` 且精确到分、交易日期为精确日期、同日顺序已批准、重复组已解决、法律规则期间连续覆盖整个计算区间、规则版本属于当前案件规则包。旧正式情景和计算运行保留为 `STALE`；新运行只有在独立复算完全一致后才成为 `VERIFIED`。当前 `0005` 已保存法律包引用及来源快照标识，但法律来源抓取、官方快照登记和规则包审批命令仍需后续模块完成，不能由浏览器任意传入利率冒充正式规则。
+正式计算命令还要求：币种为 `CNY` 且精确到分、交易日期为精确日期、同日顺序已批准、重复组已解决、法律规则期间连续覆盖整个计算区间、规则版本属于当前案件规则包。旧正式情景和计算运行保留为 `STALE`；新运行只有在独立复算完全一致后才成为 `VERIFIED`。`0006` 已加入官方快照登记、规则版本、法律事件、确认事实键绑定和规则包审批命令。正式计算 API 不接收规则段或客户端利率，只能按 `legal_bundle_id`/哈希读取数据库中已批准分段。
+
+正式来源快照只接受允许清单中的官方 HTTPS 域名，并要求配置本机加密对象读取器；登记前必须成功认证、解密对象并重新核对明文 SHA-256，不能只提交一个看似正确的对象键。LPR 倍数规则的法律公式来源与官方利率参数来源必须是两个不同快照，参数来源还必须标记为 `OFFICIAL_RATE_DATA` 并保存精确定位。当前仍未实现自动抓取、内容解析和基准利率数值的机器校验；登记与参数输入必须由授权人员复核，发现清单本身不能进入正式规则包。
 
 事实、诉请、交易等候选不会直接成为正式结论；律师确认、回应、争点确认、付款分类批准和重复组结论才触发正式上游失效。诉请回应到事实、争点到事实/诉请、付款分类到债务分配、重复组到原交易均使用同律所同案件的正规化关联表；重复候选的处理只选择规范交易，不删除任何来源交易。
 
