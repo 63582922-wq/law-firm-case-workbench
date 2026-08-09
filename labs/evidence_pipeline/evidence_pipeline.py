@@ -20,7 +20,7 @@ from reportlab.pdfgen import canvas
 
 RENDER_DPI = 72
 SIMILARITY_REVIEW_THRESHOLD = 0.80
-ALIAS_PATTERN = re.compile(r"Counterparty Alias:\s*(.*?)\s*\|\s*CNY", re.IGNORECASE)
+ALIAS_PATTERN = re.compile(r"交易对方昵称：\s*(.*?)\s*\|\s*人民币")
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ def _write_selected_pages(
                 "type": "RED_BOX",
                 "coordinate_space": "PDF points, lower-left origin",
                 "rectangle": {"x": 66, "y": 600, "width": float(annotated_page.mediabox.width) - 132, "height": 42},
-                "reason": "Synthetic target alias line; technical visibility check only.",
+                "reason": "合成目标昵称行；仅用于技术可视性检查。",
             }
         )
 
@@ -153,13 +153,13 @@ def run_pipeline(source_pdf: Path, output_directory: Path, target_alias: str) ->
         similarity = SequenceMatcher(None, target_normalised, alias_normalised).ratio() if alias else 0.0
         if alias_normalised == target_normalised:
             disposition = "IN_SCOPE_CANDIDATE"
-            reason = "Exact alias match; lawyer must still confirm relevance and payment nature."
+            reason = "昵称完全匹配；仍须由律师确认相关性和付款性质。"
         elif similarity >= SIMILARITY_REVIEW_THRESHOLD:
             disposition = "SIMILAR_REVIEW_REQUIRED"
-            reason = "Alias is similar but not identical; page is retained for lawyer review and not auto-excluded."
+            reason = "昵称近似但不相同；页面保留供律师复核，不得自动排除。"
         else:
             disposition = "OUT_OF_SCOPE_CANDIDATE"
-            reason = "No exact or near alias match in this synthetic test."
+            reason = "本合成测试中未发现精确或近似昵称匹配。"
 
         page_records.append(
             {
@@ -198,7 +198,7 @@ def run_pipeline(source_pdf: Path, output_directory: Path, target_alias: str) ->
     source_hash_after = file_sha256(source_pdf)
     manifest = {
         "schema_version": "0.1-synthetic-lab",
-        "scope": "Non-production synthetic evidence-page validation only.",
+        "scope": "仅限非生产的合成证据页技术验证。",
         "source": {
             "file_name": source_pdf.name,
             "sha256_before": source_hash_before,

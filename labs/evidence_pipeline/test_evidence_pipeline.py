@@ -23,7 +23,7 @@ class EvidencePipelineLabTests(unittest.TestCase):
         cls.source = create_synthetic_fixture(cls.root / "synthetic-source.pdf")
         cls.source_hash_before = file_sha256(cls.source)
         cls.output = cls.root / "pipeline-output"
-        cls.result = run_pipeline(cls.source, cls.output, "Sample Claimant")
+        cls.result = run_pipeline(cls.source, cls.output, "合成对方甲")
         cls.manifest = load_manifest(cls.result.manifest_path)
 
     @classmethod
@@ -48,7 +48,7 @@ class EvidencePipelineLabTests(unittest.TestCase):
 
     def test_near_match_is_retained_for_lawyer_review_not_automatically_excluded(self) -> None:
         record = self.manifest["pages"][4]
-        self.assertEqual("Sample Clamant", record["extracted_alias"])
+        self.assertEqual("合成对方申", record["extracted_alias"])
         self.assertEqual("SIMILAR_REVIEW_REQUIRED", record["disposition"])
         self.assertGreaterEqual(record["alias_similarity_to_target"], 0.80)
         self.assertEqual(1, self.manifest["summary"]["similar_review_required"])
