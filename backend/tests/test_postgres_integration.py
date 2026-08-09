@@ -18,7 +18,7 @@ from case_kernel.workflow import MatterWorkflow
 
 TEST_DSN = os.environ.get("CASE_WORKBENCH_TEST_DATABASE_URL", "")
 ALLOW_DESTRUCTIVE = os.environ.get("CASE_WORKBENCH_ALLOW_DESTRUCTIVE_TEST_DB") == "YES"
-MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "0001_core.sql"
+MIGRATIONS = tuple(sorted((Path(__file__).resolve().parents[1] / "migrations").glob("*.sql")))
 
 
 def _configured_test_database() -> bool:
@@ -38,7 +38,8 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
         with psycopg.connect(TEST_DSN, autocommit=True) as connection:
             connection.execute("DROP SCHEMA public CASCADE")
             connection.execute("CREATE SCHEMA public")
-            connection.execute(MIGRATION.read_text(encoding="utf-8"))
+            for migration in MIGRATIONS:
+                connection.execute(migration.read_text(encoding="utf-8"))
 
     def setUp(self) -> None:
         self.firm_id = str(uuid4())
