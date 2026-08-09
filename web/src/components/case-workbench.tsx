@@ -2,16 +2,17 @@
 
 import { useMemo, useState } from "react";
 import { CalculationWorkbench } from "@/components/calculation-workbench";
+import { FactsWorkbench } from "@/components/facts-workbench";
 import { stageLabels, syntheticMatter, type EvidencePage } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
-type View = "overview" | "evidence" | "calculation";
+type View = "overview" | "evidence" | "facts" | "calculation";
 type DuplicateDecision = "pending" | "exclude" | "keep";
 
 const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
   { id: "overview", label: "案件总览", href: "/" },
   { id: "evidence", label: "证据核验", href: "/evidence" },
-  { id: "facts", label: "事实与争点" },
+  { id: "facts", label: "事实与争点", href: "/facts" },
   { id: "calculation", label: "利息测算", href: "/calculation" },
   { id: "bundle", label: "提交材料" },
 ];
@@ -127,7 +128,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
             selectedPage={selectedPage}
             unresolvedCount={unresolvedCount}
           />
-        ) : (
+        ) : view === "facts" ? <FactsWorkbench /> : (
           <CalculationWorkbench />
         )}
       </div>

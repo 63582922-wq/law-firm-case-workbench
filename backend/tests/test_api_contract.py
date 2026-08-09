@@ -186,6 +186,19 @@ class SyntheticAlphaApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["access-control-allow-origin"], "http://[::1]:3000")
 
+    def test_approved_synthetic_review_snapshot_is_lead_only_and_evidence_bound(self) -> None:
+        denied = self.client.get("/v1/alpha-review", headers={"X-Alpha-Actor": "alpha_assistant"})
+        self.assertEqual(denied.status_code, 403)
+
+        response = self.client.get("/v1/alpha-review", headers=self.lead_headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["mode"], "synthetic-alpha-only")
+        self.assertEqual(payload["claims"][0]["currency"], "CNY")
+        self.assertEqual(payload["claims"][0]["response_position"], "PARTIALLY_ADMIT")
+        self.assertEqual(payload["transactions"][1]["payment_application"], "INTEREST_ONLY")
+        self.assertEqual(len(payload["fact_snapshot_hash"]), 64)
+
 
 if __name__ == "__main__":
     unittest.main()

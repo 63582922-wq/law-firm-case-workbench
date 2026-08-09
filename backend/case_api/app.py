@@ -28,8 +28,11 @@ from case_kernel.models import Actor, Role
 from case_kernel.store import InMemoryMatterStore
 from case_kernel.workflow import MatterWorkflow
 
+from .alpha_review_state import build_alpha_review_state
+
 from .schemas import (
     ApprovalRequest,
+    AlphaReviewResponse,
     CalculationLineItemResponse,
     CalculationPreviewRequest,
     CalculationPreviewResponse,
@@ -172,6 +175,7 @@ def create_app(
     """Create a contract-testable API with an injected test repository."""
     workflow = MatterWorkflow(store or InMemoryMatterStore())
     legal_bundle_registry = legal_bundles or InMemoryLegalBundleRegistry((synthetic_alpha_legal_bundle(),))
+    alpha_review_state = build_alpha_review_state()
     app = FastAPI(
         title="律所案件 AI 工作台 · 合成 Alpha API",
         version="0.1.0",
@@ -293,6 +297,51 @@ def create_app(
     ) -> CalculationPreviewResponse:
         """Non-persistent synthetic preview. Formal CalculationRun storage comes after PostgreSQL integration."""
         return to_calculation_preview(body, actor, legal_bundle_registry)
+
+    @app.get("/v1/alpha-review", response_model=AlphaReviewResponse, tags=["synthetic-review"])
+    async def alpha_review(actor: Annotated[Actor, Depends(get_synthetic_actor)]) -> AlphaReviewResponse:
+        """Read-only synthetic fact/transaction fixture produced through the domain ledgers."""
+        if Role.LEAD_LAWYER not in actor.roles:
+            raise AuthorizationDenied("only the lead lawyer can inspect the approved synthetic review snapshot")
+        fact_snapshot = alpha_review_state["fact_snapshot"]
+        transaction_snapshot = alpha_review_state["transaction_snapshot"]
+        responses_by_claim = {item.claim_id: item for item in fact_snapshot.responses}
+        return AlphaReviewResponse(
+            mode="synthetic-alpha-only",
+            fact_snapshot_hash=fact_snapshot.input_hash,
+            transaction_snapshot_hash=transaction_snapshot.input_hash,
+            facts=tuple(
+                {"fact_id": item.fact_id, "original_text": item.original_text, "origin": item.origin.value, "evidence_count": len(item.evidence_links)}
+                for item in fact_snapshot.facts
+            ),
+            claims=tuple(
+                {
+                    "claim_id": item.claim_id,
+                    "original_claim_text": item.original_claim_text,
+                    "claimed_amount": item.claimed_amount,
+                    "currency": item.currency,
+                    "response_position": responses_by_claim[item.claim_id].position.value,
+                    "response_amount": responses_by_claim[item.claim_id].partial_amount,
+                }
+                for item in fact_snapshot.claims
+            ),
+            issues=tuple(
+                {"issue_id": item.issue_id, "question": item.question, "claim_count": len(item.claim_ids), "fact_count": len(item.confirmed_fact_ids)}
+                for item in fact_snapshot.issues
+            ),
+            transactions=tuple(
+                {
+                    "event_id": item.event_id,
+                    "effective_date": item.effective_date,
+                    "kind": item.kind.value,
+                    "amount": item.amount,
+                    "currency": item.currency,
+                    "payment_application": item.payment_application.value,
+                    "evidence_ids": item.evidence_ids,
+                }
+                for item in transaction_snapshot.events
+            ),
+        )
 
     return app
 

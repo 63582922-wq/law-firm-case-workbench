@@ -150,3 +150,46 @@ class CalculationPreviewResponse(BaseModel):
     unapplied_payments: Decimal
     line_items: tuple[CalculationLineItemResponse, ...]
     payment_allocations: tuple[PaymentAllocationResponse, ...]
+
+
+class FactReviewResponse(BaseModel):
+    fact_id: str
+    original_text: str
+    origin: str
+    evidence_count: int
+
+
+class ClaimReviewResponse(BaseModel):
+    claim_id: str
+    original_claim_text: str
+    claimed_amount: Decimal | None
+    currency: str | None
+    response_position: str
+    response_amount: Decimal | None
+
+
+class IssueReviewResponse(BaseModel):
+    issue_id: str
+    question: str
+    claim_count: int
+    fact_count: int
+
+
+class TransactionReviewResponse(BaseModel):
+    event_id: str
+    effective_date: date
+    kind: str
+    amount: Decimal
+    currency: str
+    payment_application: str
+    evidence_ids: tuple[str, ...]
+
+
+class AlphaReviewResponse(BaseModel):
+    mode: Literal["synthetic-alpha-only"]
+    fact_snapshot_hash: str
+    transaction_snapshot_hash: str
+    facts: tuple[FactReviewResponse, ...]
+    claims: tuple[ClaimReviewResponse, ...]
+    issues: tuple[IssueReviewResponse, ...]
+    transactions: tuple[TransactionReviewResponse, ...]
