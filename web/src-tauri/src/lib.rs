@@ -22,6 +22,8 @@ struct DesktopRuntimeStatus {
     message: String,
     api_base: Option<String>,
     process_id: Option<u32>,
+    identity_phase: String,
+    persistence_phase: String,
 }
 
 struct LocalApiState {
@@ -29,6 +31,8 @@ struct LocalApiState {
     message: String,
     api_base: Option<String>,
     process_id: Option<u32>,
+    identity_phase: String,
+    persistence_phase: String,
     child: Option<CommandChild>,
 }
 
@@ -39,6 +43,8 @@ impl Default for LocalApiState {
             message: "正在核验本机受控服务…".to_string(),
             api_base: None,
             process_id: None,
+            identity_phase: "UNKNOWN".to_string(),
+            persistence_phase: "UNKNOWN".to_string(),
             child: None,
         }
     }
@@ -56,6 +62,8 @@ struct LocalApiReady {
     port: u16,
     pid: u32,
     challenge_sha256: String,
+    identity: String,
+    persistence: String,
 }
 
 fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
@@ -65,6 +73,8 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         message: state.message.clone(),
         api_base: state.api_base.clone(),
         process_id: state.process_id,
+        identity_phase: state.identity_phase.clone(),
+        persistence_phase: state.persistence_phase.clone(),
     }
 }
 
@@ -75,6 +85,8 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.message = message.to_string();
         state.api_base = None;
         state.process_id = None;
+        state.identity_phase = "UNAVAILABLE".to_string();
+        state.persistence_phase = "UNAVAILABLE".to_string();
         state.child.take()
     };
     if let Some(child) = child {
@@ -94,6 +106,8 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         || ready.pid <= 1
         || ready.port == 0
         || ready.challenge_sha256 != expected_digest
+        || ready.identity != "NOT_ENROLLED"
+        || ready.persistence != "NOT_CONFIGURED"
     {
         return Err("本机服务未通过父进程绑定核验。".to_string());
     }
@@ -138,6 +152,8 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                                 "本机受控服务已就绪；真实案件数据仍保持禁用。".to_string();
                             state.api_base = Some(format!("http://127.0.0.1:{}", ready.port));
                             state.process_id = Some(process_id);
+                            state.identity_phase = ready.identity;
+                            state.persistence_phase = ready.persistence;
                             ready_received = true;
                         }
                         Err(message) => {
@@ -158,6 +174,8 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     }
                     state.api_base = None;
                     state.process_id = None;
+                    state.identity_phase = "UNAVAILABLE".to_string();
+                    state.persistence_phase = "UNAVAILABLE".to_string();
                     state.child = None;
                     break;
                 }
@@ -175,6 +193,8 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.message = "桌面应用退出，本机受控服务已停止。".to_string();
         state.api_base = None;
         state.process_id = None;
+        state.identity_phase = "UNAVAILABLE".to_string();
+        state.persistence_phase = "UNAVAILABLE".to_string();
         state.child.take()
     };
     if let Some(child) = child {
@@ -319,7 +339,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let payload = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"persistence\":\"NOT_CONFIGURED\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());

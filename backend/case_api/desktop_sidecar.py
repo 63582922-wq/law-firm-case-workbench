@@ -132,6 +132,8 @@ def run() -> int:
                     "port": port,
                     "pid": os.getpid(),
                     "challenge_sha256": sha256(challenge.encode("ascii")).hexdigest(),
+                    "identity": "NOT_ENROLLED",
+                    "persistence": "NOT_CONFIGURED",
                 },
                 separators=(",", ":"),
             ),

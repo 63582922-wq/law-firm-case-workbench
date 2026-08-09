@@ -11,6 +11,8 @@ export type DesktopRuntimeStatus = {
   message: string;
   apiBase: string | null;
   processId: number | null;
+  identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+  persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
 };
 
 export async function readDesktopRuntimeStatus(): Promise<DesktopRuntimeStatus | null> {

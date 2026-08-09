@@ -9,6 +9,8 @@ declare global {
         message: string;
         apiBase: string | null;
         processId: number | null;
+        identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+        persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
       selectCaseFolder(input: { matterId: string }): Promise<{ selectedRoot: string } | null>;
     };

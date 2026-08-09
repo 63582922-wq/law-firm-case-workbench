@@ -5,6 +5,7 @@ import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { EvidenceWorkbench as EvidenceManifestWorkbench } from "@/components/evidence-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
 import { LegalWorkbench } from "@/components/legal-workbench";
+import { IdentitySecurityWorkbench } from "@/components/identity-security-workbench";
 import { SubmissionWorkbench } from "@/components/submission-workbench";
 import { caseDataSourceConfig } from "@/lib/case-data-source";
 import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
@@ -12,7 +13,7 @@ import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
-type View = "overview" | "evidence" | "facts" | "legal" | "calculation" | "bundle";
+type View = "overview" | "evidence" | "facts" | "legal" | "calculation" | "bundle" | "security";
 
 const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
   { id: "overview", label: "案件总览", href: "/" },
@@ -21,6 +22,7 @@ const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; hr
   { id: "legal", label: "法律规则", href: "/legal" },
   { id: "calculation", label: "利息测算", href: "/calculation" },
   { id: "bundle", label: "提交材料", href: "/bundle" },
+  { id: "security", label: "身份与安全", href: "/security" },
 ];
 
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
@@ -46,6 +48,8 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
             message: "无法核验本机受控服务，案件访问保持禁用。",
             apiBase: null,
             processId: null,
+            identityPhase: "UNAVAILABLE",
+            persistencePhase: "UNAVAILABLE",
           });
         }
       }
@@ -141,7 +145,9 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <EvidenceManifestWorkbench />
         ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : view === "calculation" ? (
           <CalculationWorkbench />
-        ) : <SubmissionWorkbench />}
+        ) : view === "bundle" ? <SubmissionWorkbench /> : (
+          <IdentitySecurityWorkbench desktopRuntime={desktopRuntime} />
+        )}
       </div>
 
       <footer className={styles.footer}>

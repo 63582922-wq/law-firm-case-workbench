@@ -24,13 +24,17 @@
 
 ## 身份与请求审计
 
-服务端身份上下文包含 UUID 律所、用户、会话，签发方、认证方式、认证与过期时间；时间必须带时区且会话未过期。当前已实现 OS 绑定本机会话 authority：服务端注入登记 Actor，一次性 bootstrap 交换短时 Bearer，只保存令牌摘要，校验数字 loopback 与 `tauri://localhost`，并支持过期/撤销。该 authority 尚未装配到打包 sidecar，因为没有 Keychain 律师登记档案和数据库案件成员关系；因此仍没有真实登录能力。
+服务端身份上下文包含 UUID 律所、用户、会话，签发方、认证方式、认证与过期时间；时间必须带时区且会话未过期。当前已实现 OS 绑定本机会话 authority：服务端注入登记 Actor，一次性 bootstrap 交换短时 Bearer，只保存令牌摘要，校验数字 loopback 与 `tauri://localhost`，并支持过期/撤销。
+
+登记 Actor 的正式来源契约也已实现：律所受信 Ed25519 公钥核验严格规范化凭证，凭证绑定 32 字节安装秘密的 SHA-256、最长 30 天；macOS 适配器从两个固定 Keychain 项只读取得签名凭证与秘密，浏览器不能选择 actor、firm 或 role。验证后的会话到期不超过凭证到期。每次案件读写仍查询 `users.status=ACTIVE` 与未撤销的 `matter_actor_roles`，因此登记凭证不替代本案数据库授权。
+
+该 authority 尚未装配到打包 sidecar，因为没有真实律所签发/撤销服务、生产信任根、Keychain 初始化流程和专用 PostgreSQL；因此仍没有真实登录能力。
 
 API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数据库审计事务。已知错误返回稳定代码、中文消息和相同请求号，不向普通界面暴露数据库异常或连接信息。
 
 ## 未完成门槛
 
-- Keychain 律师登记档案、撤销流程及桌面 OS 绑定 identity authority 的正式装配，或真实 OIDC/MFA；
+- 律所真实签发/续期/撤销服务、生产公钥轮换、Keychain 初始化/恢复 UI 及桌面 identity authority 的正式装配，或真实 OIDC/MFA；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
 - 大案件分页、按角色最小展示与字段级脱敏；
 - 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；
