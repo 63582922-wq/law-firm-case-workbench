@@ -4,7 +4,7 @@
 
 ## 目的与边界
 
-`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。它们要求 PostgreSQL 16+、顺序执行 `backend/migrations/0001_core.sql` 与 `backend/migrations/0002_case_ledgers.sql`，并由身份/成员关系服务预先创建 UUID 律所、用户及案件角色数据。
+`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据 Manifest 使用独立持久化适配器，保存不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest 和派生件谱系。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql`、`backend/migrations/0002_case_ledgers.sql` 与 `backend/migrations/0003_evidence_manifest.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
 
 它们不属于当前 Web/API 的合成 Alpha 运行路径。`alpha_*` 标识符会在建立数据库连接之前被拒绝；这条限制防止测试页面意外写入持久化环境。台账适配器还会在数据库内复核调用人具有本案未撤销且用户状态有效的角色，不能只信任请求携带的角色声明。
 
