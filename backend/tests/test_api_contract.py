@@ -108,6 +108,7 @@ class SyntheticAlphaApiTests(unittest.TestCase):
     def test_calculation_preview_is_lead_only_and_self_checks(self) -> None:
         payload = {
             "scenario_id": "alpha_interest_001",
+            "legal_bundle_id": "alpha_legal_bundle_interest_001",
             "version": 1,
             "start_date": "2020-08-20",
             "end_date": "2020-09-20",
@@ -159,9 +160,18 @@ class SyntheticAlphaApiTests(unittest.TestCase):
         denied = self.client.post("/v1/calculation-previews", headers={"X-Alpha-Actor": "alpha_assistant"}, json=payload)
         self.assertEqual(denied.status_code, 403)
 
+        unknown_bundle = self.client.post(
+            "/v1/calculation-previews",
+            headers=self.lead_headers,
+            json={**payload, "legal_bundle_id": "alpha_legal_bundle_missing_001"},
+        )
+        self.assertEqual(unknown_bundle.status_code, 422)
+        self.assertIn("unknown approved case legal bundle", unknown_bundle.json()["detail"])
+
         preview = self.client.post("/v1/calculation-previews", headers=self.lead_headers, json=payload)
         self.assertEqual(preview.status_code, 200, preview.text)
         self.assertTrue(preview.json()["independent_check_match"])
+        self.assertEqual(preview.json()["legal_bundle_id"], "alpha_legal_bundle_interest_001")
         self.assertEqual(preview.json()["remaining_principal"], "9041.10")
         self.assertEqual(preview.json()["payment_allocations"][0]["allocated_principal"], "958.90")
 

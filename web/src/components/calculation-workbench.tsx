@@ -216,7 +216,7 @@ function CalculationResult({ preview }: { preview: CalculationPreview }) {
         ))}
       </div>
 
-      <p className={styles.resultHash}>本次合成预览输入与输出均已哈希绑定。正式环境还须持久化、律师审批、规则来源核验及下游失效追踪。</p>
+      <p className={styles.resultHash}>本次合成预览输入、输出与案件规则包 {preview.legal_bundle_id} 均已哈希绑定。正式环境还须持久化、律师审批、规则来源核验及下游失效追踪。</p>
     </section>
   );
 }

@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
+from hashlib import sha256
 import unittest
 
 from case_kernel.calculation_engine import (
@@ -13,6 +14,15 @@ from case_kernel.calculation_engine import (
     calculate,
     independently_check,
 )
+from case_kernel.legal_rules import ApprovedLegalBundleReference
+
+
+def legal_bundle_fixture(*, versions: tuple[str, ...] = ("SYNTHETIC-RULE-1", "SYNTHETIC-RULE-2")) -> ApprovedLegalBundleReference:
+    return ApprovedLegalBundleReference(
+        bundle_id="alpha_legal_bundle_interest_001",
+        bundle_hash=sha256(b"synthetic approved legal bundle").hexdigest(),
+        approved_rule_versions=versions,
+    )
 
 
 def synthetic_scenario(*, payment_amount: Decimal = Decimal("1000.00")) -> CalculationScenario:
@@ -69,6 +79,7 @@ def synthetic_scenario(*, payment_amount: Decimal = Decimal("1000.00")) -> Calcu
                 approval_hash="approval_rule_2",
             ),
         ),
+        legal_bundle=legal_bundle_fixture(),
         allocation_policy=AllocationPolicy.INTEREST_THEN_PRINCIPAL,
         approved_by="alpha_lead_lawyer",
         approval_hash="approval_scenario",
@@ -128,6 +139,11 @@ class CalculationEngineTests(unittest.TestCase):
         self.assertTrue(independently_check(scenario, original).matching)
         self.assertTrue(independently_check(replace(scenario, rule_segments=(scenario.rule_segments[0], updated_segment)), updated).matching)
 
+    def test_rule_segment_must_belong_to_the_approved_legal_bundle(self) -> None:
+        scenario = synthetic_scenario()
+        with self.assertRaisesRegex(CalculationBlocked, "not included"):
+            calculate(replace(scenario, legal_bundle=legal_bundle_fixture(versions=("SYNTHETIC-RULE-1",))))
+
     def test_principal_first_policy_is_explicit_and_recomputable(self) -> None:
         scenario = replace(synthetic_scenario(), allocation_policy=AllocationPolicy.PRINCIPAL_THEN_INTEREST)
         run = calculate(scenario)
@@ -169,6 +185,11 @@ class CalculationEngineTests(unittest.TestCase):
                     approved_by="alpha_lead_lawyer",
                     approval_hash="leap_rule_approval",
                 ),
+            ),
+            legal_bundle=ApprovedLegalBundleReference(
+                bundle_id="alpha_legal_bundle_leap_001",
+                bundle_hash=sha256(b"synthetic leap bundle").hexdigest(),
+                approved_rule_versions=("SYNTHETIC-RULE-LEAP",),
             ),
             allocation_policy=AllocationPolicy.INTEREST_THEN_PRINCIPAL,
             approved_by="alpha_lead_lawyer",

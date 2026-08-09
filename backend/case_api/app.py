@@ -23,6 +23,7 @@ from case_kernel.calculation_engine import (
     independently_check,
 )
 from case_kernel.errors import AuthorizationDenied, IdempotencyConflict, InvalidTransition, PreconditionBlocked, VersionConflict
+from case_kernel.legal_rules import InMemoryLegalBundleRegistry, LegalRuleBlocked, synthetic_alpha_legal_bundle
 from case_kernel.models import Actor, Role
 from case_kernel.store import InMemoryMatterStore
 from case_kernel.workflow import MatterWorkflow
@@ -98,7 +99,11 @@ def to_matter_response(matter) -> MatterResponse:
     )
 
 
-def to_calculation_preview(body: CalculationPreviewRequest, actor: Actor) -> CalculationPreviewResponse:
+def to_calculation_preview(
+    body: CalculationPreviewRequest,
+    actor: Actor,
+    legal_bundles: InMemoryLegalBundleRegistry,
+) -> CalculationPreviewResponse:
     if Role.LEAD_LAWYER not in actor.roles:
         raise AuthorizationDenied("only the lead lawyer can request an approved calculation preview")
     scenario = CalculationScenario(
@@ -133,6 +138,7 @@ def to_calculation_preview(body: CalculationPreviewRequest, actor: Actor) -> Cal
             )
             for segment in body.rule_segments
         ),
+        legal_bundle=legal_bundles.get_reference(body.legal_bundle_id),
         allocation_policy=AllocationPolicy(body.allocation_policy),
         approved_by=actor.actor_id,
         approval_hash=body.approval_hash,
@@ -144,6 +150,8 @@ def to_calculation_preview(body: CalculationPreviewRequest, actor: Actor) -> Cal
     return CalculationPreviewResponse(
         run_id=run.run_id,
         engine_version=run.engine_version,
+        legal_bundle_id=run.legal_bundle_id,
+        legal_bundle_hash=run.legal_bundle_hash,
         input_hash=run.input_hash,
         output_hash=run.output_hash,
         independent_check_match=independent_check.matching,
@@ -157,9 +165,13 @@ def to_calculation_preview(body: CalculationPreviewRequest, actor: Actor) -> Cal
     )
 
 
-def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
+def create_app(
+    store: InMemoryMatterStore | None = None,
+    legal_bundles: InMemoryLegalBundleRegistry | None = None,
+) -> FastAPI:
     """Create a contract-testable API with an injected test repository."""
     workflow = MatterWorkflow(store or InMemoryMatterStore())
+    legal_bundle_registry = legal_bundles or InMemoryLegalBundleRegistry((synthetic_alpha_legal_bundle(),))
     app = FastAPI(
         title="律所案件 AI 工作台 · 合成 Alpha API",
         version="0.1.0",
@@ -196,6 +208,10 @@ def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
 
     @app.exception_handler(CalculationBlocked)
     async def calculation_handler(_: Request, exc: CalculationBlocked):
+        return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+
+    @app.exception_handler(LegalRuleBlocked)
+    async def legal_rule_handler(_: Request, exc: LegalRuleBlocked):
         return _error(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
 
     @app.get("/healthz", response_model=HealthResponse, tags=["system"])
@@ -278,7 +294,7 @@ def create_app(store: InMemoryMatterStore | None = None) -> FastAPI:
         actor: Annotated[Actor, Depends(get_synthetic_actor)],
     ) -> CalculationPreviewResponse:
         """Non-persistent synthetic preview. Formal CalculationRun storage comes after PostgreSQL integration."""
-        return to_calculation_preview(body, actor)
+        return to_calculation_preview(body, actor, legal_bundle_registry)
 
     return app
 

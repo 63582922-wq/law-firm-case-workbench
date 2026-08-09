@@ -6,6 +6,7 @@
 
 export const alphaCalculationPreviewRequest = {
   scenario_id: "alpha_interest_001",
+  legal_bundle_id: "alpha_legal_bundle_interest_001",
   version: 1,
   start_date: "2020-08-20",
   end_date: "2020-09-20",
@@ -82,6 +83,8 @@ export type PaymentAllocation = {
 export type CalculationPreview = {
   run_id: string;
   engine_version: string;
+  legal_bundle_id: string;
+  legal_bundle_hash: string;
   input_hash: string;
   output_hash: string;
   independent_check_match: boolean;

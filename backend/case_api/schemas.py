@@ -101,6 +101,7 @@ class CalculationRuleSegmentRequest(SyntheticGuardedModel):
 
 class CalculationPreviewRequest(SyntheticGuardedModel):
     scenario_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
+    legal_bundle_id: str = Field(pattern=r"^alpha_[a-z0-9_]{3,80}$")
     version: int = Field(ge=1)
     start_date: date
     end_date: date
@@ -137,6 +138,8 @@ class CalculationLineItemResponse(BaseModel):
 class CalculationPreviewResponse(BaseModel):
     run_id: str
     engine_version: str
+    legal_bundle_id: str
+    legal_bundle_hash: str
     input_hash: str
     output_hash: str
     independent_check_match: bool

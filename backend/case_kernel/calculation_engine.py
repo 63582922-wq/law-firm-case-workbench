@@ -17,6 +17,8 @@ import json
 from typing import Iterable
 from uuid import uuid4
 
+from case_kernel.legal_rules import ApprovedLegalBundleReference
+
 
 MONEY_UNIT = Decimal("0.01")
 YEAR_DAY_COUNT = Decimal("365")
@@ -69,6 +71,7 @@ class CalculationScenario:
     end_date: date
     events: tuple[ApprovedCalculationEvent, ...]
     rule_segments: tuple[ApprovedRuleSegment, ...]
+    legal_bundle: ApprovedLegalBundleReference
     allocation_policy: AllocationPolicy
     approved_by: str
     approval_hash: str
@@ -107,6 +110,8 @@ class CalculationRun:
     scenario_id: str
     scenario_version: int
     engine_version: str
+    legal_bundle_id: str
+    legal_bundle_hash: str
     input_hash: str
     output_hash: str
     generated_at: datetime
@@ -190,6 +195,8 @@ def calculate(scenario: CalculationScenario) -> CalculationRun:
 
     input_hash = _hash_payload(scenario)
     provisional = {
+        "legal_bundle_id": scenario.legal_bundle.bundle_id,
+        "legal_bundle_hash": scenario.legal_bundle.bundle_hash,
         "line_items": lines,
         "payment_allocations": payment_allocations,
         "total_interest_accrued": total_interest_accrued,
@@ -203,6 +210,8 @@ def calculate(scenario: CalculationScenario) -> CalculationRun:
         scenario_id=scenario.scenario_id,
         scenario_version=scenario.version,
         engine_version="synthetic-alpha-calc-1",
+        legal_bundle_id=scenario.legal_bundle.bundle_id,
+        legal_bundle_hash=scenario.legal_bundle.bundle_hash,
         input_hash=input_hash,
         output_hash=_hash_payload(provisional),
         generated_at=datetime.now(timezone.utc),
@@ -291,6 +300,11 @@ def _validate_scenario(scenario: CalculationScenario) -> None:
         raise CalculationBlocked("scenario must use a non-empty [start_date, end_date) interval")
     _required(scenario.approved_by, "scenario approved_by")
     _required(scenario.approval_hash, "scenario approval_hash")
+    _required(scenario.legal_bundle.bundle_id, "legal bundle id")
+    if len(scenario.legal_bundle.bundle_hash) != 64 or any(char not in "0123456789abcdef" for char in scenario.legal_bundle.bundle_hash):
+        raise CalculationBlocked("calculation requires a SHA-256-bound approved legal bundle")
+    if not scenario.legal_bundle.approved_rule_versions:
+        raise CalculationBlocked("calculation requires at least one approved legal rule version")
     if not scenario.events:
         raise CalculationBlocked("at least one approved event is required")
     if not any(event.kind is EventKind.DISBURSEMENT for event in scenario.events):
@@ -323,6 +337,8 @@ def _validate_scenario(scenario: CalculationScenario) -> None:
     for segment in ordered_segments:
         _required(segment.segment_id, "segment_id")
         _required(segment.source_rule_version, "source_rule_version")
+        if segment.source_rule_version not in scenario.legal_bundle.approved_rule_versions:
+            raise CalculationBlocked("rule segment version is not included in the approved legal bundle")
         _required(segment.applicability_anchor, "applicability_anchor")
         _required(segment.approved_by, "segment approved_by")
         _required(segment.approval_hash, "segment approval_hash")
