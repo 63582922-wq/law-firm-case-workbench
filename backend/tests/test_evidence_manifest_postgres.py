@@ -38,6 +38,7 @@ class FakeEvidenceConnection:
         annotations: list[dict] | None = None,
         manifest_row: dict | None = None,
         derivative_row: dict | None = None,
+        verified_locator_row: dict | None = None,
     ) -> None:
         self.permitted = permitted
         self.prior_receipt = prior_receipt
@@ -48,6 +49,7 @@ class FakeEvidenceConnection:
         self.annotations = annotations or []
         self.manifest_row = manifest_row
         self.derivative_row = derivative_row
+        self.verified_locator_row = verified_locator_row
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -61,6 +63,8 @@ class FakeEvidenceConnection:
             )
         if "SELECT m.version," in normalized:
             return FakeResult(row={"version": 1, "permitted": self.permitted})
+        if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"):
+            return FakeResult(row={"permitted": 1} if self.permitted else None)
         if normalized.startswith("SELECT 1 FROM evidence_original_files"):
             return FakeResult(row={"exists": 1})
         if normalized.startswith("SELECT 1 FROM evidence_pages"):
@@ -84,6 +88,8 @@ class FakeEvidenceConnection:
             return FakeResult(row=self.manifest_row)
         if "SELECT derivative.status, derivative.manifest_id" in normalized:
             return FakeResult(row=self.derivative_row)
+        if "SELECT derivative.derivative_id, derivative.manifest_id" in normalized:
+            return FakeResult(row=self.verified_locator_row)
         if "UPDATE matters SET version = version + 1" in normalized:
             return FakeResult(row={"version": 2})
         return FakeResult()
@@ -402,6 +408,37 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("SET status = 'VERIFIED', verification_hash", sql)
         self.assertIn("verified_at = now()", sql)
+
+    def test_verified_derivative_locator_is_server_only_current_and_matter_scoped(self) -> None:
+        derivative_id = str(uuid4())
+        manifest_id = str(uuid4())
+        artifact_hash = "5" * 64
+        object_key = f"{artifact_hash[:2]}/{artifact_hash[2:4]}/{artifact_hash}.lca"
+        connection = FakeEvidenceConnection(
+            verified_locator_row={
+                "derivative_id": derivative_id,
+                "manifest_id": manifest_id,
+                "artifact_type": "RELATED_PAGES_PDF",
+                "storage_object_key": object_key,
+                "artifact_sha256": artifact_hash,
+                "page_count": 2,
+                "status": "VERIFIED",
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            locator = self.store.get_verified_derivative_locator(
+                matter_id=self.matter_id,
+                derivative_id=derivative_id,
+                actor=self.actor,
+            )
+        self.assertEqual(locator.object_key, object_key)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("derivative.status = 'VERIFIED'", sql)
+        self.assertIn("manifest.status = 'LOCKED'", sql)
+        self.assertNotIn(object_key, repr(locator))
 
 
 if __name__ == "__main__":

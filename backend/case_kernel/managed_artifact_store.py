@@ -17,6 +17,8 @@ from uuid import uuid4
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from .artifact_key_provider import ArtifactKeyProvider, MANAGED_ARTIFACT_KEY_PURPOSE
+
 
 MAGIC = b"LCWART1\x00"
 NONCE_BYTES = 12
@@ -62,6 +64,22 @@ class LocalEncryptedArtifactStore:
         self._key_id = key_id.strip()
         self._key = bytes(encryption_key)
         self._max_plaintext_bytes = max_plaintext_bytes
+
+    @classmethod
+    def from_key_provider(
+        cls,
+        managed_root: str | Path,
+        *,
+        key_provider: ArtifactKeyProvider,
+        max_plaintext_bytes: int = 256 * 1024 * 1024,
+    ) -> "LocalEncryptedArtifactStore":
+        material = key_provider.get_key(purpose=MANAGED_ARTIFACT_KEY_PURPOSE)
+        return cls(
+            managed_root,
+            key_id=material.key_id,
+            encryption_key=material.key_bytes,
+            max_plaintext_bytes=max_plaintext_bytes,
+        )
 
     @property
     def managed_root(self) -> Path:

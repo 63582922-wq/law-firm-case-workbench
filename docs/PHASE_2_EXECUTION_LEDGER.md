@@ -10,7 +10,7 @@
 | 审计、乐观并发与幂等 | 已完成内存语义 | 创建/推进/审批/锁定/失效均带版本与案件范围幂等；审计事件可查询 | 持久审计、不可篡改存储、请求追踪和服务端身份认证 |
 | 唯一提交版与上游失效 | 已完成内存语义 | 锁定要求当前文本哈希批准；上游变化使当前包 `STALE` 并清空指针 | 文书/计算依赖图、数据库原子事务、导出权限与再认证 |
 | 合成证据页处理 | 已通过并关闭 | `labs/evidence_pipeline/`；简体中文夹具 4/4 检查及视觉复核 | 并入正式 Worker 后补充 OCR、版面、性能和金标准回归 |
-| 证据 Manifest、页级处置与红框谱系 | 已完成正式派生链合成实现第一段 | `case_kernel/evidence_manifest.py`、`evidence_manifest_postgres.py`、`evidence_derivative_worker.py`、`evidence_derivative_coordinator.py`：原件/来源页不可变、逐页处置、重复规范页、红框坐标、零未审页锁定、最小 PDF 派生、144 DPI 渲染核验、可恢复登记/验证和上游失效；本机受管对象库以 AES-256-GCM 加密并按内容哈希寻址；独立 UUID API 和中文证据页显示派生状态；`ADR-0006` | OS 密钥库、原件安全预览、前端写审批绑定、旋转/裁切页显式变换、真实大文件性能、跨分辨率回归和律师验收；未在专用 PostgreSQL 实库执行迁移 |
+| 证据 Manifest、页级处置与红框谱系 | 已完成正式派生链合成实现第二段 | `case_kernel/evidence_manifest.py`、`evidence_manifest_postgres.py`、`evidence_derivative_worker.py`、`evidence_derivative_coordinator.py`：原件/来源页不可变、逐页处置、重复规范页、红框坐标、零未审页锁定、最小 PDF 派生、主动内容剥离、144 DPI 渲染核验、可恢复登记/验证和上游失效；本机对象库以 AES-256-GCM 加密并按内容哈希寻址；macOS Keychain 只读取钥；派生件由 OS 会话、案件与派生件绑定的一次性短时 Bearer 在 loopback 读取，前端核对哈希后以内存 Blob 预览；`ADR-0006`、`ADR-0007` | Keychain 初始化/轮换/恢复 UI、原件安全图像预览、前端版本化写审批、旋转/裁切页显式变换、真实大文件性能、跨分辨率回归和律师验收；未在专用 PostgreSQL 实库执行迁移 |
 | 本地案卷文件夹连接器 | 已完成只读基础 | `case_kernel/local_case_folder.py`；文件哈希、容量上限、确认指纹、不写原件、不跟随符号链接；3 项合成检查通过 | OS 文件授权、受管加密索引、增量扫描、原件/派生件持久化和真实安全验收 |
 | 公开研究与法源来源注册 | 已完成种子与网关第一段 | `knowledge/SEED_SOURCE_REGISTRY.md`；`case_kernel/research_gateway.py` 阻断敏感检索词、限定 HTTPS 域名、要求律师显式授权、绑定请求/响应哈希；3 项合成检查通过 | 实际获取适配器、内容快照存储、许可登记、时态规则卡、角色化批准与真实安全验收；不得用来源种子替代个案研究 |
 | 确定性利息与冲抵计算 | 已完成合成计算预览第三段 | `case_kernel/calculation_engine.py`：Decimal、半开期间、连续规则段、同日顺序、CNY 阻断、每期间分币舍入、明确冲抵和独立日步进复算；新增付款应用指令 `BY_POLICY` / `INTEREST_ONLY` / `PRINCIPAL_ONLY`，后两种不再把余额静默冲抵另一类别；每个规则段还须来自服务端登记的已批准 `CaseLegalBundle`，未知或不包含的版本均阻断 | 规则卡与 `CaseLegalBundle` 持久化、情景版本/失效关系、金标准与属性测试、正式计算运行保存 |
@@ -34,4 +34,4 @@
 
 ## 下一目标
 
-补齐证据派生链的桌面边界：OS Keychain 密钥提供器、受认证的本机文件读取授权、加密对象的短时预览与下载、Worker 任务恢复状态和前端版本化审批；随后把同样的显式数据源与失效语义扩展到利息正式计算。没有专用 `_test` 数据库和真实身份基础设施时继续使用合成夹具验证，但不把它描述为 PostgreSQL 实库、真实登录或真实案卷验收。
+继续补齐证据派生链的可恢复 Worker 状态和前端版本化审批；随后把同样的显式数据源、规则包审批与失效语义扩展到利息正式计算。Keychain 初始化/轮换、真实 OS 身份、原件安全图像预览和持久下载审计仍是桌面安装边界。没有专用 `_test` 数据库和真实身份基础设施时继续使用合成夹具验证，但不把它描述为 PostgreSQL 实库、真实登录或真实案卷验收。

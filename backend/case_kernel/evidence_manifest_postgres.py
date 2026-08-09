@@ -34,6 +34,7 @@ from .case_ledger_postgres import (
     _validate_sha256,
     _validate_uuid,
 )
+from .artifact_access import VerifiedDerivativeLocator
 from .evidence_manifest import DuplicateResolution, PageDisposition, ReviewStatus
 from .models import Actor, Role
 
@@ -1332,6 +1333,57 @@ class PostgresEvidenceManifestStore:
             "derivatives": derivatives,
         }
         return PersistentEvidenceSnapshot(snapshot_hash=_payload_hash(snapshot_payload), **snapshot_payload)
+
+    def get_verified_derivative_locator(
+        self,
+        *,
+        matter_id: str,
+        derivative_id: str,
+        actor: Actor,
+    ) -> VerifiedDerivativeLocator:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("derivative_id", derivative_id)
+        human_read_roles = self._READ_ROLES.difference({Role.SYSTEM_WORKER})
+        _require_roles(actor, human_read_roles)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=human_read_roles,
+            )
+            row = connection.execute(
+                """
+                SELECT derivative.derivative_id, derivative.manifest_id,
+                       derivative.artifact_type, derivative.storage_object_key,
+                       derivative.artifact_sha256, derivative.page_count,
+                       derivative.status
+                FROM evidence_derivative_artifacts derivative
+                JOIN evidence_manifests manifest
+                  ON manifest.manifest_id = derivative.manifest_id
+                 AND manifest.matter_id = derivative.matter_id
+                 AND manifest.firm_id = derivative.firm_id
+                WHERE derivative.derivative_id = %s
+                  AND derivative.matter_id = %s
+                  AND derivative.firm_id = %s
+                  AND derivative.status = 'VERIFIED'
+                  AND manifest.status = 'LOCKED'
+                """,
+                (derivative_id, matter_id, actor.firm_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(derivative_id)
+        return VerifiedDerivativeLocator(
+            firm_id=actor.firm_id,
+            matter_id=matter_id,
+            derivative_id=str(row["derivative_id"]),
+            manifest_id=str(row["manifest_id"]),
+            artifact_type=row["artifact_type"],
+            object_key=row["storage_object_key"],
+            artifact_sha256=row["artifact_sha256"],
+            page_count=row["page_count"],
+            status=row["status"],
+        )
 
     def _begin_or_replay(
         self,

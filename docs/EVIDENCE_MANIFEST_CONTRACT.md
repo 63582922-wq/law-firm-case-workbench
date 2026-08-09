@@ -26,7 +26,7 @@
 
 相关页 PDF 与红框 PDF 都是 Manifest 的派生件。候选件、已验证件、失效件和撤销件分开保存；已经验证的派生件失效时仍保留原验证哈希、验证人和验证时间，并另记失效时间及理由，不能通过清空历史字段掩盖曾经的批准链。
 
-正式 Worker、坐标系、渲染验证和本机加密对象库见 `docs/EVIDENCE_DERIVATIVE_WORKER_CONTRACT.md` 与 `decisions/ADR-0006-encrypted-evidence-derivatives.md`。
+正式 Worker、坐标系、渲染验证、本机加密对象库和短时读取边界见 `docs/EVIDENCE_DERIVATIVE_WORKER_CONTRACT.md`、`decisions/ADR-0006-encrypted-evidence-derivatives.md` 与 `decisions/ADR-0007-local-desktop-artifact-access.md`。
 
 ## 持久化命令边界
 

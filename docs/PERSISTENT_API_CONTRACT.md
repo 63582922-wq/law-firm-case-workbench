@@ -7,6 +7,7 @@
 - `case_api.app` 继续只服务 `alpha_*` 合成对象，不挂载任何持久化路由；
 - `case_api.persistent_app.create_persistent_app()` 未注入依赖时只返回“已禁用”健康状态，案件路由不存在；
 - 启用持久化路由必须使用 `postgres-internal-preview` 配置、受控 PostgreSQL 台账 Store 和服务端身份解析器；
+- 加密派生件访问必须与证据 Store、OS 绑定会话、Keychain 取钥和本机 loopback 同时配置；缺任一项返回 `503`，不回退公开对象路径、合成文件或环境密钥；
 - 客户端提交的姓名、角色或 `X-Actor` 等头部不形成身份，最终权限还必须由数据库内本案成员关系复核。
 
 ## 当前路由范围
@@ -16,6 +17,8 @@
 `GET /v1/matters/{matter_id}/snapshot` 在 PostgreSQL `REPEATABLE READ READ ONLY` 事务中读取案件版本、事实、诉请回应、争点、交易、付款分类/分配和重复组，并返回稳定快照哈希；这样同一响应不会把两个不同案件版本的行拼在一起。事实列表仍有独立只读路由，供局部刷新使用。
 
 `GET /v1/matters/{matter_id}/evidence-snapshot` 使用独立证据 Store 的只读重复读快照，返回原件登记、全部来源页、当前已批准页级决定、未失效标注、重复页组及当前锁定 Manifest。证据 Store 未注入时该路由返回 `503 EVIDENCE_SERVICE_UNAVAILABLE`，不得回退合成证据。
+
+派生件先通过 `/access` 取得 45—90 秒的一次性 Bearer，再通过 `Authorization` 请求头读取 `/content`；令牌、对象键和绝对路径不得进入 URL、证据快照或前端日志。读取只接受当前 `VERIFIED` 且仍属于 `LOCKED` Manifest 的记录、当前案件服务端身份和数值型 loopback 客户端；成功读取后令牌立即失效。
 
 ## 身份与请求审计
 
@@ -28,7 +31,7 @@ API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数�
 - 真实 OIDC/MFA 或桌面 OS 绑定身份；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
 - 大案件分页、按角色最小展示与字段级脱敏；
-- 速率限制、CSRF/本机 IPC 来源绑定、密钥库、迁移部署与备份恢复；
+- 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；
 - 真实安全验收和律师工作流验收。
 
 上述条件完成前，不得接入真实案件或把本 API 描述为生产可用。

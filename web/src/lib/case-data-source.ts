@@ -46,6 +46,14 @@ export type EvidenceReviewView = {
   derivatives: { derivativeId: string; artifactType: string; artifactSha256: string; pageCount: number; status: string }[];
 };
 
+export type EvidenceDerivative = EvidenceReviewView["derivatives"][number];
+
+export type EvidenceDerivativeDelivery = {
+  blob: Blob;
+  fileName: string;
+  artifactSha256: string;
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -145,6 +153,69 @@ export async function loadEvidenceReview(config: CaseDataSourceConfig = caseData
   const payload = (await response.json()) as PersistentEvidenceSnapshot | ErrorEnvelope;
   if (!response.ok || !("pages" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化证据快照不可用"));
   return mapPersistentEvidence(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function fetchEvidenceDerivative(
+  derivative: EvidenceDerivative,
+  purpose: "INLINE_PREVIEW" | "DOWNLOAD",
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceDerivativeDelivery> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以读取证据派生件。");
+  }
+  if (derivative.status !== "VERIFIED") {
+    throw new Error("该证据派生件尚未完成完整性核验。");
+  }
+  const accessResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/access`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ purpose }),
+    },
+  );
+  const accessPayload = (await accessResponse.json()) as
+    | { access_token: string; derivative_id: string; expires_at: string }
+    | ErrorEnvelope;
+  if (!accessResponse.ok || !("access_token" in accessPayload)) {
+    throw new Error(errorMessage(accessPayload as ErrorEnvelope, "无法取得证据派生件的短时读取许可"));
+  }
+  if (accessPayload.derivative_id !== derivative.derivativeId) {
+    throw new Error("证据派生件读取许可与当前记录不一致，已停止读取。");
+  }
+  const contentResponse = await fetch(
+    `${config.apiBase}/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/content`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/pdf", Authorization: `Bearer ${accessPayload.access_token}` },
+      cache: "no-store",
+    },
+  );
+  if (!contentResponse.ok) {
+    const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new Error(errorMessage(payload, "证据派生件读取失败"));
+  }
+  if (contentResponse.headers.get("Content-Type")?.split(";", 1)[0] !== "application/pdf") {
+    throw new Error("证据派生件返回了非 PDF 内容，已停止读取。");
+  }
+  const returnedHash = contentResponse.headers.get("X-Artifact-SHA256");
+  if (returnedHash !== derivative.artifactSha256) {
+    throw new Error("证据派生件的服务端哈希与当前快照不一致，已停止读取。");
+  }
+  const contentLength = Number(contentResponse.headers.get("Content-Length") || "0");
+  if (contentLength > 256 * 1024 * 1024) {
+    throw new Error("证据派生件超过本机预览的大小上限。");
+  }
+  const blob = await contentResponse.blob();
+  if (blob.size < 1 || blob.size > 256 * 1024 * 1024) {
+    throw new Error("证据派生件为空或超过本机预览的大小上限。");
+  }
+  return {
+    blob,
+    fileName: derivative.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "related-pages-red-box.pdf" : "related-pages.pdf",
+    artifactSha256: returnedHash,
+  };
 }
 
 export async function confirmSyntheticFact(factId: string): Promise<CaseReviewView> {

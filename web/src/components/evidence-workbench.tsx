@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   caseDataSourceConfig,
+  fetchEvidenceDerivative,
   loadEvidenceReview,
+  type EvidenceDerivative,
   type EvidenceReviewPage,
   type EvidenceReviewView,
 } from "@/lib/case-data-source";
@@ -29,6 +31,15 @@ export function EvidenceWorkbench() {
   );
   const [duplicateDecision, setDuplicateDecision] = useState<DuplicateDecision>("pending");
   const [auditNotice, setAuditNotice] = useState("尚未记录新的合成审计决定。");
+  const [artifactNotice, setArtifactNotice] = useState<string | null>(null);
+  const [artifactBusy, setArtifactBusy] = useState<string | null>(null);
+  const [artifactPreview, setArtifactPreview] = useState<{ url: string; label: string; sha256: string } | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (artifactPreview) URL.revokeObjectURL(artifactPreview.url);
+    };
+  }, [artifactPreview]);
 
   useEffect(() => {
     let active = true;
@@ -82,6 +93,38 @@ export function EvidenceWorkbench() {
     setAuditNotice(`已记录合成界面动作：${action}。原始页未删除；持久化模式必须通过版本化 API 审批。`);
   }
 
+  async function readDerivative(derivative: EvidenceDerivative, purpose: "INLINE_PREVIEW" | "DOWNLOAD") {
+    setArtifactBusy(`${derivative.derivativeId}:${purpose}`);
+    setArtifactNotice(null);
+    try {
+      const delivery = await fetchEvidenceDerivative(derivative, purpose);
+      if (purpose === "DOWNLOAD") {
+        const url = URL.createObjectURL(delivery.blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = delivery.fileName;
+        anchor.click();
+        URL.revokeObjectURL(url);
+        setArtifactNotice(`已下载经核验派生件：${delivery.fileName}`);
+      } else {
+        const url = URL.createObjectURL(delivery.blob);
+        setArtifactPreview((prior) => {
+          if (prior) URL.revokeObjectURL(prior.url);
+          return {
+            url,
+            label: derivative.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "红框相关页" : "相关页",
+            sha256: delivery.artifactSha256,
+          };
+        });
+        setArtifactNotice("派生件仅在本页内存中短时预览；关闭后释放，不写回原件文件夹。");
+      }
+    } catch (reason: unknown) {
+      setArtifactNotice(reason instanceof Error ? reason.message : "证据派生件读取失败");
+    } finally {
+      setArtifactBusy(null);
+    }
+  }
+
   return (
     <section className={styles.evidenceArea} aria-label="证据核验台">
       <header className={styles.evidenceHeading}>
@@ -119,7 +162,18 @@ export function EvidenceWorkbench() {
             <span>原始页定位 · 第 {selected.pageNumber} 页</span>
             <span>{review.sourceKind === "synthetic-alpha" ? "合成预览" : "对象预览待安全接入"}</span>
           </div>
-          {selected.syntheticPreview ? (
+          {artifactPreview ? (
+            <div className={styles.artifactPreview}>
+              <div className={styles.artifactPreviewHeader}>
+                <div><strong>{artifactPreview.label}</strong><small>SHA-256 {artifactPreview.sha256.slice(0, 18)}…</small></div>
+                <button type="button" onClick={() => setArtifactPreview((prior) => {
+                  if (prior) URL.revokeObjectURL(prior.url);
+                  return null;
+                })}>关闭预览</button>
+              </div>
+              <iframe src={artifactPreview.url} title={`${artifactPreview.label} PDF 预览`} sandbox="" />
+            </div>
+          ) : selected.syntheticPreview ? (
             <div className={styles.documentPaper} aria-label={`合成交易记录第 ${selected.pageNumber} 页`}>
               <div className={styles.documentBrand}>微信支付 <small>合成示例</small></div>
               <div className={styles.documentTitle}>交易明细证明</div>
@@ -185,7 +239,24 @@ export function EvidenceWorkbench() {
             <small>{review.lockedManifest ? `${review.lockedManifest.includedPages} 页纳入 / ${review.lockedManifest.excludedPages} 页排除` : `仍有 ${unresolvedCount} 页待律师处置`}</small>
             <small>派生件：{review.derivatives.length ? review.derivatives.map((item) => `${item.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "红框版" : "相关页版"} ${item.status}`).join("；") : "尚未生成"}</small>
           </div>
-          <button className={styles.disabledAction} disabled type="button">生成提交材料（正式 PDF Worker 未接入）</button>
+          {review.sourceKind === "persistent-preview" && review.derivatives.some((item) => item.status === "VERIFIED") && (
+            <div className={styles.artifactActions}>
+              {review.derivatives.filter((item) => item.status === "VERIFIED").map((item) => (
+                <div key={item.derivativeId}>
+                  <strong>{item.artifactType === "ANNOTATED_RELATED_PAGES_PDF" ? "红框相关页" : "相关页"}</strong>
+                  <span>{item.pageCount} 页 · {item.artifactSha256.slice(0, 12)}…</span>
+                  <button disabled={artifactBusy !== null} type="button" onClick={() => void readDerivative(item, "INLINE_PREVIEW")}>
+                    {artifactBusy === `${item.derivativeId}:INLINE_PREVIEW` ? "正在核验…" : "本机预览"}
+                  </button>
+                  <button disabled={artifactBusy !== null} type="button" onClick={() => void readDerivative(item, "DOWNLOAD")}>
+                    {artifactBusy === `${item.derivativeId}:DOWNLOAD` ? "正在准备…" : "下载 PDF"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {artifactNotice && <div className={styles.auditNotice} role="status">{artifactNotice}</div>}
+          {review.sourceKind === "synthetic-alpha" && <button className={styles.disabledAction} disabled type="button">生成提交材料（合成模式不生成正式文件）</button>}
         </aside>
       </div>
     </section>

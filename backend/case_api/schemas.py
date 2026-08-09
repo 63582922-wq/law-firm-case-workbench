@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
@@ -586,3 +586,15 @@ class PersistentEvidenceSnapshotResponse(BaseModel):
     duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSnapshot, ...]
     locked_manifest: PersistentEvidenceLockedManifestSnapshot | None
     derivatives: tuple[PersistentEvidenceDerivativeSnapshot, ...]
+
+
+class PersistentArtifactAccessRequest(BaseModel):
+    purpose: Literal["INLINE_PREVIEW", "DOWNLOAD"]
+
+
+class PersistentArtifactAccessResponse(BaseModel):
+    grant_id: UUID
+    derivative_id: UUID
+    purpose: Literal["INLINE_PREVIEW", "DOWNLOAD"]
+    access_token: str = Field(min_length=20, max_length=200)
+    expires_at: datetime

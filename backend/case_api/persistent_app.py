@@ -9,13 +9,17 @@ from typing import Annotated, Protocol
 from uuid import UUID
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Request, status
+from fastapi import Depends, FastAPI, Header, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 
 from case_kernel.case_ledger_postgres import (
     CaseLedgerCommandReceipt,
     CaseLedgerPersistenceBlocked,
     PostgresCaseLedgerStore,
+)
+from case_kernel.artifact_access import (
+    ArtifactAccessPurpose,
+    EphemeralArtifactAccessBroker,
 )
 from case_kernel.evidence_refs import EvidenceLink, EvidenceReferenceBlocked
 from case_kernel.evidence_manifest import PageDisposition
@@ -26,6 +30,8 @@ from case_kernel.evidence_manifest_postgres import (
 from case_kernel.errors import IdempotencyConflict, VersionConflict
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.models import Actor
+from case_kernel.local_access_grants import LocalSessionProof
+from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 from case_kernel.request_context import current_request_id, reset_request_id, set_request_id
 from case_kernel.transaction_ledger import (
@@ -44,6 +50,8 @@ from .persistent_identity import (
 )
 from .schemas import (
     CaseLedgerReceiptResponse,
+    PersistentArtifactAccessRequest,
+    PersistentArtifactAccessResponse,
     PersistentCaseSnapshotResponse,
     PersistentApprovalRequest,
     PersistentClaimCandidateRequest,
@@ -123,6 +131,8 @@ class PersistentEvidenceManifestPort(Protocol):
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot: ...
 
+    def get_verified_derivative_locator(self, *, matter_id: str, derivative_id: str, actor: Actor): ...
+
 
 class PersistentRequestBlocked(ValueError):
     pass
@@ -138,6 +148,8 @@ class PersistentApiDependencies:
     case_ledger_store: PersistentFactLedgerPort
     identity_resolver: ServerIdentityResolver
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
+    artifact_access_broker: EphemeralArtifactAccessBroker | None = None
+    artifact_store: LocalEncryptedArtifactStore | None = None
 
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
@@ -152,6 +164,10 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.evidence_manifest_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL evidence Manifest store")
+        if (self.artifact_access_broker is None) != (self.artifact_store is None):
+            raise ValueError("artifact access broker and encrypted artifact store must be configured together")
+        if self.artifact_access_broker is not None and self.evidence_manifest_store is None:
+            raise ValueError("artifact access requires the guarded evidence Manifest store")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
@@ -185,6 +201,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "mode": "postgres-internal-preview",
             "persistence": "configured-not-probed",
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
+            "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
         }
 
     if dependencies is None:
@@ -206,6 +223,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         if dependencies.evidence_manifest_store is None:
             raise PersistentEvidenceServiceUnavailable("evidence Manifest persistence is not configured")
         return dependencies.evidence_manifest_store
+
+    def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
+        if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
+            raise PersistentEvidenceServiceUnavailable("encrypted artifact access is not configured")
+        return dependencies.artifact_access_broker, dependencies.artifact_store
 
     @app.exception_handler(PersistentAuthenticationBlocked)
     async def authentication_handler(_: Request, exc: PersistentAuthenticationBlocked):
@@ -271,6 +293,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "EVIDENCE_SERVICE_UNAVAILABLE",
             "证据持久化服务尚未启用，未回退到合成数据。",
+        )
+
+    @app.exception_handler(ManagedArtifactBlocked)
+    async def managed_artifact_handler(_: Request, exc: ManagedArtifactBlocked):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ARTIFACT_INTEGRITY_BLOCKED",
+            "证据派生件完整性核验未通过，系统已停止读取。",
         )
 
     @app.get(
@@ -909,11 +940,99 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             )
         )
 
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/access",
+        response_model=PersistentArtifactAccessResponse,
+        tags=["evidence-access"],
+    )
+    async def issue_evidence_derivative_access(
+        matter_id: UUID,
+        derivative_id: UUID,
+        body: PersistentArtifactAccessRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentArtifactAccessResponse:
+        broker, _ = require_artifact_services()
+        locator = evidence_store.get_verified_derivative_locator(
+            matter_id=str(matter_id),
+            derivative_id=str(derivative_id),
+            actor=identity.actor,
+        )
+        issued = broker.issue(
+            locator=locator,
+            purpose=ArtifactAccessPurpose(body.purpose),
+            actor=identity.actor,
+            session=_local_session(identity),
+        )
+        return PersistentArtifactAccessResponse(
+            grant_id=issued.grant_id,
+            derivative_id=issued.derivative_id,
+            purpose=issued.purpose.value,
+            access_token=issued.access_token,
+            expires_at=issued.expires_at,
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/content",
+        response_class=Response,
+        tags=["evidence-access"],
+    )
+    async def deliver_evidence_derivative(
+        matter_id: UUID,
+        derivative_id: UUID,
+        request: Request,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        broker, artifact_store = require_artifact_services()
+        access_token = _bearer_token(authorization)
+        if request.client is None:
+            raise PersistentRequestBlocked("local client address is unavailable")
+        delivery = broker.deliver(
+            access_token=access_token,
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            derivative_id=str(derivative_id),
+            session=_local_session(identity),
+            client_ip=request.client.host,
+            artifact_store=artifact_store,
+        )
+        disposition = "inline" if delivery.purpose is ArtifactAccessPurpose.INLINE_PREVIEW else "attachment"
+        return Response(
+            content=delivery.content,
+            media_type=delivery.media_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Content-Disposition": f'{disposition}; filename="{delivery.file_name}"',
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-SHA256": delivery.artifact_sha256,
+            },
+        )
+
     return app
 
 
 def _receipt(receipt: CaseLedgerCommandReceipt) -> CaseLedgerReceiptResponse:
     return CaseLedgerReceiptResponse(**receipt.__dict__)
+
+
+def _local_session(identity: ServerIdentityContext) -> LocalSessionProof:
+    return LocalSessionProof(
+        session_id=identity.session_id,
+        authentication_method=identity.authentication_method.value,
+        authenticated_at=identity.authenticated_at,
+        expires_at=identity.expires_at,
+    )
+
+
+def _bearer_token(value: str | None) -> str:
+    if value is None or not value.startswith("Bearer "):
+        raise PersistentRequestBlocked("artifact delivery requires a bearer token")
+    token = value.removeprefix("Bearer ").strip()
+    if not token:
+        raise PersistentRequestBlocked("artifact delivery requires a bearer token")
+    return token
 
 
 def _evidence_links(items) -> tuple[EvidenceLink, ...]:

@@ -23,6 +23,7 @@ from uuid import UUID
 
 from PIL import Image, ImageChops
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import NameObject
 from reportlab.pdfgen import canvas
 
 from .local_case_folder import root_fingerprint
@@ -153,8 +154,8 @@ def build_evidence_derivatives(
                 raise EvidenceDerivativeBlocked("Manifest page number exceeds the registered source PDF")
             source_page = reader.pages[entry.source_page_number - 1]
             _validate_page_geometry(source_page)
-            related_writer.add_page(deepcopy(source_page))
-            annotated_writer.add_page(deepcopy(source_page))
+            related_writer.add_page(_sanitized_page_copy(source_page))
+            annotated_writer.add_page(_sanitized_page_copy(source_page))
             target_page = annotated_writer.pages[-1]
             overlay_path = temporary_path / f"overlay-{entry.derivative_sequence}.pdf"
             _write_annotation_overlay(
@@ -341,6 +342,13 @@ def _validate_page_geometry(page: Any) -> None:
         raise EvidenceDerivativeBlocked("source PDF page dimensions must be positive")
 
 
+def _sanitized_page_copy(page: Any) -> Any:
+    sanitized = deepcopy(page)
+    for key in ("/AA", "/Annots", "/B", "/Dur", "/PresSteps", "/Trans"):
+        sanitized.pop(NameObject(key), None)
+    return sanitized
+
+
 def _write_annotation_overlay(
     destination: Path,
     *,
@@ -392,6 +400,13 @@ def _inspect_artifact(artifact_type: str, path: Path, expected_pages: int) -> De
         raise EvidenceDerivativeBlocked("generated derivative unexpectedly became encrypted")
     if len(reader.pages) != expected_pages:
         raise EvidenceDerivativeBlocked("generated derivative page count differs from the locked Manifest")
+    forbidden_catalog_keys = {"/AA", "/AcroForm", "/Collection", "/Names", "/OpenAction"}
+    if forbidden_catalog_keys.intersection(str(key) for key in reader.root_object.keys()):
+        raise EvidenceDerivativeBlocked("generated derivative contains an active document catalog entry")
+    forbidden_page_keys = {"/AA", "/Annots", "/B", "/Dur", "/PresSteps", "/Trans"}
+    for page in reader.pages:
+        if forbidden_page_keys.intersection(str(key) for key in page.keys()):
+            raise EvidenceDerivativeBlocked("generated derivative contains an active page entry")
     return DerivativeArtifact(
         artifact_type=artifact_type,
         path=path,

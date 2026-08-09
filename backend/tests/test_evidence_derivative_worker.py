@@ -8,6 +8,7 @@ from uuid import uuid4
 import unittest
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DictionaryObject, NameObject, TextStringObject
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
@@ -125,6 +126,51 @@ class EvidenceDerivativeWorkerTests(unittest.TestCase):
         self.assertEqual(repeated.related_pages.sha256, result.related_pages.sha256)
         self.assertEqual(repeated.annotated_pages.sha256, result.annotated_pages.sha256)
         self.assertEqual(repeated.lineage_sha256, result.lineage_sha256)
+
+    def test_source_page_actions_and_annotations_are_not_copied_to_derivatives(self) -> None:
+        reader = PdfReader(str(self.source))
+        writer = PdfWriter()
+        for source_page in reader.pages:
+            writer.add_page(source_page)
+        javascript = DictionaryObject(
+            {
+                NameObject("/S"): NameObject("/JavaScript"),
+                NameObject("/JS"): TextStringObject("app.alert('synthetic')"),
+            }
+        )
+        writer.pages[0][NameObject("/AA")] = DictionaryObject({NameObject("/O"): javascript})
+        writer.pages[0][NameObject("/Annots")] = ArrayObject(
+            [
+                DictionaryObject(
+                    {
+                        NameObject("/Type"): NameObject("/Annot"),
+                        NameObject("/Subtype"): NameObject("/Link"),
+                        NameObject("/A"): javascript,
+                    }
+                )
+            ]
+        )
+        with self.source.open("wb") as stream:
+            writer.write(stream)
+        binding = SourcePdfBinding(
+            evidence_file_id=self.file_id,
+            relative_path="synthetic-source.pdf",
+            expected_sha256=file_hash(self.source),
+            expected_page_count=3,
+        )
+        result = build_evidence_derivatives(
+            self.manifest,
+            (binding,),
+            case_root=self.case_root,
+            confirmed_case_root_fingerprint=root_fingerprint(self.case_root),
+            output_directory=self.root / "sanitized-output",
+        )
+        for derivative_path in (result.related_pages.path, result.annotated_pages.path):
+            derivative = PdfReader(str(derivative_path))
+            self.assertNotIn("/Names", derivative.root_object)
+            self.assertNotIn("/OpenAction", derivative.root_object)
+            self.assertNotIn("/AA", derivative.pages[0])
+            self.assertNotIn("/Annots", derivative.pages[0])
 
     def test_unlocked_or_noncontiguous_manifest_is_rejected_before_output(self) -> None:
         unlocked = LockedDerivativeManifest(

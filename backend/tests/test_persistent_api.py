@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID, uuid4
 import unittest
 
@@ -8,10 +11,12 @@ from fastapi.testclient import TestClient
 
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_api.persistent_identity import AuthenticationMethod, ServerIdentityContext
+from case_kernel.artifact_access import EphemeralArtifactAccessBroker, VerifiedDerivativeLocator
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
 from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
+from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 
 
@@ -101,8 +106,9 @@ class FakePersistentFactStore:
 class FakePersistentEvidenceStore:
     persistent_test_double = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, locator: VerifiedDerivativeLocator | None = None) -> None:
         self.calls: list[tuple[str, dict]] = []
+        self.locator = locator
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor):
         self.calls.append(("snapshot", {"matter_id": matter_id, "actor": actor}))
@@ -128,6 +134,17 @@ class FakePersistentEvidenceStore:
             object_type="EVIDENCE_PAGE_DECISION",
             object_id=str(uuid4()),
         )
+
+    def get_verified_derivative_locator(self, *, matter_id: str, derivative_id: str, actor: Actor):
+        self.calls.append(
+            (
+                "verified_locator",
+                {"matter_id": matter_id, "derivative_id": derivative_id, "actor": actor},
+            )
+        )
+        if self.locator is None or self.locator.derivative_id != derivative_id:
+            raise KeyError(derivative_id)
+        return self.locator
 
 
 class PersistentApiTests(unittest.TestCase):
@@ -340,6 +357,73 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(call["actor"], self.identity.actor)
         self.assertEqual(call["evidence_page_id"], page_id)
         self.assertEqual(call["disposition"].value, "INCLUDE")
+
+    def test_verified_derivative_uses_short_lived_bearer_and_one_time_loopback_delivery(self) -> None:
+        with TemporaryDirectory(prefix="persistent-artifact-api-test-") as temporary:
+            root = Path(temporary)
+            case_root = root / "case"
+            case_root.mkdir()
+            source = root / "verified.pdf"
+            content = b"%PDF-1.4\nSYNTHETIC API ARTIFACT\n%%EOF\n"
+            source.write_bytes(content)
+            artifact_hash = sha256(content).hexdigest()
+            artifact_store = LocalEncryptedArtifactStore(
+                root / "managed",
+                key_id="synthetic-api-key-v1",
+                encryption_key=b"k" * 32,
+            )
+            stored = artifact_store.put_file(
+                source,
+                expected_sha256=artifact_hash,
+                case_root=case_root,
+            )
+            derivative_id = str(uuid4())
+            locator = VerifiedDerivativeLocator(
+                firm_id=self.firm_id,
+                matter_id=self.matter_id,
+                derivative_id=derivative_id,
+                manifest_id=str(uuid4()),
+                artifact_type="ANNOTATED_RELATED_PAGES_PDF",
+                object_key=stored.object_key,
+                artifact_sha256=artifact_hash,
+                page_count=1,
+                status="VERIFIED",
+            )
+            evidence_store = FakePersistentEvidenceStore(locator=locator)
+            client = TestClient(
+                create_persistent_app(
+                    PersistentApiDependencies(
+                        settings=self.settings,
+                        case_ledger_store=FakePersistentFactStore(),
+                        identity_resolver=StaticIdentityResolver(self.identity),
+                        evidence_manifest_store=evidence_store,
+                        artifact_access_broker=EphemeralArtifactAccessBroker(),
+                        artifact_store=artifact_store,
+                    )
+                ),
+                client=("127.0.0.1", 51000),
+            )
+            issued = client.post(
+                f"/v1/matters/{self.matter_id}/evidence-derivatives/{derivative_id}/access",
+                json={"purpose": "INLINE_PREVIEW"},
+            )
+            self.assertEqual(issued.status_code, 200, issued.text)
+            token = issued.json()["access_token"]
+            delivered = client.get(
+                f"/v1/matters/{self.matter_id}/evidence-derivatives/{derivative_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(delivered.status_code, 200, delivered.text)
+            self.assertEqual(delivered.content, content)
+            self.assertEqual(delivered.headers["cache-control"], "no-store, private")
+            self.assertEqual(delivered.headers["x-artifact-sha256"], artifact_hash)
+            self.assertIn("inline", delivered.headers["content-disposition"])
+            replay = client.get(
+                f"/v1/matters/{self.matter_id}/evidence-derivatives/{derivative_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(replay.status_code, 403)
+            self.assertEqual(replay.json()["code"], "PERMISSION_DENIED")
 
 
 if __name__ == "__main__":
