@@ -4,14 +4,17 @@ import { useEffect, useState } from "react";
 import {
   activateDesktopEnrollment,
   disableLocalEnrollment,
+  configureDesktopModelProviderKey,
   importSignedEnrollmentPackage,
   initializeDesktopInstallation,
+  readDesktopModelProviderStatuses,
   readDesktopEnrollmentVaultStatus,
+  removeDesktopModelProviderKey,
   renewDesktopEnrollment,
   resolvePendingDesktopEnrollment,
   revokeDesktopEnrollment,
 } from "@/lib/desktop-bridge";
-import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import type { DesktopEnrollmentVaultStatus, DesktopModelProviderStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { AgentCapabilities } from "@/components/agent-capabilities";
 import { AgentExecutionAudit } from "@/components/agent-execution-audit";
 import { ExternalRequestAudit } from "@/components/external-request-audit";
@@ -23,7 +26,10 @@ export function IdentitySecurityWorkbench({
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
   const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
+  const [modelProviderStatuses, setModelProviderStatuses] = useState<DesktopModelProviderStatus[] | null>(null);
   const [vaultBusy, setVaultBusy] = useState<"initialize" | "activate" | "import" | "renew" | "revoke" | "resolve" | "disable" | null>(null);
+  const [modelProviderBusy, setModelProviderBusy] = useState<DesktopModelProviderStatus["providerId"] | null>(null);
+  const [modelProviderMessage, setModelProviderMessage] = useState<string | null>(null);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
   const [revokeArmed, setRevokeArmed] = useState(false);
@@ -57,6 +63,50 @@ export function IdentitySecurityWorkbench({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refreshModelProviders() {
+      try {
+        const statuses = await readDesktopModelProviderStatuses();
+        if (!cancelled) setModelProviderStatuses(statuses);
+      } catch {
+        if (!cancelled) setModelProviderStatuses([]);
+      }
+    }
+    void refreshModelProviders();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function configureModelProvider(providerId: DesktopModelProviderStatus["providerId"]) {
+    setModelProviderBusy(providerId);
+    setModelProviderMessage(null);
+    try {
+      const status = await configureDesktopModelProviderKey(providerId);
+      setModelProviderStatuses((current) => replaceModelProviderStatus(current, status));
+      setModelProviderMessage(`${status.displayName} 的 API Key 已保存到 macOS Keychain。密钥没有进入页面、案卷数据库或审计记录。`);
+    } catch (error) {
+      setModelProviderMessage(readableError(error, "API Key 未保存。"));
+    } finally {
+      setModelProviderBusy(null);
+    }
+  }
+
+  async function removeModelProvider(providerId: DesktopModelProviderStatus["providerId"]) {
+    setModelProviderBusy(providerId);
+    setModelProviderMessage(null);
+    try {
+      const status = await removeDesktopModelProviderKey(providerId);
+      setModelProviderStatuses((current) => replaceModelProviderStatus(current, status));
+      setModelProviderMessage(`${status.displayName} 的 API Key 已从 macOS Keychain 移除。`);
+    } catch (error) {
+      setModelProviderMessage(readableError(error, "API Key 未移除。"));
+    } finally {
+      setModelProviderBusy(null);
+    }
+  }
 
   async function initializeVault() {
     setVaultBusy("initialize");
@@ -258,6 +308,35 @@ export function IdentitySecurityWorkbench({
 
       <AgentCapabilities />
       <AgentExecutionAudit />
+      <section className={styles.modelProviderSettings} aria-labelledby="model-provider-settings-title">
+        <div className={styles.modelProviderSettingsHeading}>
+          <div>
+            <p className={styles.eyebrow}>模型与外部服务</p>
+            <h3 id="model-provider-settings-title">在桌面端配置模型 API Key</h3>
+            <p>密钥只进入 macOS 原生安全输入框并保存在系统钥匙串。配置不等于允许发送案卷：每一次外部调用仍必须逐案取得律师确认并留下审计记录。</p>
+          </div>
+          <span>{modelProviderStatuses === null ? "正在读取本机状态" : "仅显示配置状态"}</span>
+        </div>
+        <div className={styles.modelProviderList}>
+          <ModelProviderRow
+            provider={modelProviderStatuses?.find((item) => item.providerId === "deepseek")}
+            fallbackName="DeepSeek（文本与推理）"
+            note="用于法规检索、事实梳理、争点分析与文书草拟；不会自动上传案卷。"
+            busy={modelProviderBusy === "deepseek"}
+            onConfigure={() => void configureModelProvider("deepseek")}
+            onRemove={() => void removeModelProvider("deepseek")}
+          />
+          <ModelProviderRow
+            provider={modelProviderStatuses?.find((item) => item.providerId === "qwen")}
+            fallbackName="Qwen（视觉、OCR 与版面解析）"
+            note="用于扫描件、图片、表格和 PDF 页面的视觉识别；不会自动上传案卷。"
+            busy={modelProviderBusy === "qwen"}
+            onConfigure={() => void configureModelProvider("qwen")}
+            onRemove={() => void removeModelProvider("qwen")}
+          />
+        </div>
+        {modelProviderMessage ? <p className={styles.modelProviderMessage} role="status">{modelProviderMessage}</p> : null}
+      </section>
       <ExternalRequestAudit />
 
       <section className={styles.securityActions} aria-labelledby="security-actions-title">
@@ -338,10 +417,52 @@ export function IdentitySecurityWorkbench({
       </section>
 
       <div className={styles.securityNotice} role="status">
-        <strong>不需要你提供模型 API Key</strong>
-        <span>当前缺的是律所运营方的生产信任根和签发服务，不是普通用户的 OpenAI API Key。在线激活码只进入 macOS 原生密码框；离线登记包只由系统文件选择器读取。两条路径都必须先受信验签，再按当前 Keychain 状态原子写入。</span>
+        <strong>模型密钥与律所身份分开管理</strong>
+        <span>模型 API Key 只决定可使用哪些外部模型，不能取得律师身份、案件权限或绕开外发确认。律所登记仍由受信签发链和本机 Keychain 单独控制。</span>
       </div>
     </section>
+  );
+}
+
+function replaceModelProviderStatus(
+  current: DesktopModelProviderStatus[] | null,
+  next: DesktopModelProviderStatus,
+): DesktopModelProviderStatus[] {
+  const known = current ?? [];
+  const withoutNext = known.filter((item) => item.providerId !== next.providerId);
+  return [...withoutNext, next];
+}
+
+function ModelProviderRow({
+  provider,
+  fallbackName,
+  note,
+  busy,
+  onConfigure,
+  onRemove,
+}: {
+  provider: DesktopModelProviderStatus | undefined;
+  fallbackName: string;
+  note: string;
+  busy: boolean;
+  onConfigure: () => void;
+  onRemove: () => void;
+}) {
+  const configured = provider?.configured === true;
+  return (
+    <article>
+      <div>
+        <strong>{provider?.displayName ?? fallbackName}</strong>
+        <small>{note}</small>
+      </div>
+      <em className={configured ? styles.modelProviderReady : styles.modelProviderMissing}>{configured ? "已在本机配置" : "未配置"}</em>
+      <div className={styles.modelProviderActions}>
+        <button disabled={busy} onClick={onConfigure} type="button">
+          {busy ? "正在打开安全输入框…" : configured ? "更换 API Key" : "配置 API Key"}
+        </button>
+        {configured ? <button className={styles.modelProviderRemove} disabled={busy} onClick={onRemove} type="button">移除</button> : null}
+      </div>
+    </article>
   );
 }
 

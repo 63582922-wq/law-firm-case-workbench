@@ -37,6 +37,21 @@ declare global {
         installationInitialized: boolean;
         enrollmentEnvelopePresent: boolean;
       } | null>;
+      modelProviderStatuses(): Promise<Array<{
+        providerId: "deepseek" | "qwen";
+        displayName: string;
+        configured: boolean;
+      }> | null>;
+      configureModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
+        providerId: "deepseek" | "qwen";
+        displayName: string;
+        configured: boolean;
+      }>;
+      removeModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
+        providerId: "deepseek" | "qwen";
+        displayName: string;
+        configured: boolean;
+      }>;
       initializeInstallation(): Promise<{
         phase: string;
         message: string;

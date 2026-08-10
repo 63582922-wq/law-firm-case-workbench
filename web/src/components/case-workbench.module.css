@@ -442,6 +442,24 @@
 .securityActionMessage { grid-column: 1 / -1; padding-top: 10px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
 .securityNotice { margin-top: 18px; padding: 14px 16px; display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
 .securityNotice strong { color: var(--red); }
+.modelProviderSettings { margin-top: 18px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.modelProviderSettingsHeading { min-height: 91px; padding: 16px 17px; display: flex; align-items: end; justify-content: space-between; gap: 22px; border-bottom: 1px solid var(--line); }
+.modelProviderSettingsHeading h3 { margin: 5px 0 7px; font: 600 18px var(--font-serif); }
+.modelProviderSettingsHeading p:not(.eyebrow) { max-width: 710px; color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.modelProviderSettingsHeading > span { flex: 0 0 auto; color: var(--ink-faint); font-size: 9px; }
+.modelProviderList { display: grid; }
+.modelProviderList article { min-height: 76px; padding: 12px 17px; display: grid; grid-template-columns: minmax(230px, 1.45fr) 108px minmax(190px, .85fr); gap: 16px; align-items: center; border-top: 1px solid var(--line); }
+.modelProviderList article:first-child { border-top: 0; }
+.modelProviderList article > div:first-child { min-width: 0; display: grid; gap: 5px; }
+.modelProviderList strong { font-size: 11px; }
+.modelProviderList small { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.modelProviderReady, .modelProviderMissing { width: max-content; padding: 4px 5px; border: 1px solid #a8c4b1; color: var(--green); background: var(--green-soft); font-size: 9px; font-style: normal; }
+.modelProviderMissing { border-color: #d5b079; color: #825a15; background: #fff8df; }
+.modelProviderActions { display: flex; justify-content: end; gap: 7px; }
+.modelProviderActions button { min-height: 32px; padding: 7px 9px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: inherit; font-size: 9px; cursor: pointer; }
+.modelProviderActions button:disabled { border-color: var(--line-strong); color: var(--ink-faint); background: var(--sheet); cursor: not-allowed; }
+.modelProviderActions .modelProviderRemove { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+.modelProviderMessage { margin: 0; padding: 10px 17px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
 .agentCapabilities { margin-top: 18px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
 .agentCapabilitiesHeading { min-height: 94px; padding: 16px 17px; display: flex; justify-content: space-between; gap: 24px; align-items: end; border-bottom: 1px solid var(--line); }
 .agentCapabilitiesHeading h3 { margin: 5px 0 7px; font: 600 18px var(--font-serif); }
@@ -506,6 +524,7 @@
   .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.officialCasePolicy { grid-template-columns: 1fr; gap: 12px; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
   .securityArea { padding-right: 20px; padding-left: 20px; }.securityColumns, .securityActions { grid-template-columns: 1fr; }
+  .modelProviderList article { grid-template-columns: minmax(0, 1fr) 100px; }.modelProviderActions { grid-column: 1 / -1; justify-content: start; }
   .agentCapabilityList article { grid-template-columns: minmax(190px, 1.3fr) 82px minmax(100px, 1fr); }.agentCapabilityList code { display: none; }
   .agentAuditSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.agentAuditList article { grid-template-columns: 28px minmax(160px, 1fr) 110px; }.agentAuditList code { display: none; }
   .externalRequestList dl { grid-template-columns: 1fr; }

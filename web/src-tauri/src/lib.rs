@@ -446,6 +446,60 @@ fn desktop_enrollment_vault_status(vault: State<'_, EnrollmentVault>) -> Enrollm
 }
 
 #[tauri::command]
+fn desktop_model_provider_statuses(
+    vault: State<'_, ModelProviderVault>,
+) -> Result<Vec<ModelProviderStatus>, String> {
+    vault.statuses()
+}
+
+#[tauri::command]
+async fn configure_desktop_model_provider_key(
+    app: AppHandle,
+    provider_id: String,
+    vault: State<'_, ModelProviderVault>,
+) -> Result<ModelProviderStatus, String> {
+    let provider = ModelProvider::parse(&provider_id)?;
+    let receiver = native_model_api_key_prompt::schedule_model_api_key_prompt(&app, provider)?;
+    let prompt_result = tauri::async_runtime::spawn_blocking(move || {
+        receiver.recv_timeout(Duration::from_secs(300))
+    })
+    .await
+    .map_err(|_| "原生 API Key 输入任务异常结束；未写入任何密钥。".to_string())?
+    .map_err(|_| "原生 API Key 输入已超时；未写入任何密钥。".to_string())?;
+    let key = prompt_result?.ok_or_else(|| "已取消 API Key 配置；未写入任何密钥。".to_string())?;
+    vault.save_key(provider, key)
+}
+
+#[tauri::command]
+async fn remove_desktop_model_provider_key(
+    app: AppHandle,
+    provider_id: String,
+    vault: State<'_, ModelProviderVault>,
+) -> Result<ModelProviderStatus, String> {
+    let provider = ModelProvider::parse(&provider_id)?;
+    let title = format!("移除 {} API Key", provider.display_name());
+    let confirmation_app = app.clone();
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        confirmation_app
+            .dialog()
+            .message("这会从本机 macOS Keychain 移除该服务商的 API Key。不会影响已生成的案卷、审计或外部请求记录。是否继续？")
+            .title(title)
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "移除密钥".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "无法显示原生移除确认框；未删除任何密钥。".to_string())?;
+    if !confirmed {
+        return Err("已取消移除 API Key；未删除任何密钥。".to_string());
+    }
+    vault.remove_key(provider)
+}
+
+#[tauri::command]
 fn initialize_desktop_installation(
     vault: State<'_, EnrollmentVault>,
     confirmation: String,
@@ -1100,6 +1154,9 @@ pub fn run() {
             desktop_runtime_status,
             desktop_session_grant,
             desktop_enrollment_vault_status,
+            desktop_model_provider_statuses,
+            configure_desktop_model_provider_key,
+            remove_desktop_model_provider_key,
             initialize_desktop_installation,
             import_signed_enrollment_package,
             activate_desktop_enrollment,
@@ -1501,6 +1558,9 @@ mod tests {
     }
 }
 mod enrollment_vault;
+mod model_provider_vault;
 mod native_activation_prompt;
+mod native_model_api_key_prompt;
 
 use enrollment_vault::{EnrollmentVault, EnrollmentVaultStatus};
+use model_provider_vault::{ModelProvider, ModelProviderStatus, ModelProviderVault};

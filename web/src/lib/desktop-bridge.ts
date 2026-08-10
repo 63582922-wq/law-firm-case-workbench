@@ -42,6 +42,12 @@ export type DesktopEnrollmentVaultStatus = {
   enrollmentEnvelopePresent: boolean;
 };
 
+export type DesktopModelProviderStatus = {
+  providerId: "deepseek" | "qwen";
+  displayName: string;
+  configured: boolean;
+};
+
 export async function readDesktopRuntimeStatus(): Promise<DesktopRuntimeStatus | null> {
   if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined) return null;
   return invoke<DesktopRuntimeStatus>("desktop_runtime_status");
@@ -50,6 +56,23 @@ export async function readDesktopRuntimeStatus(): Promise<DesktopRuntimeStatus |
 export async function readDesktopEnrollmentVaultStatus(): Promise<DesktopEnrollmentVaultStatus | null> {
   if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined) return null;
   return invoke<DesktopEnrollmentVaultStatus>("desktop_enrollment_vault_status");
+}
+
+export async function readDesktopModelProviderStatuses(): Promise<DesktopModelProviderStatus[] | null> {
+  if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined) return null;
+  return invoke<DesktopModelProviderStatus[]>("desktop_model_provider_statuses");
+}
+
+export async function configureDesktopModelProviderKey(
+  providerId: DesktopModelProviderStatus["providerId"],
+): Promise<DesktopModelProviderStatus> {
+  return invoke<DesktopModelProviderStatus>("configure_desktop_model_provider_key", { providerId });
+}
+
+export async function removeDesktopModelProviderKey(
+  providerId: DesktopModelProviderStatus["providerId"],
+): Promise<DesktopModelProviderStatus> {
+  return invoke<DesktopModelProviderStatus>("remove_desktop_model_provider_key", { providerId });
 }
 
 export async function readDesktopSessionGrant(): Promise<DesktopSessionGrant> {
@@ -97,6 +120,9 @@ export function installDesktopBridge(): void {
     runtimeStatus: readDesktopRuntimeStatus,
     sessionGrant: readDesktopSessionGrant,
     enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
+    modelProviderStatuses: readDesktopModelProviderStatuses,
+    configureModelProviderKey: configureDesktopModelProviderKey,
+    removeModelProviderKey: removeDesktopModelProviderKey,
     initializeInstallation: initializeDesktopInstallation,
     importSignedEnrollmentPackage,
     activateEnrollment: activateDesktopEnrollment,
