@@ -30,6 +30,8 @@ import {
   type LocalFolderIntakeView,
   type LocalFolderSelection,
 } from "@/lib/case-data-source";
+import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import styles from "./case-workbench.module.css";
 
 type DuplicateDecision = "pending" | "exclude" | "keep";
@@ -85,6 +87,7 @@ export function EvidenceWorkbench() {
   } | null>(null);
   const [previewedPageIds, setPreviewedPageIds] = useState<string[]>([]);
   const [originalPreviewBusy, setOriginalPreviewBusy] = useState(false);
+  const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const [draftBox, setDraftBox] = useState<DraftBox | null>(null);
   const [draftLabel, setDraftLabel] = useState("");
   const dragStart = useRef<{ x: number; y: number } | null>(null);
@@ -126,6 +129,20 @@ export function EvidenceWorkbench() {
       .catch((reason: unknown) => {
         if (!active) return;
         setError(reason instanceof Error ? reason.message : "证据快照读取失败");
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    readDesktopRuntimeStatus()
+      .then((status) => {
+        if (active) setDesktopRuntime(status);
+      })
+      .catch(() => {
+        if (active) setDesktopRuntime(null);
       });
     return () => {
       active = false;
@@ -489,7 +506,11 @@ export function EvidenceWorkbench() {
       setReview(refreshedReview);
       setFolderIntake(refreshedIntake);
       setIntakeRunConfirmed(false);
-      setIntakeNotice(`材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。处理状态会自动刷新；若本机接收服务尚未安装，任务会明确保持等待。`);
+      setIntakeNotice(
+        desktopRuntime?.evidenceIntakeWorkerPhase === "ASSEMBLED"
+          ? `材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。本机接收服务已就绪，处理状态会自动刷新。`
+          : `材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。当前机器的接收服务尚未就绪，任务会明确保持等待。`,
+      );
     } catch (reason: unknown) {
       setIntakeNotice(reason instanceof Error ? reason.message : "材料接收任务未建立");
     } finally {

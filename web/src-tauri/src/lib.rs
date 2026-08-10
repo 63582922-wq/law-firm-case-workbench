@@ -35,6 +35,7 @@ struct DesktopRuntimeStatus {
     session_phase: String,
     session_expires_at: Option<String>,
     persistence_phase: String,
+    evidence_intake_worker_phase: String,
 }
 
 struct LocalApiState {
@@ -49,6 +50,7 @@ struct LocalApiState {
     session_expires_at: Option<String>,
     desktop_access_token: Option<Zeroizing<String>>,
     persistence_phase: String,
+    evidence_intake_worker_phase: String,
     api_port: Option<u16>,
     parent_api_token: Option<Zeroizing<String>>,
     child: Option<CommandChild>,
@@ -68,6 +70,7 @@ impl Default for LocalApiState {
             session_expires_at: None,
             desktop_access_token: None,
             persistence_phase: "UNKNOWN".to_string(),
+            evidence_intake_worker_phase: "UNKNOWN".to_string(),
             api_port: None,
             parent_api_token: None,
             child: None,
@@ -184,6 +187,7 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         session_phase: state.session_phase.clone(),
         session_expires_at: state.session_expires_at.clone(),
         persistence_phase: state.persistence_phase.clone(),
+        evidence_intake_worker_phase: state.evidence_intake_worker_phase.clone(),
     }
 }
 
@@ -201,6 +205,7 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.session_expires_at = None;
         state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
+        state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()
@@ -299,6 +304,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                                 "NOT_AVAILABLE".to_string()
                             };
                             state.persistence_phase = ready.persistence;
+                            state.evidence_intake_worker_phase = ready.evidence_intake_worker;
                             state.api_port = Some(ready.port);
                             drop(state);
                             if should_exchange_session {
@@ -357,6 +363,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     state.session_expires_at = None;
                     state.desktop_access_token = None;
                     state.persistence_phase = "UNAVAILABLE".to_string();
+                    state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
                     state.api_port = None;
                     state.parent_api_token = None;
                     state.child = None;
@@ -383,6 +390,7 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.session_expires_at = None;
         state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
+        state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()

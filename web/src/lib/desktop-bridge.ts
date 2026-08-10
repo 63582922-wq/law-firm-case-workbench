@@ -16,6 +16,7 @@ export type DesktopRuntimeStatus = {
   sessionPhase: "NOT_AVAILABLE" | "STARTING" | "READY" | "EXPIRED" | "UNAVAILABLE" | "UNKNOWN";
   sessionExpiresAt: string | null;
   persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
+  evidenceIntakeWorkerPhase: "NOT_CONFIGURED" | "ASSEMBLED" | "UNAVAILABLE" | "UNKNOWN";
 };
 
 export type DesktopSessionGrant = {
