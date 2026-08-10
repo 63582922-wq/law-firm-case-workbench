@@ -12,6 +12,7 @@ import {
   revokeDesktopEnrollment,
 } from "@/lib/desktop-bridge";
 import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import { AgentCapabilities } from "@/components/agent-capabilities";
 import styles from "./case-workbench.module.css";
 
 export function IdentitySecurityWorkbench({
@@ -252,6 +253,8 @@ export function IdentitySecurityWorkbench({
           </ul>
         </aside>
       </div>
+
+      <AgentCapabilities />
 
       <section className={styles.securityActions} aria-labelledby="security-actions-title">
         <div>

@@ -287,6 +287,8 @@ reviewer / reviewed_at / status
 
 任何 Agent 都不得直接执行 Shell、读取任意磁盘位置、删除原件、上传原始案卷到互联网或绕过律师审批。模型只提出结构化 `ActionProposal`；工具执行、版本更新和审计由后端状态机完成。当前 `CaseSkillToolGateway` 只接收已经由文件夹授权层签发的 `AuthorizedOriginalFile`，拒绝路径字符串，因此 Agent 无法借由工具读取任意文件。
 
+桌面“身份与安全”页展示的技能状态不是另一份手工文案：`backend/case_kernel/agent_capability_manifest.py` 从同一 `CaseSkillRegistry` 导出最小化 JSON 清单，`web` 构建前会校验该清单未漂移。清单只包含技能名称、版本、范围、审批门和启用状态，不包含案卷、绝对路径、对象键、凭证、模型供应商或工具输入。
+
 ### 11.2 每种文档能力的上线门
 
 Word、Excel 和 PDF 编辑能力必须逐项通过以下门后才从 `GATED` 改为 `IMPLEMENTED`：

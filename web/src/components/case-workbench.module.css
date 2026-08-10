@@ -397,6 +397,20 @@
 .securityActionMessage { grid-column: 1 / -1; padding-top: 10px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
 .securityNotice { margin-top: 18px; padding: 14px 16px; display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
 .securityNotice strong { color: var(--red); }
+.agentCapabilities { margin-top: 18px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.agentCapabilitiesHeading { min-height: 94px; padding: 16px 17px; display: flex; justify-content: space-between; gap: 24px; align-items: end; border-bottom: 1px solid var(--line); }
+.agentCapabilitiesHeading h3 { margin: 5px 0 7px; font: 600 18px var(--font-serif); }
+.agentCapabilitiesHeading p:not(.eyebrow) { max-width: 680px; color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.agentCapabilitiesHeading dl { display: grid; grid-template-columns: repeat(2, minmax(88px, 1fr)); border: 1px solid var(--line); background: var(--sheet); }
+.agentCapabilitiesHeading dl div { padding: 8px 11px; display: grid; gap: 3px; border-left: 1px solid var(--line); }
+.agentCapabilitiesHeading dl div:first-child { border-left: 0; }
+.agentCapabilitiesHeading dt { color: var(--ink-faint); font-size: 9px; }.agentCapabilitiesHeading dd { font: 600 17px var(--font-serif); }
+.agentCapabilityList { display: grid; }
+.agentCapabilityList article { min-height: 54px; padding: 9px 17px; display: grid; grid-template-columns: minmax(190px, 1.5fr) 82px minmax(100px, .9fr) minmax(120px, 1fr); gap: 14px; align-items: center; border-top: 1px solid var(--line); }
+.agentCapabilityList article:first-child { border-top: 0; }
+.agentCapabilityList article > div { min-width: 0; display: grid; gap: 4px; }.agentCapabilityList strong { font-size: 11px; }.agentCapabilityList small, .agentCapabilityList > span { color: var(--ink-faint); font-size: 9px; line-height: 1.45; }.agentCapabilityList code { overflow: hidden; color: var(--ink-soft); font: 9px var(--font-sans); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.agentSkillReady, .agentSkillGated { width: max-content; padding: 4px 5px; border: 1px solid #a8c4b1; color: var(--green); background: var(--green-soft); font-size: 9px; }.agentSkillGated { border-color: #d5b079; color: #825a15; background: #fff8df; }
+.agentCapabilitiesFootnote { margin: 0; padding: 11px 17px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
 
 .intakeRunPanel { margin-top: 12px; padding: 12px; display: grid; gap: 10px; border: 1px solid #b8c7bd; background: #f3f7f3; }
 .intakeRunPanel > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
@@ -426,4 +440,5 @@
   .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.officialCasePolicy { grid-template-columns: 1fr; gap: 12px; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
   .securityArea { padding-right: 20px; padding-left: 20px; }.securityColumns, .securityActions { grid-template-columns: 1fr; }
+  .agentCapabilityList article { grid-template-columns: minmax(190px, 1.3fr) 82px minmax(100px, 1fr); }.agentCapabilityList code { display: none; }
 }

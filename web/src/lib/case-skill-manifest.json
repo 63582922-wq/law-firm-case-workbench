@@ -1,0 +1,184 @@
+{
+  "schema_version": "case-agent-capabilities-v1",
+  "skills": [
+    {
+      "allowed_tools": [
+        "create_reviewable_docx_draft",
+        "create_pdf_derivative"
+      ],
+      "approval_gate": "LAWYER_REVIEW",
+      "maturity": "GATED",
+      "output_kind": "DraftDocument",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "MANAGED_DERIVATIVE_WRITE"
+      ],
+      "skill_id": "document_drafting",
+      "title": "答辩状和说明文书草拟",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "normalize_image_or_text_pdf",
+        "render_registered_page"
+      ],
+      "approval_gate": "MATERIAL_SCOPE",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "NormalizedEvidencePdf",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ",
+        "MANAGED_DERIVATIVE_WRITE"
+      ],
+      "skill_id": "evidence_pdf_normalization",
+      "title": "图片与文本证据 PDF 规范化",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "plan_private_lending_transition",
+        "calculate_interest_schedule"
+      ],
+      "approval_gate": "LAWYER_REVIEW",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "InterestCalculation",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "FORMAL_CALCULATION"
+      ],
+      "skill_id": "interest_calculation",
+      "title": "利息与本息冲抵计算",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "search_authoritative_rules",
+        "get_rule_snapshot"
+      ],
+      "approval_gate": "LAWYER_REVIEW",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "LegalResearchCandidates",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "PUBLIC_RESEARCH_READ"
+      ],
+      "skill_id": "legal_rule_research",
+      "title": "官方法源与公开研究检索",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "register_source_file",
+        "inspect_pdf_structure",
+        "inspect_non_pdf_structure"
+      ],
+      "approval_gate": "MATERIAL_SCOPE",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "EvidenceInventory",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ"
+      ],
+      "skill_id": "material_inventory",
+      "title": "材料盘点与安全读取",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "render_office_to_pdf"
+      ],
+      "approval_gate": "MATERIAL_SCOPE",
+      "maturity": "GATED",
+      "output_kind": "RenderedOfficePdf",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ",
+        "MANAGED_DERIVATIVE_WRITE"
+      ],
+      "skill_id": "office_pdf_rendering",
+      "title": "Word 与 Excel 隔离转 PDF",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "parse_office_document"
+      ],
+      "approval_gate": "MATERIAL_SCOPE",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "OfficeExtraction",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ"
+      ],
+      "skill_id": "office_reading",
+      "title": "Word 与 Excel 受控读取",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "create_reviewable_xlsx_ledger"
+      ],
+      "approval_gate": "LAWYER_REVIEW",
+      "maturity": "GATED",
+      "output_kind": "LedgerWorkbook",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "MANAGED_DERIVATIVE_WRITE"
+      ],
+      "skill_id": "spreadsheet_ledger",
+      "title": "交易台账与核算表生成",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
+        "validate_submission_bundle"
+      ],
+      "approval_gate": "RELEASE_LOCK",
+      "maturity": "GATED",
+      "output_kind": "SubmissionValidation",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "COURT_RELEASE"
+      ],
+      "skill_id": "submission_bundle_validation",
+      "title": "法院提交包校验",
+      "version": "1.0.0"
+    }
+  ]
+}

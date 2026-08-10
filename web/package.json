@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "../backend/.venv/bin/python ../backend/scripts/export_case_agent_capability_manifest.py --check && next build",
     "start": "next start",
     "lint": "eslint",
     "desktop:dev": "tauri dev",
