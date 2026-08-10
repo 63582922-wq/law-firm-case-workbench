@@ -78,6 +78,15 @@ class OfficePdfConversionWorkerTests(unittest.TestCase):
                     self._converter().convert(self._source(path), detected_kind="WORD_DOCUMENT")
         run.assert_not_called()
 
+    def test_generated_office_document_requires_its_exact_hash_before_rendering(self) -> None:
+        with self.assertRaisesRegex(OfficePdfConversionBlocked, "hash-bound"):
+            self._converter().convert_generated_document(
+                b"not-a-document",
+                content_sha256="0" * 64,
+                source_name="答辩状.docx",
+                detected_kind="WORD_DOCUMENT",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

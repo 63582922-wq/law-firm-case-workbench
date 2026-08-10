@@ -78,9 +78,50 @@ class SandboxedOfficePdfConverter:
         _verify_source(source)
         if source.byte_size > _MAX_SOURCE_BYTES:
             raise OfficePdfConversionBlocked("Office source exceeds the conversion byte limit")
-        inspection = inspect_non_pdf_material(source.path, detected_kind=detected_kind)
-        if inspection.outcome != "REVIEW_REQUIRED":
-            raise OfficePdfConversionBlocked(f"Office source was blocked by structural inspection: {inspection.reason_code}")
+        content = _read_verified_source(source)
+        converted = self._convert_verified_content(
+            content,
+            source_sha256=source.sha256,
+            source_name=source.path.name,
+            detected_kind=detected_kind,
+        )
+        _verify_source(source)
+        return converted
+
+    def convert_generated_document(
+        self,
+        content: bytes,
+        *,
+        content_sha256: str,
+        source_name: str,
+        detected_kind: str,
+    ) -> ConvertedOfficePdf:
+        """Render an immutable system-generated DOCX/XLSX draft for lawyer review.
+
+        This intentionally accepts bytes plus their precomputed hash, rather
+        than a filesystem path.  Generated work product never gains a route
+        back into the lawyer-selected case folder, and must still pass the same
+        OOXML structural gate and isolated raster verification as evidence.
+        """
+        if detected_kind not in {"WORD_DOCUMENT", "SPREADSHEET"}:
+            raise OfficePdfConversionBlocked("generated Office rendering supports only DOCX and XLSX")
+        if not content or len(content) > _MAX_SOURCE_BYTES or sha256(content).hexdigest() != content_sha256:
+            raise OfficePdfConversionBlocked("generated Office draft bytes are not hash-bound")
+        return self._convert_verified_content(
+            content,
+            source_sha256=content_sha256,
+            source_name=source_name,
+            detected_kind=detected_kind,
+        )
+
+    def _convert_verified_content(
+        self,
+        content: bytes,
+        *,
+        source_sha256: str,
+        source_name: str,
+        detected_kind: str,
+    ) -> ConvertedOfficePdf:
         with TemporaryDirectory(prefix="office-pdf-convert-") as temporary:
             root = Path(temporary)
             incoming = root / "incoming"
@@ -89,8 +130,14 @@ class SandboxedOfficePdfConverter:
             incoming.mkdir(mode=0o700)
             profile.mkdir(mode=0o700)
             output.mkdir(mode=0o700)
-            staged = incoming / _safe_staged_name(source.path.name, detected_kind)
-            _copy_verified_source(source, staged)
+            staged = incoming / _safe_staged_name(source_name, detected_kind)
+            staged.write_bytes(content)
+            staged.chmod(0o600)
+            inspection = inspect_non_pdf_material(staged, detected_kind=detected_kind)
+            if inspection.outcome != "REVIEW_REQUIRED":
+                raise OfficePdfConversionBlocked(
+                    f"Office source was blocked by structural inspection: {inspection.reason_code}"
+                )
             command = (
                 str(self._sandbox),
                 "-p",
@@ -132,14 +179,13 @@ class SandboxedOfficePdfConverter:
                 sandbox=self._sandbox,
                 expected_page_count=_verify_pdf(content),
             )
-        _verify_source(source)
         page_count = _verify_pdf(content)
         return ConvertedOfficePdf(
-            source_sha256=source.sha256,
+            source_sha256=source_sha256,
             detected_kind=detected_kind,
             converter_id="libreoffice-sandbox-exec",
             converter_version=self._version,
-            transform_hash=_transform_hash(source.sha256, detected_kind, self._version),
+            transform_hash=_transform_hash(source_sha256, detected_kind, self._version),
             pdf_sha256=sha256(content).hexdigest(),
             pdf_bytes=len(content),
             page_count=page_count,
@@ -182,12 +228,11 @@ def _safe_staged_name(name: str, detected_kind: str) -> str:
     return "authorized-source" + suffix
 
 
-def _copy_verified_source(source: AuthorizedOriginalFile, destination: Path) -> None:
+def _read_verified_source(source: AuthorizedOriginalFile) -> bytes:
     content = source.path.read_bytes()
     if len(content) != source.byte_size or sha256(content).hexdigest() != source.sha256:
         raise OfficePdfConversionBlocked("Office source changed before isolation copy")
-    destination.write_bytes(content)
-    destination.chmod(0o600)
+    return content
 
 
 def _verify_source(source: AuthorizedOriginalFile) -> None:
