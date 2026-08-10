@@ -594,6 +594,12 @@ export type ExternalRequestAuditView = {
   }[];
 };
 
+export type ExternalOcrAuthorizationReceipt = {
+  requestId: string;
+  matterVersion: number;
+  requestIdHeader: string | null;
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -2513,6 +2519,102 @@ export async function loadExternalRequestAudit(
       outputHash: item.output_hash, errorCode: item.error_code, createdAt: item.created_at,
     })),
   };
+}
+
+/**
+ * Record the lawyer's one-page OCR authorization before the native bridge is
+ * even allowed to obtain the corresponding original page.  A caller cannot
+ * use this function to authorize a folder, file, arbitrary URL or more than
+ * one page.
+ */
+export async function authorizeSinglePageQwenOcr(input: {
+  review: EvidenceReviewView;
+  evidencePageId: string;
+  renderedPageSha256: string;
+  processorRegion: "cn-beijing" | "ap-southeast-1";
+  retentionPolicy: string;
+  trainingPolicy: string;
+  costCapMinor: number;
+  expiresAt: string;
+  confirmation: string;
+  config?: CaseDataSourceConfig;
+}): Promise<ExternalOcrAuthorizationReceipt> {
+  const config = input.config ?? caseDataSourceConfig;
+  if (config.kind !== "persistent-preview" || input.review.sourceKind !== "persistent-preview" || input.review.matterVersion === null) {
+    throw new Error("只有当前持久化案件可以授权单页 OCR。 ");
+  }
+  if (!MATTER_ID_PATTERN.test(input.evidencePageId) || !/^[0-9a-f]{64}$/i.test(input.renderedPageSha256)) {
+    throw new Error("当前 OCR 页标识或已核验的页哈希无效。 ");
+  }
+  if (!input.retentionPolicy.trim() || !input.trainingPolicy.trim() || input.retentionPolicy.length > 240 || input.trainingPolicy.length > 240) {
+    throw new Error("必须写明本次外发适用的保留与训练政策。 ");
+  }
+  if (!Number.isInteger(input.costCapMinor) || input.costCapMinor < 0 || input.costCapMinor > 10_000_000) {
+    throw new Error("OCR 成本上限无效。 ");
+  }
+  const expiresAt = new Date(input.expiresAt);
+  const now = Date.now();
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() < now + 60_000 || expiresAt.getTime() > now + 24 * 60 * 60 * 1000) {
+    throw new Error("OCR 授权有效期必须为现在起 1 分钟至 24 小时。 ");
+  }
+  if (input.confirmation !== "CONFIRM_SINGLE_PAGE_QWEN_OCR") {
+    throw new Error("请确认仅发送当前证据页后再建立 OCR 授权。 ");
+  }
+  const authorizationHash = await sha256Text([
+    "single-page-qwen-ocr-authorization-v1",
+    config.matterId,
+    String(input.review.matterVersion),
+    input.review.snapshotHash,
+    input.evidencePageId,
+    input.renderedPageSha256.toLowerCase(),
+    input.processorRegion,
+    input.retentionPolicy.trim(),
+    input.trainingPolicy.trim(),
+    String(input.costCapMinor),
+    expiresAt.toISOString(),
+    input.confirmation,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/external-requests`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.review.matterVersion,
+        request_kind: "OCR",
+        purpose: "单页证据文字提取（律师复核候选）",
+        provider_id: "qwen",
+        processor_region: input.processorRegion,
+        retention_policy: input.retentionPolicy.trim(),
+        training_policy: input.trainingPolicy.trim(),
+        selected_field_ids: [`evidence-page:${input.evidencePageId}`],
+        service_id: "qwen3.5-ocr",
+        call_cap: 1,
+        cost_currency: "CNY",
+        cost_cap_minor: input.costCapMinor,
+        input_hash: input.renderedPageSha256.toLowerCase(),
+        authorization_hash: authorizationHash,
+        expires_at: expiresAt.toISOString(),
+      }),
+    });
+  } catch {
+    throw new Error("连接在 OCR 授权确认前中断。请刷新账本后核对，系统不会重复提交。 ");
+  }
+  const payload = (await response.json()) as { object_id?: string; matter_version?: number; object_type?: string } | ErrorEnvelope;
+  if (
+    !response.ok
+    || !("object_type" in payload)
+    || payload.object_type !== "EXTERNAL_REQUEST"
+    || !MATTER_ID_PATTERN.test(payload.object_id ?? "")
+    || !Number.isInteger(payload.matter_version)
+  ) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "单页 OCR 授权未记录。"));
+  }
+  return { requestId: payload.object_id!, matterVersion: payload.matter_version!, requestIdHeader: response.headers.get("X-Request-ID") };
 }
 
 export async function approveReviewableOfficeDraft(
