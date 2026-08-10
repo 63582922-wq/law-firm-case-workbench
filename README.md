@@ -10,7 +10,7 @@
 
 - 已建立案件状态机、事实/诉请/交易台账、证据 Manifest/红框 PDF 派生、官方法源与规则包、确定性利息计算和中文工作台代码。
 - UI 已选择 A「现代案卷室」，并已实现案件总览、证据核验、事实与争点、法律规则、利息测算、提交材料及身份与安全路由。
-- 证据页持久化写链已接入逐页候选/批准、既有红框批准、重复页裁决和 Manifest 锁定；断线未知结果要求先刷新，候选决定可从服务端快照恢复。
+- 证据页持久化写链已接入逐页候选/批准、既有红框批准、重复页裁决和 Manifest 锁定；大案首屏使用全案就绪摘要与前 50 页版本分页，断线保留已载入页面并允许续载，锁定由服务端复核全部页及就绪哈希。
 - 原件页已具备本机短时文件夹授权、哈希绑定的单页 PNG 渲染、一次性预览许可、红框拖选候选和批准 UI；Tauri 2 桌面壳已装配专用原生文件夹选择命令，不向网页开放通用文件系统权限。
 - 桌面包已携带自包含 Python/FastAPI 本机服务，由 Rust 父进程完成随机挑战、动态 loopback 端口、健康状态和退出联动监护；当前只报告“案件仍禁用”，不会因服务已启动而伪造律师身份或数据库连接。
 - macOS 本地 Alpha 构建现在会校验固定产品名、Bundle ID、主程序和 sidecar，再进行由内到外的临时签名及严格包验证；不完整 `.app` 会直接构建失败。该临时签名不等于 Developer ID、公证或公开分发许可。
@@ -55,6 +55,8 @@
 - [固定 HTTPS 登记续期与远程撤销决策](./decisions/ADR-0015-pinned-enrollment-renewal-revocation.md)
 - [macOS 原生安全激活决策](./decisions/ADR-0016-native-secure-enrollment-activation.md)
 - [登记断线未知结果消解决策](./decisions/ADR-0017-enrollment-unknown-remote-state-resolution.md)
+- [大案长台账稳定分页决策](./decisions/ADR-0018-version-bound-large-ledger-pagination.md)
+- [证据就绪摘要、分页与锁定复核决策](./decisions/ADR-0019-evidence-readiness-pagination.md)
 - [官方案例与真实数据接入目录](./research/OFFICIAL_CASE_DATA_CATALOG.md)
 
 ## 不可突破的产品红线

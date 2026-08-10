@@ -26,6 +26,9 @@ from .case_ledger_postgres import (
     _authorize_matter_read,
     _finish_command,
     _payload_hash,
+    _read_projection_version,
+    _require_cursor_version,
+    _require_expected_projection_version,
     _prior_receipt,
     _require_positive_version,
     _require_roles,
@@ -34,11 +37,21 @@ from .case_ledger_postgres import (
     _validate_read_identity,
     _validate_sha256,
     _validate_uuid,
+    _canonical_cursor_uuid,
+    _parse_utc_cursor_timestamp,
+    _utc_cursor_timestamp,
 )
 from .artifact_access import VerifiedDerivativeLocator
 from .evidence_manifest import DuplicateResolution, PageDisposition, ReviewStatus
 from .models import Actor, Role
 from .original_page_access import OriginalPageLocator
+from .stable_pagination import (
+    StablePageCursor,
+    StablePaginationBlocked,
+    decode_page_cursor,
+    encode_page_cursor,
+    validate_page_limit,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +65,33 @@ class PersistentEvidenceSnapshot:
     locked_manifest: dict[str, Any] | None
     derivatives: tuple[dict[str, Any], ...]
     derivative_runs: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PersistentEvidenceReviewSummary:
+    matter_id: str
+    version: int
+    summary_hash: str
+    manifest_readiness_hash: str
+    total_pages: int
+    unresolved_page_count: int
+    pending_decision_count: int
+    unresolved_duplicate_count: int
+    original_files: tuple[dict[str, Any], ...]
+    duplicate_groups: tuple[dict[str, Any], ...]
+    locked_manifest: dict[str, Any] | None
+    derivatives: tuple[dict[str, Any], ...]
+    derivative_runs: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PersistentEvidencePageListPage:
+    matter_id: str
+    matter_version: int
+    total_count: int
+    items: tuple[dict[str, Any], ...]
+    next_cursor: str | None
+    has_more: bool
 
 
 @dataclass(frozen=True)
@@ -748,16 +788,19 @@ class PostgresEvidenceManifestStore:
         expected_version: int,
         idempotency_key: str,
         approval_hash: str,
+        readiness_hash: str,
     ) -> CaseLedgerCommandReceipt:
         _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
         _require_roles(actor, self._DECISION_ROLES)
         _require_positive_version(expected_version)
         _validate_sha256("manifest approval_hash", approval_hash)
+        _validate_sha256("manifest readiness_hash", readiness_hash)
         command_name = "LOCK_EVIDENCE_MANIFEST"
         payload = {
             "matter_id": matter_id,
             "expected_version": expected_version,
             "approval_hash": approval_hash,
+            "readiness_hash": readiness_hash,
         }
         payload_hash = _payload_hash(payload)
         with self._transaction(actor.firm_id) as connection:
@@ -788,7 +831,8 @@ class PostgresEvidenceManifestStore:
                 """
                 SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
                        source.original_label, source.original_file_sha256,
-                       decision.decision_id, decision.disposition
+                       decision.decision_id, decision.disposition,
+                       pending.decision_id AS pending_decision_id
                 FROM evidence_pages page
                 JOIN evidence_original_files source
                   ON source.evidence_file_id = page.evidence_file_id
@@ -797,6 +841,15 @@ class PostgresEvidenceManifestStore:
                   ON decision.evidence_page_id = page.evidence_page_id
                  AND decision.firm_id = page.firm_id AND decision.matter_id = page.matter_id
                  AND decision.status = 'APPROVED'
+                LEFT JOIN LATERAL (
+                    SELECT decision_id
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'CANDIDATE'
+                    ORDER BY updated_at DESC, decision_id DESC
+                    LIMIT 1
+                ) pending ON TRUE
                 WHERE page.matter_id = %s AND page.firm_id = %s
                 ORDER BY source.created_at ASC, source.evidence_file_id ASC, page.page_number ASC
                 FOR SHARE OF page, source
@@ -809,6 +862,10 @@ class PostgresEvidenceManifestStore:
             if missing:
                 raise CaseLedgerPersistenceBlocked(
                     f"all source pages require an approved disposition; unresolved pages: {len(missing)}"
+                )
+            if any(row["pending_decision_id"] is not None for row in pages):
+                raise CaseLedgerPersistenceBlocked(
+                    "pending page disposition candidates must be resolved before manifest lock"
                 )
             duplicate_groups = connection.execute(
                 """
@@ -858,6 +915,18 @@ class PostgresEvidenceManifestStore:
                 (matter_id, actor.firm_id),
             ).fetchall()
             annotation_map = _group_annotations(annotation_rows)
+            current_readiness_hash = _manifest_readiness_hash(
+                matter_id=matter_id,
+                matter_version=expected_version,
+                page_rows=pages,
+                duplicate_group_rows=duplicate_groups,
+                duplicate_members=members,
+                annotation_map=annotation_map,
+            )
+            if current_readiness_hash != readiness_hash:
+                raise CaseLedgerPersistenceBlocked(
+                    "evidence manifest readiness changed before lock; refresh the evidence review"
+                )
             manifest_id = str(uuid4())
             derivative_sequence = 0
             entries: list[dict[str, Any]] = []
@@ -1614,6 +1683,339 @@ class PostgresEvidenceManifestStore:
                 stale_submission=False,
             )
 
+    def list_evidence_page(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        limit: int,
+        cursor: str | None,
+        expected_version: int | None = None,
+    ) -> PersistentEvidencePageListPage:
+        """Return one minimal, version-bound batch of source pages and annotations."""
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._READ_ROLES)
+        page_limit = validate_page_limit(limit)
+        decoded = (
+            decode_page_cursor(
+                cursor,
+                expected_kind="EVIDENCE_PAGES",
+                expected_matter_id=matter_id,
+            )
+            if cursor is not None
+            else None
+        )
+        after_created_at, after_file_id, after_page_number, after_page_id = _evidence_page_cursor_values(
+            decoded
+        )
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._READ_ROLES,
+            )
+            matter_version = _read_projection_version(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+            )
+            _require_expected_projection_version(expected_version, matter_version)
+            _require_cursor_version(decoded, matter_version)
+            count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total_count
+                FROM evidence_pages
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            base_select = """
+                SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
+                       source.original_label, source.created_at AS source_created_at,
+                       approved.decision_id, approved.disposition, approved.reason,
+                       approved.status, approved.approval_hash, approved.approved_by,
+                       pending.decision_id AS pending_decision_id,
+                       pending.disposition AS pending_disposition,
+                       pending.reason AS pending_reason,
+                       pending.status AS pending_status
+                FROM evidence_pages page
+                JOIN evidence_original_files source
+                  ON source.evidence_file_id = page.evidence_file_id
+                 AND source.firm_id = page.firm_id AND source.matter_id = page.matter_id
+                LEFT JOIN LATERAL (
+                    SELECT decision_id, disposition, reason, status, approval_hash, approved_by
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'APPROVED'
+                    ORDER BY updated_at DESC, decision_id DESC
+                    LIMIT 1
+                ) approved ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT decision_id, disposition, reason, status
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'CANDIDATE'
+                    ORDER BY updated_at DESC, decision_id DESC
+                    LIMIT 1
+                ) pending ON TRUE
+            """
+            if after_created_at is None:
+                rows = connection.execute(
+                    base_select
+                    + """
+                    WHERE page.matter_id = %s AND page.firm_id = %s
+                    ORDER BY source.created_at ASC, page.evidence_file_id ASC,
+                             page.page_number ASC, page.evidence_page_id ASC
+                    LIMIT %s
+                    """,
+                    (matter_id, actor.firm_id, page_limit + 1),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    base_select
+                    + """
+                    WHERE page.matter_id = %s AND page.firm_id = %s
+                      AND (source.created_at, page.evidence_file_id,
+                           page.page_number, page.evidence_page_id) > (%s, %s, %s, %s)
+                    ORDER BY source.created_at ASC, page.evidence_file_id ASC,
+                             page.page_number ASC, page.evidence_page_id ASC
+                    LIMIT %s
+                    """,
+                    (
+                        matter_id,
+                        actor.firm_id,
+                        after_created_at,
+                        after_file_id,
+                        after_page_number,
+                        after_page_id,
+                        page_limit + 1,
+                    ),
+                ).fetchall()
+            visible = rows[:page_limit]
+            visible_ids = [str(row["evidence_page_id"]) for row in visible]
+            annotation_rows = (
+                connection.execute(
+                    """
+                    SELECT annotation_id, evidence_page_id, purpose, x0, y0, x1, y1,
+                           label, status, approval_hash, approved_by
+                    FROM evidence_page_annotations
+                    WHERE matter_id = %s AND firm_id = %s
+                      AND evidence_page_id = ANY(%s::uuid[])
+                      AND status <> 'INVALIDATED'
+                    ORDER BY evidence_page_id ASC, annotation_id ASC
+                    """,
+                    (matter_id, actor.firm_id, visible_ids),
+                ).fetchall()
+                if visible_ids
+                else []
+            )
+        annotation_map = _group_annotations(annotation_rows)
+        has_more = len(rows) > page_limit
+        next_cursor = None
+        if has_more and visible:
+            tail = visible[-1]
+            next_cursor = encode_page_cursor(
+                kind="EVIDENCE_PAGES",
+                matter_id=matter_id,
+                matter_version=matter_version,
+                sort_values=(
+                    _utc_cursor_timestamp(tail["source_created_at"]),
+                    str(tail["evidence_file_id"]),
+                    str(tail["page_number"]),
+                    str(tail["evidence_page_id"]),
+                ),
+            )
+        return PersistentEvidencePageListPage(
+            matter_id=matter_id,
+            matter_version=matter_version,
+            total_count=int(count_row["total_count"] if count_row else 0),
+            items=tuple(_evidence_page_payload(row, annotation_map) for row in visible),
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    def get_evidence_review_summary(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+    ) -> PersistentEvidenceReviewSummary:
+        """Return evidence workflow state without transferring every source page."""
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._READ_ROLES)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._READ_ROLES,
+            )
+            matter = connection.execute(
+                """
+                SELECT matter_id, version FROM matters
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if matter is None:
+                raise KeyError(matter_id)
+            originals = connection.execute(
+                """
+                SELECT evidence_file_id, original_label, original_file_sha256, byte_size,
+                       media_type, page_count, source_scan_fingerprint, supersedes_file_id, created_at
+                FROM evidence_original_files
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at ASC, evidence_file_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            readiness_pages = connection.execute(
+                """
+                SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
+                       approved.decision_id, approved.disposition,
+                       pending.decision_id AS pending_decision_id
+                FROM evidence_pages page
+                JOIN evidence_original_files source
+                  ON source.evidence_file_id = page.evidence_file_id
+                 AND source.firm_id = page.firm_id AND source.matter_id = page.matter_id
+                LEFT JOIN LATERAL (
+                    SELECT decision_id, disposition
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'APPROVED'
+                    ORDER BY updated_at DESC, decision_id DESC LIMIT 1
+                ) approved ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT decision_id
+                    FROM evidence_page_decisions
+                    WHERE evidence_page_id = page.evidence_page_id
+                      AND firm_id = page.firm_id AND matter_id = page.matter_id
+                      AND status = 'CANDIDATE'
+                    ORDER BY updated_at DESC, decision_id DESC LIMIT 1
+                ) pending ON TRUE
+                WHERE page.matter_id = %s AND page.firm_id = %s
+                ORDER BY source.created_at ASC, page.evidence_file_id ASC,
+                         page.page_number ASC, page.evidence_page_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            approved_annotations = connection.execute(
+                """
+                SELECT annotation_id, evidence_page_id
+                FROM evidence_page_annotations
+                WHERE matter_id = %s AND firm_id = %s AND status = 'APPROVED'
+                ORDER BY evidence_page_id ASC, annotation_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            annotation_map = _group_annotations(approved_annotations)
+            group_rows = connection.execute(
+                """
+                SELECT duplicate_group_id, status, canonical_page_id, approval_hash, approved_by
+                FROM evidence_page_duplicate_groups
+                WHERE matter_id = %s AND firm_id = %s AND status <> 'INVALIDATED'
+                ORDER BY duplicate_group_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            member_rows = connection.execute(
+                """
+                SELECT member.duplicate_group_id, member.evidence_page_id,
+                       page.evidence_file_id, page.page_number, source.original_label
+                FROM evidence_page_duplicate_members member
+                JOIN evidence_pages page
+                  ON page.evidence_page_id = member.evidence_page_id
+                 AND page.firm_id = member.firm_id AND page.matter_id = member.matter_id
+                JOIN evidence_original_files source
+                  ON source.evidence_file_id = page.evidence_file_id
+                 AND source.firm_id = page.firm_id AND source.matter_id = page.matter_id
+                WHERE member.matter_id = %s AND member.firm_id = %s
+                ORDER BY member.duplicate_group_id ASC, member.evidence_page_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            member_map = _group_members(member_rows)
+            member_details = _group_member_details(member_rows)
+            manifest = connection.execute(
+                """
+                SELECT manifest_id, ledger_version, status, content_hash, total_pages,
+                       included_pages, excluded_pages, approval_hash, approved_by
+                FROM evidence_manifests
+                WHERE matter_id = %s AND firm_id = %s AND status = 'LOCKED'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            derivative_rows = connection.execute(
+                """
+                SELECT derivative_id, manifest_id, artifact_type, artifact_sha256,
+                       page_count, status, verification_hash, verified_by, verified_at
+                FROM evidence_derivative_artifacts
+                WHERE matter_id = %s AND firm_id = %s AND status IN ('CANDIDATE', 'VERIFIED')
+                ORDER BY created_at ASC, derivative_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            derivative_run_rows = connection.execute(
+                """
+                SELECT run_id, manifest_id, manifest_content_hash, input_matter_version,
+                       status, attempt_count, failure_code, related_derivative_id,
+                       annotated_derivative_id, created_by, created_at, updated_at, completed_at
+                FROM evidence_derivative_runs
+                WHERE matter_id = %s AND firm_id = %s
+                  AND status IN ('QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')
+                ORDER BY created_at DESC, run_id DESC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+        version = matter["version"]
+        readiness_hash = _manifest_readiness_hash(
+            matter_id=matter_id,
+            matter_version=version,
+            page_rows=readiness_pages,
+            duplicate_group_rows=group_rows,
+            duplicate_members=member_map,
+            annotation_map=annotation_map,
+        )
+        original_payload = tuple(_evidence_original_payload(row) for row in originals)
+        groups = tuple(
+            {
+                "duplicate_group_id": str(row["duplicate_group_id"]),
+                "status": row["status"],
+                "canonical_page_id": str(row["canonical_page_id"]) if row["canonical_page_id"] else None,
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]) if row["approved_by"] else None,
+                "members": member_details.get(str(row["duplicate_group_id"]), ()),
+            }
+            for row in group_rows
+        )
+        manifest_payload = _evidence_manifest_summary_payload(manifest)
+        derivatives = tuple(_evidence_derivative_payload(row) for row in derivative_rows)
+        derivative_runs = tuple(_evidence_derivative_run_payload(row) for row in derivative_run_rows)
+        payload = {
+            "matter_id": matter_id,
+            "version": version,
+            "manifest_readiness_hash": readiness_hash,
+            "total_pages": len(readiness_pages),
+            "unresolved_page_count": sum(row["decision_id"] is None for row in readiness_pages),
+            "pending_decision_count": sum(row["pending_decision_id"] is not None for row in readiness_pages),
+            "unresolved_duplicate_count": sum(
+                row["status"] == DuplicateResolution.CANDIDATE.value for row in group_rows
+            ),
+            "original_files": original_payload,
+            "duplicate_groups": groups,
+            "locked_manifest": manifest_payload,
+            "derivatives": derivatives,
+            "derivative_runs": derivative_runs,
+        }
+        return PersistentEvidenceReviewSummary(summary_hash=_payload_hash(payload), **payload)
+
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentEvidenceSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)
         _require_roles(actor, self._READ_ROLES)
@@ -2116,11 +2518,202 @@ def _group_members(rows: list[dict[str, Any]]) -> dict[str, tuple[str, ...]]:
     return {key: tuple(values) for key, values in grouped.items()}
 
 
+def _group_member_details(rows: list[dict[str, Any]]) -> dict[str, tuple[dict[str, Any], ...]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["duplicate_group_id"]), []).append(
+            {
+                "evidence_page_id": str(row["evidence_page_id"]),
+                "evidence_file_id": str(row["evidence_file_id"]),
+                "page_number": int(row["page_number"]),
+                "original_label": row["original_label"],
+            }
+        )
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
 def _group_annotations(rows: list[dict[str, Any]]) -> dict[str, tuple[dict[str, Any], ...]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(str(row["evidence_page_id"]), []).append(row)
     return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _evidence_page_cursor_values(
+    cursor: StablePageCursor | None,
+) -> tuple[datetime | None, str | None, int | None, str | None]:
+    if cursor is None:
+        return None, None, None, None
+    if len(cursor.sort_values) != 4:
+        raise StablePaginationBlocked("evidence page cursor sort key is invalid")
+    created_at_text, file_id_text, page_number_text, page_id_text = cursor.sort_values
+    if not page_number_text.isdigit() or page_number_text.startswith("0"):
+        raise StablePaginationBlocked("evidence page cursor page number is invalid")
+    page_number = int(page_number_text)
+    if page_number < 1:
+        raise StablePaginationBlocked("evidence page cursor page number is invalid")
+    return (
+        _parse_utc_cursor_timestamp(created_at_text),
+        _canonical_cursor_uuid(file_id_text),
+        page_number,
+        _canonical_cursor_uuid(page_id_text),
+    )
+
+
+def _manifest_readiness_hash(
+    *,
+    matter_id: str,
+    matter_version: int,
+    page_rows: list[dict[str, Any]],
+    duplicate_group_rows: list[dict[str, Any]],
+    duplicate_members: dict[str, tuple[str, ...]],
+    annotation_map: dict[str, tuple[dict[str, Any], ...]],
+) -> str:
+    return _payload_hash(
+        {
+            "matter_id": matter_id,
+            "matter_version": matter_version,
+            "pages": tuple(
+                {
+                    "evidence_page_id": str(row["evidence_page_id"]),
+                    "evidence_file_id": str(row["evidence_file_id"]),
+                    "page_number": int(row["page_number"]),
+                    "decision_id": str(row["decision_id"]) if row.get("decision_id") else None,
+                    "disposition": row.get("disposition"),
+                    "pending_decision_id": (
+                        str(row["pending_decision_id"]) if row.get("pending_decision_id") else None
+                    ),
+                    "approved_annotation_ids": tuple(
+                        str(annotation["annotation_id"])
+                        for annotation in annotation_map.get(str(row["evidence_page_id"]), ())
+                    ),
+                }
+                for row in page_rows
+            ),
+            "duplicate_groups": tuple(
+                {
+                    "duplicate_group_id": str(row["duplicate_group_id"]),
+                    "status": row["status"],
+                    "canonical_page_id": (
+                        str(row["canonical_page_id"]) if row.get("canonical_page_id") else None
+                    ),
+                    "members": duplicate_members.get(str(row["duplicate_group_id"]), ()),
+                }
+                for row in duplicate_group_rows
+            ),
+        }
+    )
+
+
+def _evidence_page_payload(
+    row: dict[str, Any],
+    annotation_map: dict[str, tuple[dict[str, Any], ...]],
+) -> dict[str, Any]:
+    page_id = str(row["evidence_page_id"])
+    return {
+        "evidence_page_id": page_id,
+        "evidence_file_id": str(row["evidence_file_id"]),
+        "original_label": row["original_label"],
+        "page_number": int(row["page_number"]),
+        "decision": (
+            {
+                "decision_id": str(row["decision_id"]),
+                "disposition": row["disposition"],
+                "reason": row["reason"],
+                "status": row["status"],
+                "approval_hash": row["approval_hash"],
+                "approved_by": str(row["approved_by"]) if row.get("approved_by") else None,
+            }
+            if row.get("decision_id")
+            else None
+        ),
+        "pending_decision": (
+            {
+                "decision_id": str(row["pending_decision_id"]),
+                "disposition": row["pending_disposition"],
+                "reason": row["pending_reason"],
+                "status": row["pending_status"],
+                "approval_hash": None,
+                "approved_by": None,
+            }
+            if row.get("pending_decision_id")
+            else None
+        ),
+        "annotations": tuple(
+            _annotation_payload(item) for item in annotation_map.get(page_id, ())
+        ),
+    }
+
+
+def _evidence_original_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **{
+            key: row[key]
+            for key in (
+                "original_label",
+                "original_file_sha256",
+                "byte_size",
+                "media_type",
+                "page_count",
+                "source_scan_fingerprint",
+            )
+        },
+        "evidence_file_id": str(row["evidence_file_id"]),
+        "supersedes_file_id": str(row["supersedes_file_id"]) if row["supersedes_file_id"] else None,
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+def _evidence_manifest_summary_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "manifest_id": str(row["manifest_id"]),
+        "ledger_version": row["ledger_version"],
+        "status": row["status"],
+        "content_hash": row["content_hash"],
+        "total_pages": row["total_pages"],
+        "included_pages": row["included_pages"],
+        "excluded_pages": row["excluded_pages"],
+        "approval_hash": row["approval_hash"],
+        "approved_by": str(row["approved_by"]),
+    }
+
+
+def _evidence_derivative_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "derivative_id": str(row["derivative_id"]),
+        "manifest_id": str(row["manifest_id"]),
+        "artifact_type": row["artifact_type"],
+        "artifact_sha256": row["artifact_sha256"],
+        "page_count": row["page_count"],
+        "status": row["status"],
+        "verification_hash": row["verification_hash"],
+        "verified_by": str(row["verified_by"]) if row["verified_by"] else None,
+        "verified_at": row["verified_at"].isoformat() if row["verified_at"] else None,
+    }
+
+
+def _evidence_derivative_run_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "run_id": str(row["run_id"]),
+        "manifest_id": str(row["manifest_id"]),
+        "manifest_content_hash": row["manifest_content_hash"],
+        "input_matter_version": row["input_matter_version"],
+        "status": row["status"],
+        "attempt_count": row["attempt_count"],
+        "failure_code": row["failure_code"],
+        "related_derivative_id": (
+            str(row["related_derivative_id"]) if row["related_derivative_id"] else None
+        ),
+        "annotated_derivative_id": (
+            str(row["annotated_derivative_id"]) if row["annotated_derivative_id"] else None
+        ),
+        "created_by": str(row["created_by"]),
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+    }
 
 
 def _annotation_payload(row: dict[str, Any]) -> dict[str, Any]:

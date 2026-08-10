@@ -25,7 +25,11 @@ from case_kernel.case_ledger_postgres import (
     PersistentFactListPage,
     PersistentTransactionListPage,
 )
-from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
+from case_kernel.evidence_manifest_postgres import (
+    PersistentEvidencePageListPage,
+    PersistentEvidenceReviewSummary,
+    PersistentEvidenceSnapshot,
+)
 from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
@@ -206,6 +210,57 @@ class FakePersistentEvidenceStore:
             locked_manifest=None,
             derivatives=(),
             derivative_runs=(),
+        )
+
+    def get_evidence_review_summary(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("evidence_summary", {"matter_id": matter_id, "actor": actor}))
+        return PersistentEvidenceReviewSummary(
+            matter_id=matter_id,
+            version=5,
+            summary_hash="e" * 64,
+            manifest_readiness_hash="f" * 64,
+            total_pages=1,
+            unresolved_page_count=1,
+            pending_decision_count=0,
+            unresolved_duplicate_count=0,
+            original_files=(),
+            duplicate_groups=(),
+            locked_manifest=None,
+            derivatives=(),
+            derivative_runs=(),
+        )
+
+    def list_evidence_page(self, **kwargs):
+        self.calls.append(("evidence_page", kwargs))
+        return PersistentEvidencePageListPage(
+            matter_id=kwargs["matter_id"],
+            matter_version=5,
+            total_count=1,
+            items=(
+                {
+                    "evidence_page_id": str(uuid4()),
+                    "evidence_file_id": str(uuid4()),
+                    "original_label": "[合成] 微信流水.pdf",
+                    "page_number": 1,
+                    "decision": None,
+                    "pending_decision": None,
+                    "annotations": (),
+                },
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def lock_manifest(self, **kwargs):
+        self.calls.append(("lock_manifest", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="LOCK_EVIDENCE_MANIFEST",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="EVIDENCE_MANIFEST",
+            object_id=str(uuid4()),
         )
 
     def create_page_decision_candidate(self, **kwargs):
@@ -814,6 +869,17 @@ class PersistentApiTests(unittest.TestCase):
         snapshot = client.get(f"/v1/matters/{self.matter_id}/evidence-snapshot")
         self.assertEqual(snapshot.status_code, 200, snapshot.text)
         self.assertEqual(snapshot.json()["snapshot_hash"], "d" * 64)
+        summary = client.get(f"/v1/matters/{self.matter_id}/evidence-review-summary")
+        page = client.get(
+            f"/v1/matters/{self.matter_id}/evidence-pages?limit=25&expected_version=5"
+        )
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertEqual(page.status_code, 200, page.text)
+        self.assertEqual(summary.json()["manifest_readiness_hash"], "f" * 64)
+        self.assertNotIn("pages", summary.json())
+        page_call = next(item for item in evidence_store.calls if item[0] == "evidence_page")[1]
+        self.assertEqual(page_call["expected_version"], 5)
+        self.assertEqual(page_call["limit"], 25)
 
         page_id = str(uuid4())
         decision = client.post(
@@ -830,6 +896,15 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(call["actor"], self.identity.actor)
         self.assertEqual(call["evidence_page_id"], page_id)
         self.assertEqual(call["disposition"].value, "INCLUDE")
+
+        locked = client.post(
+            f"/v1/matters/{self.matter_id}/evidence-manifests/lock",
+            headers={"Idempotency-Key": "evidence-manifest-lock-001"},
+            json={"expected_version": 5, "approval_hash": "a" * 64, "readiness_hash": "f" * 64},
+        )
+        self.assertEqual(locked.status_code, 200, locked.text)
+        lock_call = next(item for item in evidence_store.calls if item[0] == "lock_manifest")[1]
+        self.assertEqual(lock_call["readiness_hash"], "f" * 64)
 
     def test_evidence_snapshot_exposes_pending_page_decision_for_interrupted_approval_recovery(self) -> None:
         evidence_store = FakePersistentEvidenceStore()

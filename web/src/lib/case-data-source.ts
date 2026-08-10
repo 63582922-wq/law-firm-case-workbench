@@ -51,10 +51,22 @@ export type EvidenceReviewView = {
   sourceLabel: string;
   matterVersion: number | null;
   snapshotHash: string;
+  manifestReadinessHash: string;
   requestId: string | null;
+  totalPages: number;
+  unresolvedPageCount: number;
+  pendingDecisionCount: number;
+  unresolvedDuplicateCount: number;
   originals: { fileId: string; originalLabel: string; originalFileSha256: string; pageCount: number }[];
   pages: EvidenceReviewPage[];
-  duplicateGroups: { groupId: string; status: string; canonicalPageId: string | null; pageIds: string[] }[];
+  pagePage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
+  duplicateGroups: {
+    groupId: string;
+    status: string;
+    canonicalPageId: string | null;
+    pageIds: string[];
+    pageLabels: Record<string, string>;
+  }[];
   lockedManifest: { manifestId: string; contentHash: string; totalPages: number; includedPages: number; excludedPages: number } | null;
   derivatives: { derivativeId: string; artifactType: string; artifactSha256: string; pageCount: number; status: string }[];
   derivativeRuns: { runId: string; manifestId: string; status: string; attemptCount: number; failureCode: string | null }[];
@@ -356,20 +368,41 @@ type PersistentTransactionPage = {
   has_more: boolean;
 };
 
-type PersistentEvidenceSnapshot = {
+type PersistentEvidencePageItem = {
+  evidence_page_id: string;
+  evidence_file_id: string;
+  original_label: string;
+  page_number: number;
+  decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "APPROVED" } | null;
+  pending_decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "CANDIDATE" } | null;
+  annotations: { annotation_id: string; x0: string; y0: string; x1: string; y1: string; label: string; status: string }[];
+};
+
+type PersistentEvidencePagePage = {
+  matter_id: string;
+  matter_version: number;
+  total_count: number;
+  items: PersistentEvidencePageItem[];
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+type PersistentEvidenceReviewSummary = {
   matter_id: string;
   version: number;
-  snapshot_hash: string;
+  summary_hash: string;
+  manifest_readiness_hash: string;
+  total_pages: number;
+  unresolved_page_count: number;
+  pending_decision_count: number;
+  unresolved_duplicate_count: number;
   original_files: { evidence_file_id: string; original_label: string; original_file_sha256: string; page_count: number }[];
-  pages: {
-    evidence_page_id: string;
-    evidence_file_id: string;
-    page_number: number;
-    decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "APPROVED" } | null;
-    pending_decision: { decision_id: string; disposition: "INCLUDE" | "EXCLUDE"; reason: string; status: "CANDIDATE" } | null;
-    annotations: { annotation_id: string; x0: string; y0: string; x1: string; y1: string; label: string; status: string }[];
+  duplicate_groups: {
+    duplicate_group_id: string;
+    status: string;
+    canonical_page_id: string | null;
+    members: { evidence_page_id: string; evidence_file_id: string; original_label: string; page_number: number }[];
   }[];
-  duplicate_groups: { duplicate_group_id: string; status: string; canonical_page_id: string | null; evidence_page_ids: string[] }[];
   locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
   derivatives: { derivative_id: string; artifact_type: string; artifact_sha256: string; page_count: number; status: string }[];
   derivative_runs: { run_id: string; manifest_id: string; status: string; attempt_count: number; failure_code: string | null }[];
@@ -727,12 +760,53 @@ function mergeById<T>(existing: T[], incoming: T[], identifier: (item: T) => str
 export async function loadEvidenceReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<EvidenceReviewView> {
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") return mapSyntheticEvidence();
-  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/evidence-snapshot`, {
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/evidence-review-summary`, {
     headers: { Accept: "application/json" },
   });
-  const payload = (await response.json()) as PersistentEvidenceSnapshot | ErrorEnvelope;
-  if (!response.ok || !("pages" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化证据快照不可用"));
-  return mapPersistentEvidence(payload, response.headers.get("X-Request-ID"));
+  const summary = (await response.json()) as PersistentEvidenceReviewSummary | ErrorEnvelope;
+  if (!response.ok || !("summary_hash" in summary)) throw new Error(errorMessage(summary as ErrorEnvelope, "持久化证据摘要不可用"));
+  const pageResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-pages`,
+    { headers: { Accept: "application/json" } },
+    "desktop-session",
+    { limit: "50", expected_version: String(summary.version) },
+  );
+  const page = (await pageResponse.json()) as PersistentEvidencePagePage | ErrorEnvelope;
+  if (!pageResponse.ok || !("items" in page)) throw new Error(errorMessage(page as ErrorEnvelope, "证据来源页不可用"));
+  if (page.matter_version !== summary.version) throw new Error("案件在载入证据页期间已变化，请重新载入。");
+  return mapPersistentEvidence(summary, page, response.headers.get("X-Request-ID"));
+}
+
+export async function loadMoreEvidencePages(
+  review: EvidenceReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceReviewView> {
+  if (review.sourceKind !== "persistent-preview" || !review.pagePage.hasMore || !review.pagePage.nextCursor) return review;
+  if (config.kind !== "persistent-preview" || review.matterVersion === null) {
+    throw new Error("当前证据快照不是可继续载入的持久化案件。");
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-pages`,
+    { headers: { Accept: "application/json" } },
+    "desktop-session",
+    { limit: "50", expected_version: String(review.matterVersion), cursor: review.pagePage.nextCursor },
+  );
+  const payload = (await response.json()) as PersistentEvidencePagePage | ErrorEnvelope;
+  if (!response.ok || !("items" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "证据后续页不可用"));
+  if (payload.matter_version !== review.matterVersion) throw new Error("案件在载入后续证据页期间已变化，请重新载入。");
+  const incoming = payload.items.map(mapPersistentEvidencePage);
+  return {
+    ...review,
+    pages: mergeById(review.pages, incoming, (item) => item.pageId),
+    pagePage: {
+      loadedCount: Math.min(payload.total_count, review.pagePage.loadedCount + payload.items.length),
+      totalCount: payload.total_count,
+      nextCursor: payload.next_cursor,
+      hasMore: payload.has_more,
+    },
+  };
 }
 
 export async function loadCalculationReview(
@@ -1395,37 +1469,24 @@ export async function lockEvidenceManifest(
 ): Promise<EvidenceMutationReceipt> {
   const { matterVersion, persistentConfig } = requireEvidenceMutationContext(review, config);
   if (review.lockedManifest) throw new Error("当前证据清单已经锁定。");
-  if (review.pages.some((page) => !page.decisionId || page.pendingDecision)) {
+  if (review.totalPages < 1) throw new Error("当前案件没有可锁定的来源页。");
+  if (review.unresolvedPageCount > 0 || review.pendingDecisionCount > 0) {
     throw new Error("仍有来源页未批准或存在待批准的新处置，不能锁定证据清单。");
   }
-  if (review.duplicateGroups.some((group) => group.status === "CANDIDATE")) {
+  if (review.unresolvedDuplicateCount > 0) {
     throw new Error("仍有重复页候选未裁决，不能锁定证据清单。");
   }
-  const manifestBinding = {
-    pages: review.pages.map((page) => ({
-      pageId: page.pageId,
-      decisionId: page.decisionId,
-      disposition: page.disposition,
-      annotationIds: page.annotations.filter((item) => item.status === "APPROVED").map((item) => item.annotationId).sort(),
-    })),
-    duplicateGroups: review.duplicateGroups.map((group) => ({
-      groupId: group.groupId,
-      status: group.status,
-      canonicalPageId: group.canonicalPageId,
-      pageIds: [...group.pageIds].sort(),
-    })),
-  };
   const approvalHash = await sha256Text([
-    "evidence-manifest-lock-approval-v1",
+    "evidence-manifest-lock-approval-v2",
     persistentConfig.matterId,
     String(matterVersion),
     review.snapshotHash,
-    JSON.stringify(manifestBinding),
+    review.manifestReadinessHash,
   ].join("|"));
   return postEvidenceMutation({
     config: persistentConfig,
     path: "evidence-manifests/lock",
-    body: { expected_version: matterVersion, approval_hash: approvalHash },
+    body: { expected_version: matterVersion, approval_hash: approvalHash, readiness_hash: review.manifestReadinessHash },
     expectedObjectType: "EVIDENCE_MANIFEST",
     fallback: "证据清单未锁定",
     interrupted: "连接在证据清单锁定确认前中断。请先刷新证据快照；系统不会重复锁定。",
@@ -1619,62 +1680,94 @@ function mapPersistentTransactions(items: PersistentTransactionPage["items"]): C
 }
 
 function mapSyntheticEvidence(): EvidenceReviewView {
+  const pages: EvidenceReviewPage[] = syntheticMatter.evidence.map((item) => ({
+    pageId: `synthetic-page-${item.page}`,
+    fileId: "synthetic-wechat-ledger",
+    originalLabel: "[合成] 微信交易记录.pdf",
+    pageNumber: item.page,
+    decisionId: item.confidence === "已核验" ? `synthetic-decision-${item.page}` : null,
+    disposition: item.confidence === "已核验" ? "INCLUDE" : null,
+    reason: item.confidence === "已核验" ? "[合成] 与目标主体相关。" : null,
+    pendingDecision: null,
+    annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[合成] 相关交易行", status: "APPROVED" }] : [],
+    syntheticPreview: { date: item.date, amount: item.amount, counterpart: item.counterpart, confidence: item.confidence, note: item.note },
+  }));
   return {
     sourceKind: "synthetic-alpha",
     sourceLabel: "本机合成数据",
     matterVersion: null,
     snapshotHash: "synthetic-evidence-manifest-preview",
+    manifestReadinessHash: "synthetic-evidence-readiness-preview",
     requestId: null,
+    totalPages: pages.length,
+    unresolvedPageCount: pages.filter((page) => !page.decisionId).length,
+    pendingDecisionCount: 0,
+    unresolvedDuplicateCount: 1,
     originals: [{ fileId: "synthetic-wechat-ledger", originalLabel: "[合成] 微信交易记录.pdf", originalFileSha256: "synthetic-only", pageCount: syntheticMatter.evidence.length }],
-    pages: syntheticMatter.evidence.map((item) => ({
-      pageId: `synthetic-page-${item.page}`,
-      fileId: "synthetic-wechat-ledger",
-      originalLabel: "[合成] 微信交易记录.pdf",
-      pageNumber: item.page,
-      decisionId: item.confidence === "已核验" ? `synthetic-decision-${item.page}` : null,
-      disposition: item.confidence === "已核验" ? "INCLUDE" : null,
-      reason: item.confidence === "已核验" ? "[合成] 与目标主体相关。" : null,
-      pendingDecision: null,
-      annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[合成] 相关交易行", status: "APPROVED" }] : [],
-      syntheticPreview: { date: item.date, amount: item.amount, counterpart: item.counterpart, confidence: item.confidence, note: item.note },
-    })),
-    duplicateGroups: [{ groupId: "synthetic-duplicate-17-18", status: "CANDIDATE", canonicalPageId: null, pageIds: ["synthetic-page-17", "synthetic-page-18"] }],
+    pages,
+    pagePage: { loadedCount: pages.length, totalCount: pages.length, nextCursor: null, hasMore: false },
+    duplicateGroups: [{
+      groupId: "synthetic-duplicate-17-18",
+      status: "CANDIDATE",
+      canonicalPageId: null,
+      pageIds: ["synthetic-page-17", "synthetic-page-18"],
+      pageLabels: { "synthetic-page-17": "[合成] 微信交易记录.pdf · 第 17 页", "synthetic-page-18": "[合成] 微信交易记录.pdf · 第 18 页" },
+    }],
     lockedManifest: null,
     derivatives: [],
     derivativeRuns: [],
   };
 }
 
-function mapPersistentEvidence(payload: PersistentEvidenceSnapshot, requestId: string | null): EvidenceReviewView {
-  const originals = new Map(payload.original_files.map((item) => [item.evidence_file_id, item]));
+function mapPersistentEvidence(
+  summary: PersistentEvidenceReviewSummary,
+  page: PersistentEvidencePagePage,
+  requestId: string | null,
+): EvidenceReviewView {
   return {
     sourceKind: "persistent-preview",
     sourceLabel: "持久化内部预览",
-    matterVersion: payload.version,
-    snapshotHash: payload.snapshot_hash,
+    matterVersion: summary.version,
+    snapshotHash: summary.summary_hash,
+    manifestReadinessHash: summary.manifest_readiness_hash,
     requestId,
-    originals: payload.original_files.map((item) => ({ fileId: item.evidence_file_id, originalLabel: item.original_label, originalFileSha256: item.original_file_sha256, pageCount: item.page_count })),
-    pages: payload.pages.map((item) => ({
-      pageId: item.evidence_page_id,
-      fileId: item.evidence_file_id,
-      originalLabel: originals.get(item.evidence_file_id)?.original_label ?? "原始文件",
-      pageNumber: item.page_number,
-      decisionId: item.decision?.decision_id ?? null,
-      disposition: item.decision?.disposition ?? null,
-      reason: item.decision?.reason ?? null,
-      pendingDecision: item.pending_decision ? {
-        decisionId: item.pending_decision.decision_id,
-        disposition: item.pending_decision.disposition,
-        reason: item.pending_decision.reason,
-        status: item.pending_decision.status,
-      } : null,
-      annotations: item.annotations.map((annotation) => ({ annotationId: annotation.annotation_id, x0: Number(annotation.x0), y0: Number(annotation.y0), x1: Number(annotation.x1), y1: Number(annotation.y1), label: annotation.label, status: annotation.status })),
-      syntheticPreview: null,
+    totalPages: summary.total_pages,
+    unresolvedPageCount: summary.unresolved_page_count,
+    pendingDecisionCount: summary.pending_decision_count,
+    unresolvedDuplicateCount: summary.unresolved_duplicate_count,
+    originals: summary.original_files.map((item) => ({ fileId: item.evidence_file_id, originalLabel: item.original_label, originalFileSha256: item.original_file_sha256, pageCount: item.page_count })),
+    pages: page.items.map(mapPersistentEvidencePage),
+    pagePage: { loadedCount: page.items.length, totalCount: page.total_count, nextCursor: page.next_cursor, hasMore: page.has_more },
+    duplicateGroups: summary.duplicate_groups.map((item) => ({
+      groupId: item.duplicate_group_id,
+      status: item.status,
+      canonicalPageId: item.canonical_page_id,
+      pageIds: item.members.map((member) => member.evidence_page_id),
+      pageLabels: Object.fromEntries(item.members.map((member) => [member.evidence_page_id, `${member.original_label} · 第 ${member.page_number} 页`])),
     })),
-    duplicateGroups: payload.duplicate_groups.map((item) => ({ groupId: item.duplicate_group_id, status: item.status, canonicalPageId: item.canonical_page_id, pageIds: item.evidence_page_ids })),
-    lockedManifest: payload.locked_manifest ? { manifestId: payload.locked_manifest.manifest_id, contentHash: payload.locked_manifest.content_hash, totalPages: payload.locked_manifest.total_pages, includedPages: payload.locked_manifest.included_pages, excludedPages: payload.locked_manifest.excluded_pages } : null,
-    derivatives: payload.derivatives.map((item) => ({ derivativeId: item.derivative_id, artifactType: item.artifact_type, artifactSha256: item.artifact_sha256, pageCount: item.page_count, status: item.status })),
-    derivativeRuns: payload.derivative_runs.map((item) => ({ runId: item.run_id, manifestId: item.manifest_id, status: item.status, attemptCount: item.attempt_count, failureCode: item.failure_code })),
+    lockedManifest: summary.locked_manifest ? { manifestId: summary.locked_manifest.manifest_id, contentHash: summary.locked_manifest.content_hash, totalPages: summary.locked_manifest.total_pages, includedPages: summary.locked_manifest.included_pages, excludedPages: summary.locked_manifest.excluded_pages } : null,
+    derivatives: summary.derivatives.map((item) => ({ derivativeId: item.derivative_id, artifactType: item.artifact_type, artifactSha256: item.artifact_sha256, pageCount: item.page_count, status: item.status })),
+    derivativeRuns: summary.derivative_runs.map((item) => ({ runId: item.run_id, manifestId: item.manifest_id, status: item.status, attemptCount: item.attempt_count, failureCode: item.failure_code })),
+  };
+}
+
+function mapPersistentEvidencePage(item: PersistentEvidencePageItem): EvidenceReviewPage {
+  return {
+    pageId: item.evidence_page_id,
+    fileId: item.evidence_file_id,
+    originalLabel: item.original_label,
+    pageNumber: item.page_number,
+    decisionId: item.decision?.decision_id ?? null,
+    disposition: item.decision?.disposition ?? null,
+    reason: item.decision?.reason ?? null,
+    pendingDecision: item.pending_decision ? {
+      decisionId: item.pending_decision.decision_id,
+      disposition: item.pending_decision.disposition,
+      reason: item.pending_decision.reason,
+      status: item.pending_decision.status,
+    } : null,
+    annotations: item.annotations.map((annotation) => ({ annotationId: annotation.annotation_id, x0: Number(annotation.x0), y0: Number(annotation.y0), x1: Number(annotation.x1), y1: Number(annotation.y1), label: annotation.label, status: annotation.status })),
+    syntheticPreview: null,
   };
 }
 

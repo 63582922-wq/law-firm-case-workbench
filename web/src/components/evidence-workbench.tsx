@@ -12,6 +12,7 @@ import {
   inspectLocalFolderSelection,
   issueLocalFolderGrant,
   loadEvidenceReview,
+  loadMoreEvidencePages,
   lockEvidenceManifest,
   proposeEvidenceAnnotation,
   proposeEvidencePageDecision,
@@ -58,6 +59,7 @@ export function EvidenceWorkbench() {
   const [manifestConfirmed, setManifestConfirmed] = useState(false);
   const [reviewBusy, setReviewBusy] = useState<string | null>(null);
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [pageLoadBusy, setPageLoadBusy] = useState(false);
   const [folderSelection, setFolderSelection] = useState<LocalFolderSelection | null>(null);
   const [folderGrant, setFolderGrant] = useState<LocalFolderGrant | null>(null);
   const [folderBusy, setFolderBusy] = useState<"select" | "grant" | null>(null);
@@ -127,18 +129,33 @@ export function EvidenceWorkbench() {
     );
   }
 
-  if (!review || !selected) {
+  if (!review) {
     return <section className={styles.evidenceArea}><div className={styles.evidenceLoading}>正在读取页级证据快照…</div></section>;
   }
 
-  const unresolvedCount = review.pages.filter((page) => !page.decisionId).length;
-  const pendingDecisionCount = review.pages.filter((page) => page.pendingDecision).length;
-  const unresolvedDuplicateCount = review.duplicateGroups.filter((group) => group.status === "CANDIDATE").length;
+  if (!selected) {
+    return (
+      <section className={styles.evidenceArea} aria-label="证据核验台">
+        <div className={styles.evidenceBlocked} role="status">
+          <p className={styles.eyebrow}>证据工作台</p>
+          <h2>本案尚无来源页</h2>
+          <p>请选择并导入本案原始证据文件后，再进行逐页核验；系统不会显示演示案卷代替真实材料。</p>
+        </div>
+      </section>
+    );
+  }
+
+  const unresolvedCount = review.unresolvedPageCount;
+  const pendingDecisionCount = review.pendingDecisionCount;
+  const unresolvedDuplicateCount = review.unresolvedDuplicateCount;
   const duplicateGroup = review.duplicateGroups.find((group) => group.pageIds.includes(selected.pageId));
   const source = review.originals.find((item) => item.fileId === selected.fileId);
   const hasCurrentOriginalPreview = originalPreview?.pageId === selected.pageId;
   const duplicatePagesPreviewed = duplicateGroup
     ? duplicateGroup.pageIds.every((pageId) => previewedPageIds.includes(pageId))
+    : true;
+  const duplicatePagesLoaded = duplicateGroup
+    ? duplicateGroup.pageIds.every((pageId) => review.pages.some((page) => page.pageId === pageId))
     : true;
 
   function recordSyntheticDecision() {
@@ -195,6 +212,21 @@ export function EvidenceWorkbench() {
       setArtifactNotice(reason instanceof Error ? reason.message : "证据派生任务未建立");
     } finally {
       setArtifactBusy(null);
+    }
+  }
+
+  async function loadNextEvidencePages() {
+    if (!review || pageLoadBusy || !review.pagePage.hasMore) return;
+    setPageLoadBusy(true);
+    setReviewNotice(null);
+    try {
+      const refreshed = await loadMoreEvidencePages(review);
+      setReview(refreshed);
+      setReviewNotice(`已载入 ${refreshed.pagePage.loadedCount} / ${refreshed.pagePage.totalCount} 页；既有核验状态和当前选择未丢失。`);
+    } catch (reason: unknown) {
+      setReviewNotice(reason instanceof Error ? `${reason.message} 已载入页面仍保留，可再次续载。` : "证据后续页载入失败；已载入页面仍保留，可再次续载。");
+    } finally {
+      setPageLoadBusy(false);
     }
   }
 
@@ -334,7 +366,8 @@ export function EvidenceWorkbench() {
 
   function pageLabel(pageId: string): string {
     const page = review?.pages.find((item) => item.pageId === pageId);
-    return page ? `${page.originalLabel} · 第 ${page.pageNumber} 页` : pageId;
+    if (page) return `${page.originalLabel} · 第 ${page.pageNumber} 页`;
+    return review?.duplicateGroups.find((group) => group.pageIds.includes(pageId))?.pageLabels[pageId] ?? "尚未载入的来源页";
   }
 
   function clearOriginalPagePreview() {
@@ -355,7 +388,7 @@ export function EvidenceWorkbench() {
         </div>
         <div className={styles.evidenceSnapshotState}>
           <strong>{review.sourceLabel}</strong>
-          <span>{review.pages.length} 页来源页 · {unresolvedCount} 页待处置</span>
+          <span>已载入 {review.pagePage.loadedCount} / {review.totalPages} 页 · 全案 {unresolvedCount} 页待处置</span>
           <small>版本 {review.matterVersion ?? "合成"} · 快照 {review.snapshotHash.slice(0, 12)}</small>
         </div>
       </header>
@@ -405,6 +438,14 @@ export function EvidenceWorkbench() {
               <em className={statusClass(item)}>{pageStatus(item)}</em>
             </button>
           ))}
+          <div className={styles.ledgerPagination} aria-live="polite">
+            <small>已载入 {review.pagePage.loadedCount} / {review.pagePage.totalCount} 页</small>
+            {review.pagePage.hasMore && (
+              <button className={styles.candidateAction} disabled={pageLoadBusy} onClick={() => void loadNextEvidencePages()} type="button">
+                {pageLoadBusy ? "正在载入…" : "继续载入 50 页"}
+              </button>
+            )}
+          </div>
         </aside>
 
         <article className={styles.documentStage}>
@@ -624,12 +665,13 @@ export function EvidenceWorkbench() {
                 </>
               )}
               <label className={styles.confirmLine}>
-                <input checked={originalCompared} disabled={!duplicatePagesPreviewed} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
+                <input checked={originalCompared} disabled={!duplicatePagesLoaded || !duplicatePagesPreviewed} onChange={(event) => setOriginalCompared(event.target.checked)} type="checkbox" />
                 我已在受控单页预览中逐页核验本组全部 {duplicateGroup.pageIds.length} 页
               </label>
-              {!duplicatePagesPreviewed && <small>请从左侧依次打开本组每一页的原始单页预览后再裁决。</small>}
+              {!duplicatePagesLoaded && <small>本组还有页面尚未载入；请先在左侧继续载入，页面名称已由全案摘要保留。</small>}
+              {duplicatePagesLoaded && !duplicatePagesPreviewed && <small>请从左侧依次打开本组每一页的原始单页预览后再裁决。</small>}
               <button
-                disabled={!duplicatePagesPreviewed || !originalCompared || reviewBusy !== null}
+                disabled={!duplicatePagesLoaded || !duplicatePagesPreviewed || !originalCompared || reviewBusy !== null}
                 type="button"
                 onClick={() => void refreshAfterEvidenceMutation(
                   `resolve-duplicate:${duplicateGroup.groupId}`,

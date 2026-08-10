@@ -110,6 +110,7 @@ from .schemas import (
     PersistentEvidenceAnnotationRequest,
     PersistentEvidenceDuplicateGroupRequest,
     PersistentEvidenceDuplicateResolutionRequest,
+    PersistentEvidenceManifestLockRequest,
     PersistentEvidenceDerivativeCandidateRequest,
     PersistentEvidenceDerivativeRunClaimRequest,
     PersistentEvidenceDerivativeRunCompleteRequest,
@@ -121,6 +122,8 @@ from .schemas import (
     PersistentEvidenceDerivativeVerificationRequest,
     PersistentEvidenceOriginalRequest,
     PersistentEvidencePageDecisionRequest,
+    PersistentEvidencePageListResponse,
+    PersistentEvidenceReviewSummaryResponse,
     PersistentEvidenceSnapshotResponse,
     PersistentFactCandidateRequest,
     PersistentFactDecisionRequest,
@@ -188,6 +191,10 @@ class PersistentFactLedgerPort(Protocol):
 
 
 class PersistentEvidenceManifestPort(Protocol):
+    def get_evidence_review_summary(self, *, matter_id: str, actor: Actor): ...
+
+    def list_evidence_page(self, **kwargs): ...
+
     def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def create_page_decision_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
@@ -1622,6 +1629,44 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         )
         return PersistentEvidenceSnapshotResponse.model_validate(snapshot.__dict__)
 
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-review-summary",
+        response_model=PersistentEvidenceReviewSummaryResponse,
+        tags=["evidence"],
+    )
+    async def get_evidence_review_summary(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceReviewSummaryResponse:
+        summary = evidence_store.get_evidence_review_summary(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentEvidenceReviewSummaryResponse.model_validate(summary.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-pages",
+        response_model=PersistentEvidencePageListResponse,
+        tags=["evidence"],
+    )
+    async def list_evidence_page(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+        limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(min_length=20, max_length=512)] = None,
+        expected_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> PersistentEvidencePageListResponse:
+        page = evidence_store.list_evidence_page(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+            limit=limit,
+            cursor=cursor,
+            expected_version=expected_version,
+        )
+        return PersistentEvidencePageListResponse.model_validate(page.__dict__)
+
     @app.post(
         "/v1/matters/{matter_id}/evidence-originals",
         response_model=CaseLedgerReceiptResponse,
@@ -1810,7 +1855,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
     )
     async def lock_evidence_manifest(
         matter_id: UUID,
-        body: PersistentApprovalRequest,
+        body: PersistentEvidenceManifestLockRequest,
         identity: Annotated[ServerIdentityContext, Depends(get_identity)],
         idempotency_key: Annotated[str, Depends(get_idempotency_key)],
         evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
@@ -1822,6 +1867,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 expected_version=body.expected_version,
                 idempotency_key=idempotency_key,
                 approval_hash=body.approval_hash,
+                readiness_hash=body.readiness_hash,
             )
         )
 

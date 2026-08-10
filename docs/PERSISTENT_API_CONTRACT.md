@@ -20,7 +20,7 @@
 
 事实与争点工作台不再使用上述全量快照作为首屏。`GET /review-summary` 只读取案件头、事实/候选/交易计数、诉请回应和争点；`GET /fact-pages` 与 `GET /transaction-pages` 使用默认 50、最大 100 的稳定键集游标。首批可用 `expected_version` 绑定摘要版本，后续页同时绑定游标内案件版本；版本变化返回 409 并要求从摘要重新开始。游标只用于定位，不形成权限，每页仍重新校验服务端身份、数据库本案角色、律所/案件范围和 RLS。事实页与交易页按列表用途返回字段白名单，交易不返回付款人、收款人、流水号、渠道和完整证据链接。
 
-`GET /v1/matters/{matter_id}/evidence-snapshot` 使用独立证据 Store 的只读重复读快照，返回原件登记、全部来源页、当前已批准页级决定、未失效标注、重复页组、当前锁定 Manifest、派生件和可恢复 Worker 任务状态。租约 ID、加密对象键和绝对路径不进入快照。证据 Store 未注入时该路由返回 `503 EVIDENCE_SERVICE_UNAVAILABLE`，不得回退合成证据。
+`GET /v1/matters/{matter_id}/evidence-review-summary` 使用独立证据 Store 的只读重复读摘要，返回原件登记、全案页数与阻断计数、重复页组成员定位、当前锁定 Manifest 摘要、派生件、可恢复 Worker 任务状态和 `manifest_readiness_hash`。`GET /v1/matters/{matter_id}/evidence-pages` 返回最多 100 页的案件版本绑定键集分页及页级最小投影。Manifest 锁定必须提交就绪哈希，服务端在同一事务内重算全部页、候选决定、批准红框和重复组后才可物化。原全量 `evidence-snapshot` 暂时保留给内部兼容调用，但中文工作台不再依赖。租约 ID、加密对象键和绝对路径不进入摘要或分页；证据 Store 未注入时路由返回 `503 EVIDENCE_SERVICE_UNAVAILABLE`，不得回退合成证据。
 
 派生件先通过 `/access` 取得 45—90 秒的一次性 Bearer，再通过 `Authorization` 请求头读取 `/content`；令牌、对象键和绝对路径不得进入 URL、证据快照或前端日志。读取只接受当前 `VERIFIED` 且仍属于 `LOCKED` Manifest 的记录、当前案件服务端身份和数值型 loopback 客户端；成功读取后令牌立即失效。
 
@@ -50,7 +50,7 @@ API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数�
 
 - 律所真实激活/续期/撤销/状态服务与操作号保留策略、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；客户端断线状态消解已实现但未做生产互操作验收；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
-- 证据页、诉请/争点及其他长列表的大案分页；事实与交易最小投影已完成第一段，仍待专用实库性能和并发验收；
+- 诉请/争点及其他长列表的大案分页；事实、交易和证据来源页最小投影已完成，仍待专用实库性能和并发验收；
 - 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；
 - 真实安全验收和律师工作流验收。
 

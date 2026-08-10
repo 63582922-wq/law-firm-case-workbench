@@ -561,6 +561,10 @@ class PersistentEvidenceDuplicateResolutionRequest(PersistentApprovalRequest):
         return self
 
 
+class PersistentEvidenceManifestLockRequest(PersistentApprovalRequest):
+    readiness_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class PersistentEvidenceDerivativeCandidateRequest(BaseModel):
     expected_version: int = Field(ge=1)
     manifest_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -729,6 +733,69 @@ class PersistentEvidenceSnapshotResponse(BaseModel):
     pages: tuple[PersistentEvidencePageSnapshot, ...]
     duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSnapshot, ...]
     locked_manifest: PersistentEvidenceLockedManifestSnapshot | None
+    derivatives: tuple[PersistentEvidenceDerivativeSnapshot, ...]
+    derivative_runs: tuple[PersistentEvidenceDerivativeRunSnapshot, ...]
+
+
+class PersistentEvidencePageListItem(BaseModel):
+    evidence_page_id: UUID
+    evidence_file_id: UUID
+    original_label: str
+    page_number: int = Field(ge=1)
+    decision: PersistentEvidenceDecisionSnapshot | None
+    pending_decision: PersistentEvidenceDecisionSnapshot | None
+    annotations: tuple[PersistentEvidenceAnnotationSnapshot, ...]
+
+
+class PersistentEvidencePageListResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    total_count: int = Field(ge=0)
+    items: tuple[PersistentEvidencePageListItem, ...]
+    next_cursor: str | None = Field(default=None, min_length=20, max_length=512)
+    has_more: bool
+
+
+class PersistentEvidenceDuplicateMemberSummary(BaseModel):
+    evidence_page_id: UUID
+    evidence_file_id: UUID
+    page_number: int = Field(ge=1)
+    original_label: str
+
+
+class PersistentEvidenceDuplicateGroupSummary(BaseModel):
+    duplicate_group_id: UUID
+    status: str
+    canonical_page_id: UUID | None
+    approval_hash: str | None
+    approved_by: UUID | None
+    members: tuple[PersistentEvidenceDuplicateMemberSummary, ...]
+
+
+class PersistentEvidenceLockedManifestSummary(BaseModel):
+    manifest_id: UUID
+    ledger_version: int = Field(ge=1)
+    status: str
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    total_pages: int = Field(ge=1)
+    included_pages: int = Field(ge=0)
+    excluded_pages: int = Field(ge=0)
+    approval_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_by: UUID
+
+
+class PersistentEvidenceReviewSummaryResponse(BaseModel):
+    matter_id: UUID
+    version: int = Field(ge=1)
+    summary_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_readiness_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    total_pages: int = Field(ge=0)
+    unresolved_page_count: int = Field(ge=0)
+    pending_decision_count: int = Field(ge=0)
+    unresolved_duplicate_count: int = Field(ge=0)
+    original_files: tuple[PersistentEvidenceOriginalSnapshot, ...]
+    duplicate_groups: tuple[PersistentEvidenceDuplicateGroupSummary, ...]
+    locked_manifest: PersistentEvidenceLockedManifestSummary | None
     derivatives: tuple[PersistentEvidenceDerivativeSnapshot, ...]
     derivative_runs: tuple[PersistentEvidenceDerivativeRunSnapshot, ...]
 
