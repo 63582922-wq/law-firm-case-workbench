@@ -68,6 +68,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
               sessionExpiresAt: null,
               persistencePhase: "UNAVAILABLE",
               evidenceIntakeWorkerPhase: "UNAVAILABLE",
+              officialSourceCaptureWorkerPhase: "UNAVAILABLE",
           });
         }
       }

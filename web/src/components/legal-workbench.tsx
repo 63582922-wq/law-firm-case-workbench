@@ -19,6 +19,8 @@ import {
   type EvidenceReviewView,
   type OfficialSourceCaptureView,
 } from "@/lib/case-data-source";
+import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { officialCasePolicyLinks, officialCaseResearchCatalog } from "@/lib/official-case-catalog";
 import officialSourceCatalog from "../../../knowledge/official_sources/registry.json";
 import styles from "./case-workbench.module.css";
@@ -32,6 +34,7 @@ export function LegalWorkbench() {
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [publicSourceConfirmed, setPublicSourceConfirmed] = useState(false);
   const [captureTargets, setCaptureTargets] = useState<Record<string, string>>({});
+  const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const [provisionLocators, setProvisionLocators] = useState<Record<string, string>>({});
   const [licenseBases, setLicenseBases] = useState<Record<string, string>>({});
   const [ruleBusy, setRuleBusy] = useState(false);
@@ -105,6 +108,41 @@ export function LegalWorkbench() {
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    readDesktopRuntimeStatus()
+      .then((status) => {
+        if (active) setDesktopRuntime(status);
+      })
+      .catch(() => {
+        if (active) setDesktopRuntime(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!captureReview?.runs.some((run) => run.status === "QUEUED" || run.status === "RUNNING")) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      loadOfficialSourceCaptureReview()
+        .then((refreshed) => {
+          if (!active) return;
+          setCaptureReview(refreshed);
+          setCaptureError(null);
+        })
+        .catch(() => {
+          // Preserve the last durable queue view.  A transient local-worker
+          // restart must never make a capture appear to have completed.
+        });
+    }, 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [captureReview]);
+
   if (error) {
     return (
       <section className={styles.legalArea} aria-label="法律规则">
@@ -154,7 +192,11 @@ export function LegalWorkbench() {
         expectedVersion: captureReview.matterVersion,
       });
       await refreshCaptureReview();
-      setCaptureNotice(`抓取任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。系统不会在回执未知时自动重试。`);
+      setCaptureNotice(
+        desktopRuntime?.officialSourceCaptureWorkerPhase === "ASSEMBLED"
+          ? `抓取任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。本机法源抓取服务已就绪，状态会自动刷新。`
+          : `抓取任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。当前机器的法源抓取服务尚未就绪，任务会明确保持等待。`,
+      );
     } catch (reason: unknown) {
       setCaptureNotice(reason instanceof Error ? reason.message : "官方法源抓取任务未建立");
     } finally {
@@ -500,7 +542,7 @@ export function LegalWorkbench() {
       <section className={styles.legalPanel} aria-labelledby="official-capture-title">
         <div className={styles.legalPanelHeading}>
           <div><p className={styles.eyebrow}>抓取与复核层</p><h3 id="official-capture-title">官方法源抓取与律师复核</h3></div>
-          <span>{captureReview ? captureReview.sourceLabel : "正在读取独立抓取状态"}</span>
+          <span>{captureReview ? `${captureReview.sourceLabel} · ${desktopRuntime?.officialSourceCaptureWorkerPhase === "ASSEMBLED" ? "本机抓取服务已就绪" : "本机抓取服务未装配"}` : "正在读取独立抓取状态"}</span>
         </div>
         {captureError ? (
           <div className={styles.legalCaptureBlocked} role="alert">

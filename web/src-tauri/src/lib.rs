@@ -36,6 +36,7 @@ struct DesktopRuntimeStatus {
     session_expires_at: Option<String>,
     persistence_phase: String,
     evidence_intake_worker_phase: String,
+    official_source_capture_worker_phase: String,
 }
 
 struct LocalApiState {
@@ -51,6 +52,7 @@ struct LocalApiState {
     desktop_access_token: Option<Zeroizing<String>>,
     persistence_phase: String,
     evidence_intake_worker_phase: String,
+    official_source_capture_worker_phase: String,
     api_port: Option<u16>,
     parent_api_token: Option<Zeroizing<String>>,
     child: Option<CommandChild>,
@@ -71,6 +73,7 @@ impl Default for LocalApiState {
             desktop_access_token: None,
             persistence_phase: "UNKNOWN".to_string(),
             evidence_intake_worker_phase: "UNKNOWN".to_string(),
+            official_source_capture_worker_phase: "UNKNOWN".to_string(),
             api_port: None,
             parent_api_token: None,
             child: None,
@@ -96,6 +99,7 @@ struct LocalApiReady {
     persistence: String,
     agent_draft_executor: String,
     evidence_intake_worker: String,
+    official_source_capture_worker: String,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +192,7 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         session_expires_at: state.session_expires_at.clone(),
         persistence_phase: state.persistence_phase.clone(),
         evidence_intake_worker_phase: state.evidence_intake_worker_phase.clone(),
+        official_source_capture_worker_phase: state.official_source_capture_worker_phase.clone(),
     }
 }
 
@@ -206,6 +211,7 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
+        state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()
@@ -242,6 +248,10 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         )
         || !matches!(
             ready.evidence_intake_worker.as_str(),
+            "NOT_CONFIGURED" | "ASSEMBLED"
+        )
+        || !matches!(
+            ready.official_source_capture_worker.as_str(),
             "NOT_CONFIGURED" | "ASSEMBLED"
         )
     {
@@ -305,6 +315,8 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                             };
                             state.persistence_phase = ready.persistence;
                             state.evidence_intake_worker_phase = ready.evidence_intake_worker;
+                            state.official_source_capture_worker_phase =
+                                ready.official_source_capture_worker;
                             state.api_port = Some(ready.port);
                             drop(state);
                             if should_exchange_session {
@@ -364,6 +376,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     state.desktop_access_token = None;
                     state.persistence_phase = "UNAVAILABLE".to_string();
                     state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
+                    state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
                     state.api_port = None;
                     state.parent_api_token = None;
                     state.child = None;
@@ -391,6 +404,7 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
+        state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()
@@ -1260,7 +1274,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let payload = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
@@ -1275,7 +1289,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let extra = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         let invalid = extra.replace(",\"role\":\"ADMIN\"", "").replace(

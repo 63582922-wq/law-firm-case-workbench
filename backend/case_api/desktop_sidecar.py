@@ -709,6 +709,9 @@ def run() -> int:
                     "evidence_intake_worker": (
                         "ASSEMBLED" if intake_runtime is not None else "NOT_CONFIGURED"
                     ),
+                    "official_source_capture_worker": (
+                        "ASSEMBLED" if capture_runtime is not None else "NOT_CONFIGURED"
+                    ),
                     "enrollment_trust": trust.phase,
                 },
                 separators=(",", ":"),

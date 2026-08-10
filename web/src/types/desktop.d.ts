@@ -15,6 +15,7 @@ declare global {
         sessionExpiresAt: string | null;
         persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
         evidenceIntakeWorkerPhase: "NOT_CONFIGURED" | "ASSEMBLED" | "UNAVAILABLE" | "UNKNOWN";
+        officialSourceCaptureWorkerPhase: "NOT_CONFIGURED" | "ASSEMBLED" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
       sessionGrant(): Promise<{
         apiBase: string;
