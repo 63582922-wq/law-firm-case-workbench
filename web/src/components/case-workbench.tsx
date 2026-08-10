@@ -346,6 +346,7 @@ function PersistentOverview() {
     );
   }
   const { review } = state;
+  const awaitsMaterialIntake = review.factPage.totalCount === 0 && review.transactionPage.totalCount === 0 && review.claims.length === 0;
   return (
     <section className={styles.content} aria-label="案件总览">
       <div className={styles.contentTopline}>
@@ -355,10 +356,10 @@ function PersistentOverview() {
       <article className={styles.nextDecision}>
         <div>
           <p className={styles.eyebrow}>版本化案件快照</p>
-          <h2>{review.matterTitle ?? "案件标题待核验"}</h2>
-          <p>总览仅汇集事实与交易台账的数量和快照标识；金额、利率、期限和诉讼结论仍须进入相应工作区复核。</p>
+          <h2>{awaitsMaterialIntake ? "案件已建立，请选择资料文件夹" : review.matterTitle ?? "案件标题待核验"}</h2>
+          <p>{awaitsMaterialIntake ? "系统还没有读取任何原始材料。下一步只会盘点所选文件夹，待你确认范围后才进入证据处理。" : "总览仅汇集事实与交易台账的数量和快照标识；金额、利率、期限和诉讼结论仍须进入相应工作区复核。"}</p>
         </div>
-        <a className={styles.primaryAction} href="/facts">进入事实与争点</a>
+        <a className={styles.primaryAction} href={awaitsMaterialIntake ? "/evidence" : "/facts"}>{awaitsMaterialIntake ? "选择资料文件夹" : "进入事实与争点"}</a>
       </article>
       <section className={styles.overviewGrid} aria-label="案件台账状态">
         <article className={styles.paperCard}>
