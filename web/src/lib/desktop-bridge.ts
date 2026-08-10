@@ -11,9 +11,18 @@ export type DesktopRuntimeStatus = {
   message: string;
   apiBase: string | null;
   processId: number | null;
-  identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+  identityPhase: "NOT_ENROLLED" | "BLOCKED" | "ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
   enrollmentTrustPhase: "NOT_CONFIGURED" | "BLOCKED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
-  persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
+  sessionPhase: "NOT_AVAILABLE" | "STARTING" | "READY" | "UNAVAILABLE" | "UNKNOWN";
+  sessionExpiresAt: string | null;
+  persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
+};
+
+export type DesktopSessionGrant = {
+  apiBase: string;
+  accessToken: string;
+  sessionId: string;
+  expiresAt: string;
 };
 
 export type DesktopEnrollmentVaultStatus = {
@@ -40,6 +49,10 @@ export async function readDesktopEnrollmentVaultStatus(): Promise<DesktopEnrollm
   return invoke<DesktopEnrollmentVaultStatus>("desktop_enrollment_vault_status");
 }
 
+export async function readDesktopSessionGrant(): Promise<DesktopSessionGrant> {
+  return invoke<DesktopSessionGrant>("desktop_session_grant");
+}
+
 export async function initializeDesktopInstallation(): Promise<DesktopEnrollmentVaultStatus> {
   return invoke<DesktopEnrollmentVaultStatus>("initialize_desktop_installation", {
     confirmation: "INIT_LOCAL_KEYCHAIN",
@@ -63,6 +76,7 @@ export function installDesktopBridge(): void {
 
   window.lawCaseDesktop = {
     runtimeStatus: readDesktopRuntimeStatus,
+    sessionGrant: readDesktopSessionGrant,
     enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
     initializeInstallation: initializeDesktopInstallation,
     importSignedEnrollmentPackage,

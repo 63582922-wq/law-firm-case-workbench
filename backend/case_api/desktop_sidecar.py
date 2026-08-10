@@ -20,12 +20,16 @@ from threading import Thread
 import time
 from typing import Callable, TextIO
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 import uvicorn
 
 from case_api.desktop_enrollment import (
     DesktopEnrollmentBlocked,
     SignedDesktopEnrollmentVerifier,
+)
+from case_api.desktop_identity_runtime import (
+    DesktopIdentityRuntime,
+    load_desktop_identity,
 )
 from case_api.desktop_trust_bootstrap import (
     DesktopEnrollmentTrustRuntime,
@@ -33,6 +37,7 @@ from case_api.desktop_trust_bootstrap import (
     blocked_desktop_enrollment_trust,
     load_desktop_enrollment_trust,
 )
+from case_api.persistent_identity import PersistentAuthenticationBlocked
 
 
 PROTOCOL = "lawcase-local-api-v1"
@@ -82,8 +87,13 @@ def create_desktop_sidecar_app(
     trust: DesktopEnrollmentTrustRuntime | None = None,
     *,
     parent_api_token: str | None = None,
+    identity: DesktopIdentityRuntime | None = None,
 ) -> FastAPI:
     trust = trust or load_desktop_enrollment_trust()
+    identity = identity or DesktopIdentityRuntime(
+        phase="NOT_ENROLLED",
+        message="本机登记尚未装配。",
+    )
     app = FastAPI(
         title="律所案件 AI 工作台 · 本机受控服务",
         version="0.1.0",
@@ -98,7 +108,7 @@ def create_desktop_sidecar_app(
             "service": "lawcase-local-api",
             "mode": "desktop-disabled",
             "persistence": "not-configured",
-            "identity": "not-enrolled",
+            "identity": identity.phase.lower().replace("_", "-"),
             "enrollment_trust": trust.phase.lower().replace("_", "-"),
         }
 
@@ -141,6 +151,33 @@ def create_desktop_sidecar_app(
                 "envelope_sha256": sha256(envelope_text.encode("utf-8")).hexdigest(),
                 "enrollment_id": enrollment.enrollment_id,
                 "expires_at": enrollment.expires_at.isoformat().replace("+00:00", "Z"),
+            }
+
+    if identity.phase == "ENROLLED" and identity.session_authority is not None:
+
+        @app.post("/v1/desktop-sessions/exchange")
+        async def exchange_desktop_session(
+            request: Request,
+            response: Response,
+        ) -> dict[str, str]:
+            bootstrap_token = request.headers.get("x-desktop-bootstrap", "")
+            try:
+                grant = identity.session_authority.exchange(
+                    request=request,
+                    bootstrap_token=bootstrap_token,
+                )
+            except PersistentAuthenticationBlocked:
+                raise HTTPException(
+                    status_code=401,
+                    detail="desktop session unavailable",
+                ) from None
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["Pragma"] = "no-cache"
+            return {
+                "status": "SESSION_READY",
+                "access_token": grant.access_token,
+                "session_id": grant.session_id,
+                "expires_at": grant.expires_at.isoformat().replace("+00:00", "Z"),
             }
 
     return app
@@ -217,6 +254,10 @@ def run() -> int:
         trust = load_desktop_enrollment_trust()
     except DesktopTrustBootstrapBlocked:
         trust = blocked_desktop_enrollment_trust()
+    identity = load_desktop_identity(
+        trust=trust,
+        bootstrap_token=parent_api_token,
+    )
 
     port = int(server_socket.getsockname()[1])
     def announce_ready() -> None:
@@ -228,7 +269,7 @@ def run() -> int:
                     "port": port,
                     "pid": os.getpid(),
                     "challenge_sha256": sha256(challenge.encode("ascii")).hexdigest(),
-                    "identity": "NOT_ENROLLED",
+                    "identity": identity.phase,
                     "persistence": "NOT_CONFIGURED",
                     "enrollment_trust": trust.phase,
                 },
@@ -238,7 +279,11 @@ def run() -> int:
         )
 
     config = uvicorn.Config(
-        create_desktop_sidecar_app(trust, parent_api_token=parent_api_token),
+        create_desktop_sidecar_app(
+            trust,
+            parent_api_token=parent_api_token,
+            identity=identity,
+        ),
         host="127.0.0.1",
         port=port,
         loop="asyncio",

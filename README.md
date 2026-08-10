@@ -17,6 +17,7 @@
 - 已实现律所 Ed25519 签发、30 天上限、设备秘密绑定和会话装配的律师登记契约；另实现门限签名生产信任目录、到期/连续版本/前序哈希回滚防护及活动/退休/撤销签发公钥策略。仓库发布配置故意为 `NOT_CONFIGURED`，不带测试根或生产私钥。
 - 已实现登记、续期、远程撤销和“仅停用本机”的生命周期编排；原生 `.lawenroll` 导入只由系统文件选择器触发，以父进程私有令牌调用 sidecar 验签，精确字节和当前凭证哈希匹配后才 CAS 保存到 Keychain，WebView 不能提交任意凭证。
 - Tauri 桌面端已实现安装秘密初始化/回读、脱敏状态、本机停用和受信验签后凭证保存；秘密不进入命令参数或 WebView。真实律所生产信任根和签发服务未部署，中文页面因此继续禁用导入与真实案件。
+- 已实现“每次启动重新验签”状态机：信任目录未就绪时不读 Keychain，缺少登记与无效登记分开显示；有效登记才以一次性父进程引导交换最长 30 分钟本机会话。令牌只在 Rust 内存中，运行状态不含令牌/session ID，专用数据库未配置时 WebView 不能取得授权，案件路由继续关闭。
 - 代码默认只运行合成 Alpha；持久化预览需要显式配置，缺失时停止读取而不回退到假数据。
 - 提交材料已具备 PDF-only 编译、依赖锁定、ZIP/内部清单分离、加密对象登记和本机一次性下载的合成实现；不会自动向法院提交。
 - 官方法源已具备律师授权队列、一次执行本机 Worker、原字节加密、确定性解析、律师复核、许可核验和正式快照登记 UI；尚未在专用 PostgreSQL 实库和真实桌面身份/Keychain 环境装配运行。
@@ -45,6 +46,7 @@
 - [签名律师登记与设备绑定决策](./decisions/ADR-0010-signed-desktop-lawyer-enrollment.md)
 - [登记、续期与撤销生命周期决策](./decisions/ADR-0011-desktop-enrollment-lifecycle.md)
 - [门限签名与回滚防护的生产登记信任决策](./decisions/ADR-0012-rollback-protected-enrollment-trust.md)
+- [每次启动重新验签与短时会话决策](./decisions/ADR-0013-reverified-desktop-session.md)
 - [官方案例与真实数据接入目录](./research/OFFICIAL_CASE_DATA_CATALOG.md)
 
 ## 不可突破的产品红线

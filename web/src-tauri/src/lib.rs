@@ -31,6 +31,8 @@ struct DesktopRuntimeStatus {
     process_id: Option<u32>,
     identity_phase: String,
     enrollment_trust_phase: String,
+    session_phase: String,
+    session_expires_at: Option<String>,
     persistence_phase: String,
 }
 
@@ -41,6 +43,10 @@ struct LocalApiState {
     process_id: Option<u32>,
     identity_phase: String,
     enrollment_trust_phase: String,
+    session_phase: String,
+    session_id: Option<String>,
+    session_expires_at: Option<String>,
+    desktop_access_token: Option<Zeroizing<String>>,
     persistence_phase: String,
     api_port: Option<u16>,
     parent_api_token: Option<Zeroizing<String>>,
@@ -56,6 +62,10 @@ impl Default for LocalApiState {
             process_id: None,
             identity_phase: "UNKNOWN".to_string(),
             enrollment_trust_phase: "UNKNOWN".to_string(),
+            session_phase: "UNKNOWN".to_string(),
+            session_id: None,
+            session_expires_at: None,
+            desktop_access_token: None,
             persistence_phase: "UNKNOWN".to_string(),
             api_port: None,
             parent_api_token: None,
@@ -91,6 +101,24 @@ struct EnrollmentVerificationResponse {
     expires_at: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesktopSessionExchangeResponse {
+    status: String,
+    access_token: String,
+    session_id: String,
+    expires_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSessionGrant {
+    api_base: String,
+    access_token: String,
+    session_id: String,
+    expires_at: String,
+}
+
 fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
     let state = runtime.inner.lock().expect("local API state lock poisoned");
     DesktopRuntimeStatus {
@@ -100,6 +128,8 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         process_id: state.process_id,
         identity_phase: state.identity_phase.clone(),
         enrollment_trust_phase: state.enrollment_trust_phase.clone(),
+        session_phase: state.session_phase.clone(),
+        session_expires_at: state.session_expires_at.clone(),
         persistence_phase: state.persistence_phase.clone(),
     }
 }
@@ -113,6 +143,10 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.process_id = None;
         state.identity_phase = "UNAVAILABLE".to_string();
         state.enrollment_trust_phase = "UNAVAILABLE".to_string();
+        state.session_phase = "UNAVAILABLE".to_string();
+        state.session_id = None;
+        state.session_expires_at = None;
+        state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
@@ -135,12 +169,15 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         || ready.pid <= 1
         || ready.port == 0
         || ready.challenge_sha256 != expected_digest
-        || ready.identity != "NOT_ENROLLED"
+        || !matches!(
+            ready.identity.as_str(),
+            "NOT_ENROLLED" | "BLOCKED" | "ENROLLED"
+        )
         || !matches!(
             ready.enrollment_trust.as_str(),
             "NOT_CONFIGURED" | "BLOCKED" | "READY"
         )
-        || ready.persistence != "NOT_CONFIGURED"
+        || !matches!(ready.persistence.as_str(), "NOT_CONFIGURED" | "CONFIGURED")
     {
         return Err("本机服务未通过父进程绑定核验。".to_string());
     }
@@ -185,6 +222,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                 CommandEvent::Stdout(line) if !ready_received => {
                     match verify_ready_payload(&line, &challenge) {
                         Ok(ready) => {
+                            let should_exchange_session = ready.identity == "ENROLLED";
                             let mut state =
                                 runtime.inner.lock().expect("local API state lock poisoned");
                             state.phase = "READY".to_string();
@@ -194,8 +232,43 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                             state.process_id = Some(process_id);
                             state.identity_phase = ready.identity;
                             state.enrollment_trust_phase = ready.enrollment_trust;
+                            state.session_phase = if should_exchange_session {
+                                "STARTING".to_string()
+                            } else {
+                                "NOT_AVAILABLE".to_string()
+                            };
                             state.persistence_phase = ready.persistence;
                             state.api_port = Some(ready.port);
+                            drop(state);
+                            if should_exchange_session {
+                                let token = match parent_api_channel(&runtime) {
+                                    Ok((_, token)) => token,
+                                    Err(message) => {
+                                        mark_runtime_blocked(&runtime, &message);
+                                        break;
+                                    }
+                                };
+                                match exchange_desktop_session_with_sidecar(
+                                    ready.port,
+                                    token.as_str(),
+                                ) {
+                                    Ok(grant) => {
+                                        let mut state = runtime
+                                            .inner
+                                            .lock()
+                                            .expect("local API state lock poisoned");
+                                        state.session_phase = "READY".to_string();
+                                        state.session_id = Some(grant.session_id);
+                                        state.session_expires_at = Some(grant.expires_at);
+                                        state.desktop_access_token =
+                                            Some(Zeroizing::new(grant.access_token));
+                                    }
+                                    Err(message) => {
+                                        mark_runtime_blocked(&runtime, &message);
+                                        break;
+                                    }
+                                }
+                            }
                             ready_received = true;
                         }
                         Err(message) => {
@@ -218,6 +291,10 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     state.process_id = None;
                     state.identity_phase = "UNAVAILABLE".to_string();
                     state.enrollment_trust_phase = "UNAVAILABLE".to_string();
+                    state.session_phase = "UNAVAILABLE".to_string();
+                    state.session_id = None;
+                    state.session_expires_at = None;
+                    state.desktop_access_token = None;
                     state.persistence_phase = "UNAVAILABLE".to_string();
                     state.api_port = None;
                     state.parent_api_token = None;
@@ -240,6 +317,10 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.process_id = None;
         state.identity_phase = "UNAVAILABLE".to_string();
         state.enrollment_trust_phase = "UNAVAILABLE".to_string();
+        state.session_phase = "UNAVAILABLE".to_string();
+        state.session_id = None;
+        state.session_expires_at = None;
+        state.desktop_access_token = None;
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
@@ -253,6 +334,47 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
 #[tauri::command]
 fn desktop_runtime_status(runtime: State<'_, LocalApiRuntime>) -> DesktopRuntimeStatus {
     snapshot_runtime(&runtime)
+}
+
+#[tauri::command]
+fn desktop_session_grant(
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<DesktopSessionGrant, String> {
+    snapshot_desktop_session_grant(&runtime)
+}
+
+fn snapshot_desktop_session_grant(
+    runtime: &LocalApiRuntime,
+) -> Result<DesktopSessionGrant, String> {
+    let state = runtime
+        .inner
+        .lock()
+        .map_err(|_| "本机会话状态锁定失败。".to_string())?;
+    if state.phase != "READY"
+        || state.session_phase != "READY"
+        || state.persistence_phase != "CONFIGURED"
+    {
+        return Err("专用案件数据库和本机会话尚未同时就绪。".to_string());
+    }
+    Ok(DesktopSessionGrant {
+        api_base: state
+            .api_base
+            .clone()
+            .ok_or_else(|| "本机案件 API 尚未就绪。".to_string())?,
+        access_token: state
+            .desktop_access_token
+            .as_ref()
+            .map(|value| value.to_string())
+            .ok_or_else(|| "本机会话凭证尚未就绪。".to_string())?,
+        session_id: state
+            .session_id
+            .clone()
+            .ok_or_else(|| "本机会话标识尚未就绪。".to_string())?,
+        expires_at: state
+            .session_expires_at
+            .clone()
+            .ok_or_else(|| "本机会话到期时间尚未就绪。".to_string())?,
+    })
 }
 
 #[tauri::command]
@@ -352,6 +474,75 @@ fn enrollment_verification_channel(
     Ok((port, Zeroizing::new(token.to_string())))
 }
 
+fn parent_api_channel(runtime: &LocalApiRuntime) -> Result<(u16, Zeroizing<String>), String> {
+    let state = runtime
+        .inner
+        .lock()
+        .map_err(|_| "本机受控服务状态锁定失败。".to_string())?;
+    let port = state
+        .api_port
+        .ok_or_else(|| "本机父进程通道不可用。".to_string())?;
+    let token = state
+        .parent_api_token
+        .as_ref()
+        .ok_or_else(|| "本机父进程通道未绑定。".to_string())?;
+    Ok((port, Zeroizing::new(token.to_string())))
+}
+
+fn exchange_desktop_session_with_sidecar(
+    port: u16,
+    parent_api_token: &str,
+) -> Result<DesktopSessionExchangeResponse, String> {
+    if parent_api_token.len() != 64
+        || !parent_api_token
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err("本机会话引导凭证无效。".to_string());
+    }
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_secs(3))
+        .map_err(|_| "无法连接本机会话服务。".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "无法限制本机会话读取时长。".to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "无法限制本机会话写入时长。".to_string())?;
+    let request = format!(
+        "POST /v1/desktop-sessions/exchange HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: tauri://localhost\r\nX-Desktop-Bootstrap: {parent_api_token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| "无法发送本机会话引导请求。".to_string())?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_LOCAL_API_RESPONSE_BYTES + 1)
+        .read_to_end(&mut response)
+        .map_err(|_| "无法读取本机会话引导回执。".to_string())?;
+    if response.len() as u64 > MAX_LOCAL_API_RESPONSE_BYTES {
+        return Err("本机会话引导回执过长。".to_string());
+    }
+    let body = successful_http_body(&response, "本机会话引导未通过。")?;
+    let grant: DesktopSessionExchangeResponse =
+        serde_json::from_slice(body).map_err(|_| "本机会话引导回执内容无效。".to_string())?;
+    if grant.status != "SESSION_READY"
+        || Uuid::parse_str(&grant.session_id).is_err()
+        || grant.expires_at.len() < 20
+        || !grant.expires_at.ends_with('Z')
+        || !(32..=160).contains(&grant.access_token.len())
+        || !grant
+            .access_token
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("本机会话引导回执字段无效。".to_string());
+    }
+    Ok(grant)
+}
+
 fn verify_enrollment_with_sidecar(
     port: u16,
     parent_api_token: &str,
@@ -401,6 +592,11 @@ fn verify_enrollment_with_sidecar(
 fn parse_enrollment_verification_response(
     response: &[u8],
 ) -> Result<EnrollmentVerificationResponse, String> {
+    let body = successful_http_body(response, "律所登记包未通过本机受信验签；未写入 Keychain。")?;
+    serde_json::from_slice(body).map_err(|_| "本机验签回执内容无效；未写入 Keychain。".to_string())
+}
+
+fn successful_http_body<'a>(response: &'a [u8], failure: &str) -> Result<&'a [u8], String> {
     let boundary = response
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -408,10 +604,9 @@ fn parse_enrollment_verification_response(
     let header = std::str::from_utf8(&response[..boundary])
         .map_err(|_| "本机验签回执头无效。".to_string())?;
     if !header.starts_with("HTTP/1.1 200 ") || header.lines().any(|line| line.contains('\0')) {
-        return Err("律所登记包未通过本机受信验签；未写入 Keychain。".to_string());
+        return Err(failure.to_string());
     }
-    serde_json::from_slice(&response[boundary + 4..])
-        .map_err(|_| "本机验签回执内容无效；未写入 Keychain。".to_string())
+    Ok(&response[boundary + 4..])
 }
 
 fn validate_matter_id(matter_id: &str) -> Result<(), String> {
@@ -489,6 +684,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_runtime_status,
+            desktop_session_grant,
             desktop_enrollment_vault_status,
             initialize_desktop_installation,
             import_signed_enrollment_package,
@@ -508,11 +704,15 @@ pub fn run() {
 mod tests {
     use super::{
         LOCAL_API_PROTOCOL, LocalApiRuntime, enrollment_verification_channel,
-        parse_enrollment_verification_response, validate_matter_id, validate_selected_root,
+        exchange_desktop_session_with_sidecar, parse_enrollment_verification_response,
+        snapshot_desktop_session_grant, validate_matter_id, validate_selected_root,
         verify_ready_payload,
     };
     use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::path::Path;
+    use std::thread;
 
     #[test]
     fn accepts_uuid_matter_id() {
@@ -557,6 +757,9 @@ mod tests {
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
+        let enrolled =
+            payload.replace("\"identity\":\"NOT_ENROLLED\"", "\"identity\":\"ENROLLED\"");
+        assert!(verify_ready_payload(enrolled.as_bytes(), &challenge).is_ok());
         assert!(verify_ready_payload(payload.as_bytes(), "b").is_err());
     }
 
@@ -593,6 +796,59 @@ mod tests {
         let snapshot = super::snapshot_runtime(&runtime);
         let serialized = serde_json::to_string(&snapshot).unwrap();
         assert!(!serialized.contains(&"c".repeat(64)));
+    }
+
+    #[test]
+    fn desktop_session_grant_requires_database_and_never_enters_runtime_status() {
+        let runtime = LocalApiRuntime::default();
+        {
+            let mut state = runtime.inner.lock().unwrap();
+            state.phase = "READY".to_string();
+            state.session_phase = "READY".to_string();
+            state.persistence_phase = "NOT_CONFIGURED".to_string();
+            state.api_base = Some("http://127.0.0.1:43127".to_string());
+            state.session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+            state.session_expires_at = Some("2026-08-10T12:30:00Z".to_string());
+            state.desktop_access_token = Some(zeroize::Zeroizing::new("s".repeat(64)));
+        }
+        assert!(snapshot_desktop_session_grant(&runtime).is_err());
+        {
+            runtime.inner.lock().unwrap().persistence_phase = "CONFIGURED".to_string();
+        }
+        let grant = snapshot_desktop_session_grant(&runtime).unwrap();
+        assert_eq!(grant.access_token, "s".repeat(64));
+        let status = serde_json::to_string(&super::snapshot_runtime(&runtime)).unwrap();
+        assert!(!status.contains(&"s".repeat(64)));
+        assert!(!status.contains("sessionId"));
+    }
+
+    #[test]
+    fn native_parent_exchanges_session_over_numeric_loopback() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..size]).unwrap();
+            assert!(request.starts_with("POST /v1/desktop-sessions/exchange HTTP/1.1\r\n"));
+            assert!(request.contains("Origin: tauri://localhost\r\n"));
+            assert!(request.contains(&format!("X-Desktop-Bootstrap: {}\r\n", "d".repeat(64))));
+            let body = format!(
+                "{{\"status\":\"SESSION_READY\",\"access_token\":\"{}\",\"session_id\":\"11111111-1111-4111-8111-111111111111\",\"expires_at\":\"2026-08-10T12:30:00Z\"}}",
+                "s".repeat(64)
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let grant = exchange_desktop_session_with_sidecar(port, &"d".repeat(64)).unwrap();
+        server.join().unwrap();
+        assert_eq!(grant.status, "SESSION_READY");
+        assert_eq!(grant.access_token, "s".repeat(64));
     }
 
     #[test]

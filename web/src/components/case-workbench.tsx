@@ -50,6 +50,8 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
               processId: null,
               identityPhase: "UNAVAILABLE",
               enrollmentTrustPhase: "UNAVAILABLE",
+              sessionPhase: "UNAVAILABLE",
+              sessionExpiresAt: null,
               persistencePhase: "UNAVAILABLE",
           });
         }

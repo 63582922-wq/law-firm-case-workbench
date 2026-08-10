@@ -248,6 +248,16 @@ class DesktopEnrollmentTests(unittest.TestCase):
         missing = SequenceRunner([CompletedProcess([], 44, "", "sensitive detail")])
         with self.assertRaisesRegex(DesktopEnrollmentBlocked, "enrollment is unavailable"):
             provider(missing).load()
+        optional_missing = SequenceRunner(
+            [CompletedProcess([], 44, "", "sensitive detail")]
+        )
+        self.assertIsNone(provider(optional_missing).load_optional())
+
+        lookup_failure = SequenceRunner(
+            [CompletedProcess([], 1, "", "sensitive detail")]
+        )
+        with self.assertRaisesRegex(DesktopEnrollmentBlocked, "enrollment is unavailable"):
+            provider(lookup_failure).load_optional()
 
         bad_secret = SequenceRunner(
             [CompletedProcess([], 0, self.envelope(), ""), CompletedProcess([], 0, "not base64", "")]

@@ -9,10 +9,18 @@ declare global {
         message: string;
         apiBase: string | null;
         processId: number | null;
-        identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+        identityPhase: "NOT_ENROLLED" | "BLOCKED" | "ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
         enrollmentTrustPhase: "NOT_CONFIGURED" | "BLOCKED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
-        persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
+        sessionPhase: "NOT_AVAILABLE" | "STARTING" | "READY" | "UNAVAILABLE" | "UNKNOWN";
+        sessionExpiresAt: string | null;
+        persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
+      sessionGrant(): Promise<{
+        apiBase: string;
+        accessToken: string;
+        sessionId: string;
+        expiresAt: string;
+      }>;
       enrollmentVaultStatus(): Promise<{
         phase:
           | "NOT_INITIALIZED"

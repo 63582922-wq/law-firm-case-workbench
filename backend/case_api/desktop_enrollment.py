@@ -33,6 +33,9 @@ MAX_ENROLLMENT_BYTES = 16_384
 MAX_ENROLLMENT_LIFETIME = timedelta(days=30)
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 INSTALLATION_SECRET_BYTES = 32
+MACOS_KEYCHAIN_SERVICE = "cn.lawcase.workbench.desktop-enrollment"
+MACOS_KEYCHAIN_ENROLLMENT_ACCOUNT = "signed-enrollment-v1"
+MACOS_KEYCHAIN_INSTALLATION_ACCOUNT = "installation-binding-v1"
 
 _ENVELOPE_FIELDS = frozenset({"credential", "signature"})
 _CREDENTIAL_FIELDS = frozenset(
@@ -300,16 +303,31 @@ class MacOSKeychainDesktopEnrollmentProvider:
         self._runner = runner or subprocess.run
 
     def load(self) -> DesktopEnrollment:
+        enrollment = self.load_optional()
+        if enrollment is None:
+            raise DesktopEnrollmentBlocked(
+                "desktop enrollment is unavailable in macOS Keychain"
+            )
+        return enrollment
+
+    def load_optional(self) -> DesktopEnrollment | None:
         envelope_text = self._read_item(
             account=self._enrollment_account,
             maximum_bytes=MAX_ENROLLMENT_BYTES,
             unavailable_message="desktop enrollment is unavailable in macOS Keychain",
+            missing_is_none=True,
         )
+        if envelope_text is None:
+            return None
         encoded_secret = self._read_item(
             account=self._installation_secret_account,
             maximum_bytes=128,
             unavailable_message="desktop installation binding is unavailable in macOS Keychain",
         )
+        if encoded_secret is None:
+            raise DesktopEnrollmentBlocked(
+                "desktop installation binding is unavailable in macOS Keychain"
+            )
         if any(character.isspace() for character in encoded_secret):
             raise DesktopEnrollmentBlocked("desktop installation binding has invalid encoding")
         try:
@@ -321,7 +339,14 @@ class MacOSKeychainDesktopEnrollmentProvider:
             installation_secret=installation_secret,
         )
 
-    def _read_item(self, *, account: str, maximum_bytes: int, unavailable_message: str) -> str:
+    def _read_item(
+        self,
+        *,
+        account: str,
+        maximum_bytes: int,
+        unavailable_message: str,
+        missing_is_none: bool = False,
+    ) -> str | None:
         if self._platform_name != "darwin":
             raise DesktopEnrollmentBlocked("macOS Keychain is unavailable on this platform")
         try:
@@ -343,6 +368,8 @@ class MacOSKeychainDesktopEnrollmentProvider:
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise DesktopEnrollmentBlocked("macOS Keychain lookup failed") from error
+        if completed.returncode == 44 and missing_is_none:
+            return None
         if completed.returncode != 0:
             raise DesktopEnrollmentBlocked(unavailable_message)
         value = completed.stdout.strip()

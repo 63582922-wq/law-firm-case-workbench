@@ -21,9 +21,10 @@ export function IdentitySecurityWorkbench({
   const [disableArmed, setDisableArmed] = useState(false);
   const processReady = desktopRuntime?.phase === "READY";
   const trustReady = desktopRuntime?.enrollmentTrustPhase === "READY";
-  const identityEnrolled = false;
+  const identityEnrolled = desktopRuntime?.identityPhase === "ENROLLED";
+  const sessionReady = desktopRuntime?.sessionPhase === "READY";
   const signedCredentialSaved = vaultStatus?.phase === "CREDENTIAL_SAVED_VERIFIED";
-  const persistenceConfigured = false;
+  const persistenceConfigured = desktopRuntime?.persistencePhase === "CONFIGURED";
 
   useEffect(() => {
     let cancelled = false;
@@ -72,7 +73,7 @@ export function IdentitySecurityWorkbench({
     try {
       const status = await disableLocalEnrollment();
       setVaultStatus(status);
-      setVaultMessage(status.message);
+      setVaultMessage(`${status.message} 请重启桌面应用，由当前生产信任目录重新验签并建立短时会话。`);
       setDisableArmed(false);
     } catch (error) {
       setVaultMessage(readableError(error, "本机登记未能清除；远程撤销状态没有改变。"));
@@ -122,14 +123,14 @@ export function IdentitySecurityWorkbench({
         <StatusCell
           label="律所签名登记"
           value={identityEnrolled ? "已登记" : signedCredentialSaved ? "已验签保存" : "未登记"}
-          note={signedCredentialSaved ? "尚未连接数据库建立可用会话" : desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
-          state="blocked"
+          note={identityEnrolled ? sessionReady ? "已重新验签并建立最长 30 分钟本机会话" : "登记已验签，但本机会话尚未就绪" : signedCredentialSaved ? "已保存；重启后将按当前信任目录重新验签" : desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
+          state={identityEnrolled && sessionReady ? "ready" : "blocked"}
         />
         <StatusCell
           label="案件数据库"
           value={persistenceConfigured ? "已连接" : "未配置"}
           note={desktopRuntime?.persistencePhase === "NOT_CONFIGURED" ? "本机服务已确认未装配专用数据库" : "尚未取得持久化状态"}
-          state="blocked"
+          state={persistenceConfigured ? "ready" : "blocked"}
         />
         <StatusCell
           label="案件访问"
@@ -146,7 +147,7 @@ export function IdentitySecurityWorkbench({
               <p className={styles.eyebrow}>登记流程</p>
               <h3 id="enrollment-flow-title">五层信任必须按顺序成立</h3>
             </div>
-            <span>{trustReady ? "当前停在第 3 层" : "当前停在第 2 层"}</span>
+            <span>{!trustReady ? "当前停在第 2 层" : !sessionReady ? "当前停在第 3 层" : "当前停在第 5 层"}</span>
           </div>
           <ol className={styles.securityFlow}>
             <FlowStep index="01" title="受监护桌面进程" state={processReady ? "已完成" : "未通过"}>
@@ -155,10 +156,10 @@ export function IdentitySecurityWorkbench({
             <FlowStep index="02" title="生产信任目录" state={trustReady ? "已通过" : "未配置"}>
               安装包只固定离线根公钥；门限签名目录提供当前签发公钥、服务地址、证书固定值、有效期和撤销状态。
             </FlowStep>
-            <FlowStep index="03" title="律所核验并签发" state="等待真实服务">
+            <FlowStep index="03" title="律所核验并签发" state={identityEnrolled ? "已重新验签" : "等待真实服务"}>
               律所管理员核验律师后签发短期凭证；用户不能在页面选择律所、人员或案件角色。
             </FlowStep>
-            <FlowStep index="04" title="本机 Keychain 绑定" state="未开始">
+            <FlowStep index="04" title="本机 Keychain 与短时会话" state={sessionReady ? "已完成" : "未开始"}>
               凭证与 32 字节安装秘密分开保存；复制凭证到另一台电脑不能登录。当前：{vaultStatus?.message ?? "请从桌面版读取 Keychain 状态。"}
             </FlowStep>
             <FlowStep index="05" title="数据库逐案授权" state="未开始">

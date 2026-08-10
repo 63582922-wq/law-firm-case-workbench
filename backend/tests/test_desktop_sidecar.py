@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 from case_api.desktop_enrollment import TrustedEnrollmentIssuer
+from case_api.desktop_identity_runtime import DesktopIdentityRuntime
 from case_api.desktop_sidecar import (
     DesktopSidecarBlocked,
     PROTOCOL,
@@ -22,6 +23,8 @@ from case_api.desktop_trust_bootstrap import (
     DesktopEnrollmentTrustRuntime,
     blocked_desktop_enrollment_trust,
 )
+from case_api.persistent_identity import DesktopSessionAuthority
+from case_kernel.models import Actor, Role
 
 
 def canonical(value: object) -> bytes:
@@ -173,6 +176,44 @@ class DesktopSidecarTests(unittest.TestCase):
             ).status_code,
             422,
         )
+
+    def test_reverified_identity_exchanges_one_native_session_without_case_routes(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        authority = DesktopSessionAuthority(
+            actor=Actor(
+                actor_id="22222222-2222-4222-8222-222222222222",
+                firm_id="33333333-3333-4333-8333-333333333333",
+                roles=frozenset({Role.LEAD_LAWYER}),
+            ),
+            bootstrap_token="d" * 64,
+            bootstrap_expires_at=now + timedelta(seconds=30),
+            session_expires_at=now + timedelta(minutes=30),
+            clock=lambda: now,
+            token_factory=lambda: "s" * 64,
+        )
+        identity = DesktopIdentityRuntime(
+            phase="ENROLLED",
+            message="synthetic enrolled identity",
+            enrollment_id="11111111-1111-4111-8111-111111111111",
+            expires_at=(now + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            session_authority=authority,
+        )
+        client = TestClient(
+            create_desktop_sidecar_app(identity=identity),
+            client=("127.0.0.1", 50001),
+        )
+        endpoint = "/v1/desktop-sessions/exchange"
+        headers = {
+            "Origin": "tauri://localhost",
+            "X-Desktop-Bootstrap": "d" * 64,
+        }
+        exchanged = client.post(endpoint, headers=headers)
+        self.assertEqual(exchanged.status_code, 200)
+        self.assertEqual(exchanged.json()["status"], "SESSION_READY")
+        self.assertEqual(exchanged.json()["access_token"], "s" * 64)
+        self.assertEqual(exchanged.headers["cache-control"], "no-store")
+        self.assertEqual(client.post(endpoint, headers=headers).status_code, 401)
+        self.assertEqual(client.get("/v1/matters/example/snapshot").status_code, 404)
 
 
 if __name__ == "__main__":
