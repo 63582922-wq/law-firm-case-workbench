@@ -13,6 +13,7 @@ import {
   fetchOriginalPagePreview,
   createLocalFolderScan,
   createPersistentFactCandidate,
+  createPersistentTransactionCandidate,
   enqueueEvidenceIntakeRun,
   inspectLocalFolderSelection,
   issueLocalFolderGrant,
@@ -107,6 +108,18 @@ export function EvidenceWorkbench() {
   const [ocrText, setOcrText] = useState<string | null>(null);
   const [ocrReviewReason, setOcrReviewReason] = useState("");
   const [ocrFactText, setOcrFactText] = useState("");
+  const [ocrTransactionDraft, setOcrTransactionDraft] = useState({
+    localDate: "",
+    datePrecision: "EXACT_DATE" as "EXACT_DATE" | "MONTH_ONLY" | "YEAR_ONLY" | "UNKNOWN",
+    amount: "",
+    currency: "CNY",
+    direction: "UNKNOWN" as "OUTGOING" | "INCOMING" | "UNKNOWN",
+    payerLabel: "",
+    payeeLabel: "",
+    channel: "WECHAT" as "WECHAT" | "BANK" | "CASH" | "CHAT_RECORD" | "LOAN_INSTRUMENT" | "OTHER",
+    transactionReference: "",
+    confirmed: false,
+  });
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -690,6 +703,43 @@ export function EvidenceWorkbench() {
     }
   }
 
+  async function createTransactionFromReviewedPage() {
+    if (!review || review.sourceKind !== "persistent-preview" || !selected || !hasCurrentOriginalPreview) return;
+    const source = review.originals.find((item) => item.fileId === selected.fileId);
+    if (!source || !ocrTransactionDraft.confirmed) {
+      setOcrNotice("请先核对原始页中的日期、金额、币种、收付款方向及主体，并明确确认本次录入。 ");
+      return;
+    }
+    setOcrBusy(true);
+    try {
+      const receipt = await createPersistentTransactionCandidate({
+        expectedVersion: review.matterVersion ?? 0,
+        localDate: ocrTransactionDraft.datePrecision === "EXACT_DATE" ? ocrTransactionDraft.localDate : null,
+        datePrecision: ocrTransactionDraft.datePrecision,
+        amount: ocrTransactionDraft.amount,
+        currency: ocrTransactionDraft.currency,
+        direction: ocrTransactionDraft.direction,
+        payerLabel: ocrTransactionDraft.payerLabel,
+        payeeLabel: ocrTransactionDraft.payeeLabel,
+        channel: ocrTransactionDraft.channel,
+        transactionReference: ocrTransactionDraft.transactionReference,
+        evidenceLink: {
+          evidenceId: selected.pageId,
+          originalFileSha256: source.originalFileSha256,
+          pageNumber: selected.pageNumber,
+          originalLabel: selected.originalLabel,
+        },
+      });
+      setReview(await loadEvidenceReview());
+      setOcrTransactionDraft((prior) => ({ ...prior, amount: "", transactionReference: "", confirmed: false }));
+      setOcrNotice(`已建立一笔待律师确认的交易候选（案件版本 ${receipt.matterVersion}）；请在“事实与争点”中核验后确认，并再单独判断付款性质。`);
+    } catch (reason: unknown) {
+      setOcrNotice(reason instanceof Error ? reason.message : "交易候选未建立。 ");
+    } finally {
+      setOcrBusy(false);
+    }
+  }
+
   function previewCoordinate(event: ReactPointerEvent<HTMLDivElement>): { x: number; y: number } {
     const bounds = event.currentTarget.getBoundingClientRect();
     return {
@@ -1095,6 +1145,27 @@ export function EvidenceWorkbench() {
                 </>
               )}
               {ocrNotice && <p className={styles.inspectorNote} role="status">{ocrNotice}</p>}
+            </section>
+          )}
+          {review.sourceKind === "persistent-preview" && !review.lockedManifest && hasCurrentOriginalPreview && (
+            <section className={styles.decisionPanel} aria-label="当前页交易候选录入">
+              <strong>当前页交易候选</strong>
+              <small>无需调用 OCR；请以已经打开的原始页为准手工填写。系统只固定来源页，绝不自动把转账认定为借款、还款、本金或利息。</small>
+              <div className={styles.ocrTransactionEntry}>
+                <div className={styles.paymentClassificationFields}>
+                  <label><span>日期精度</span><select disabled={ocrBusy} value={ocrTransactionDraft.datePrecision} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, datePrecision: event.target.value as typeof prior.datePrecision, localDate: event.target.value === "EXACT_DATE" ? prior.localDate : "" }))}><option value="EXACT_DATE">确切日期</option><option value="MONTH_ONLY">仅知月份</option><option value="YEAR_ONLY">仅知年份</option><option value="UNKNOWN">日期不明</option></select></label>
+                  {ocrTransactionDraft.datePrecision === "EXACT_DATE" && <label><span>交易日期</span><input disabled={ocrBusy} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, localDate: event.target.value }))} type="date" value={ocrTransactionDraft.localDate} /></label>}
+                  <label><span>金额</span><input disabled={ocrBusy} id="ocr-transaction-amount" inputMode="decimal" onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, amount: event.target.value }))} placeholder="例如：800.00" value={ocrTransactionDraft.amount} /></label>
+                  <label><span>币种</span><select disabled={ocrBusy} value={ocrTransactionDraft.currency} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, currency: event.target.value }))}><option value="CNY">CNY（人民币）</option><option value="USD">USD</option><option value="HKD">HKD</option></select></label>
+                  <label><span>相对当事人的方向</span><select disabled={ocrBusy} value={ocrTransactionDraft.direction} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, direction: event.target.value as typeof prior.direction }))}><option value="UNKNOWN">暂不确定</option><option value="OUTGOING">我方支出</option><option value="INCOMING">我方收入</option></select></label>
+                  <label><span>付款人（可选）</span><input disabled={ocrBusy} maxLength={500} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, payerLabel: event.target.value }))} value={ocrTransactionDraft.payerLabel} /></label>
+                  <label><span>收款人（可选）</span><input disabled={ocrBusy} maxLength={500} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, payeeLabel: event.target.value }))} value={ocrTransactionDraft.payeeLabel} /></label>
+                  <label><span>渠道</span><select disabled={ocrBusy} value={ocrTransactionDraft.channel} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, channel: event.target.value as typeof prior.channel }))}><option value="WECHAT">微信</option><option value="BANK">银行</option><option value="CASH">现金</option><option value="CHAT_RECORD">聊天记录</option><option value="LOAN_INSTRUMENT">借据/合同</option><option value="OTHER">其他</option></select></label>
+                  <label><span>交易号/备注（可选）</span><input disabled={ocrBusy} maxLength={500} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, transactionReference: event.target.value }))} value={ocrTransactionDraft.transactionReference} /></label>
+                </div>
+                <label className={styles.confirmLine}><input checked={ocrTransactionDraft.confirmed} disabled={ocrBusy} onChange={(event) => setOcrTransactionDraft((prior) => ({ ...prior, confirmed: event.target.checked }))} type="checkbox" /><span>我已逐项以当前原始页核验本次录入；这只是待确认交易，未对借款、还款、本金或利息作任何自动定性。</span></label>
+                <button disabled={ocrBusy || !ocrTransactionDraft.confirmed} onClick={() => void createTransactionFromReviewedPage()} type="button">建立待确认交易候选</button>
+              </div>
             </section>
           )}
         </article>

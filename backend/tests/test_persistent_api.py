@@ -172,6 +172,18 @@ class FakePersistentFactStore:
             object_id=str(uuid4()),
         )
 
+    def confirm_transaction(self, **kwargs):
+        self.calls.append(("confirm_transaction", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CONFIRM_TRANSACTION",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="TRANSACTION",
+            object_id=kwargs["transaction_id"],
+        )
+
     def create_payment_classification_candidate(self, **kwargs):
         self.calls.append(("create_classification", kwargs))
         return CaseLedgerCommandReceipt(
@@ -1088,11 +1100,17 @@ class PersistentApiTests(unittest.TestCase):
         )
         self.assertEqual(transaction.status_code, 201, transaction.text)
         transaction_id = transaction.json()["object_id"]
+        confirmation = client.post(
+            f"/v1/matters/{self.matter_id}/transactions/{transaction_id}/confirm",
+            headers={"Idempotency-Key": "persistent-transaction-confirm-001"},
+            json={"expected_version": 2, "confirmation_hash": "c" * 64},
+        )
+        self.assertEqual(confirmation.status_code, 200, confirmation.text)
         classification = client.post(
             f"/v1/matters/{self.matter_id}/transactions/{transaction_id}/payment-classifications",
             headers={"Idempotency-Key": "persistent-classification-001"},
             json={
-                "expected_version": 2,
+                "expected_version": 3,
                 "origin": "DEFENDANT_STATEMENT",
                 "nature": "INTEREST_PAYMENT",
                 "allocations": [
@@ -1121,7 +1139,7 @@ class PersistentApiTests(unittest.TestCase):
             f"/v1/matters/{self.matter_id}/transactions/{transaction_id}/payment-classifications",
             headers={"Idempotency-Key": "persistent-classification-inherit-001"},
             json={
-                "expected_version": 3,
+                "expected_version": 4,
                 "origin": "DEFENDANT_STATEMENT",
                 "nature": "PRINCIPAL_REPAYMENT",
                 "allocations": [
@@ -1136,6 +1154,8 @@ class PersistentApiTests(unittest.TestCase):
         inherited_call = [call for call in store.calls if call[0] == "create_classification"][-1][1]
         self.assertTrue(inherited_call["use_transaction_evidence"])
         self.assertEqual(inherited_call["evidence_links"], ())
+        confirmation_call = next(call for call in store.calls if call[0] == "confirm_transaction")[1]
+        self.assertEqual(confirmation_call["transaction_id"], transaction_id)
 
     def test_case_snapshot_is_a_single_versioned_read_model(self) -> None:
         store = FakePersistentFactStore()

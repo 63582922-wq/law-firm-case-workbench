@@ -430,6 +430,12 @@ export type PaymentClassificationReceipt = {
   requestId: string | null;
 };
 
+export type TransactionReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1453,6 +1459,103 @@ export async function createPersistentFactCandidate(input: {
   const receipt = payload as { object_id?: string; object_type?: string; matter_version?: number };
   if (!response.ok || receipt.object_type !== "FACT" || !MATTER_ID_PATTERN.test(receipt.object_id ?? "") || !Number.isInteger(receipt.matter_version)) {
     throw new Error(errorMessage(payload as ErrorEnvelope, "事实候选未写入案件台账。"));
+  }
+  return { objectId: receipt.object_id!, matterVersion: receipt.matter_version!, requestId: response.headers.get("X-Request-ID") };
+}
+
+/**
+ * Stage one lawyer-entered transaction against an immutable source page. OCR
+ * may help a lawyer read that page, but it never fills or confirms financial
+ * fields without a lawyer's explicit review.
+ */
+export async function createPersistentTransactionCandidate(input: {
+  expectedVersion: number;
+  localDate: string | null;
+  datePrecision: "EXACT_DATE" | "MONTH_ONLY" | "YEAR_ONLY" | "UNKNOWN";
+  amount: string;
+  currency: string;
+  direction: "OUTGOING" | "INCOMING" | "UNKNOWN";
+  payerLabel: string;
+  payeeLabel: string;
+  channel: "WECHAT" | "BANK" | "CASH" | "CHAT_RECORD" | "LOAN_INSTRUMENT" | "OTHER";
+  transactionReference: string;
+  evidenceLink: { evidenceId: string; originalFileSha256: string; pageNumber: number; originalLabel: string };
+  config?: CaseDataSourceConfig;
+}): Promise<TransactionReceipt> {
+  const config = input.config ?? caseDataSourceConfig;
+  const exactDate = /^\d{4}-\d{2}-\d{2}$/.test(input.localDate ?? "");
+  const positiveAmount = /^(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(input.amount.trim()) && Number(input.amount) > 0;
+  if (
+    config.kind !== "persistent-preview"
+    || !Number.isInteger(input.expectedVersion)
+    || input.expectedVersion < 1
+    || (input.datePrecision === "EXACT_DATE" ? !exactDate : input.localDate !== null)
+    || !positiveAmount
+    || !/^[A-Z]{3}$/.test(input.currency)
+    || !/^[0-9a-f]{64}$/i.test(input.evidenceLink.originalFileSha256)
+    || input.payerLabel.length > 500
+    || input.payeeLabel.length > 500
+    || input.transactionReference.length > 500
+  ) {
+    throw new Error("交易候选缺少有效的日期精度、金额、币种或原始页定位。 ");
+  }
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/transactions`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      local_date: input.localDate,
+      date_precision: input.datePrecision,
+      amount: input.amount.trim(),
+      currency: input.currency,
+      direction: input.direction,
+      payer_label: input.payerLabel.trim() || null,
+      payee_label: input.payeeLabel.trim() || null,
+      channel: input.channel,
+      transaction_reference: input.transactionReference.trim() || null,
+      evidence_links: [{
+        evidence_id: input.evidenceLink.evidenceId,
+        original_file_sha256: input.evidenceLink.originalFileSha256.toLowerCase(),
+        page_number: input.evidenceLink.pageNumber,
+        original_label: input.evidenceLink.originalLabel,
+      }],
+    }),
+  });
+  const payload = (await response.json()) as { object_id?: string; object_type?: string; matter_version?: number } | ErrorEnvelope;
+  const receipt = payload as { object_id?: string; object_type?: string; matter_version?: number };
+  if (!response.ok || receipt.object_type !== "TRANSACTION" || !MATTER_ID_PATTERN.test(receipt.object_id ?? "") || !Number.isInteger(receipt.matter_version)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "交易候选未写入案件台账。"));
+  }
+  return { objectId: receipt.object_id!, matterVersion: receipt.matter_version!, requestId: response.headers.get("X-Request-ID") };
+}
+
+export async function confirmPersistentTransaction(
+  input: { expectedVersion: number; transactionId: string },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<TransactionReceipt> {
+  if (config.kind !== "persistent-preview" || !Number.isInteger(input.expectedVersion) || input.expectedVersion < 1 || !MATTER_ID_PATTERN.test(input.transactionId)) {
+    throw new Error("交易候选或案件版本无效，不能确认。 ");
+  }
+  const confirmationHash = await sha256Text([
+    "case-transaction-confirmation-v1",
+    config.matterId,
+    input.transactionId,
+    String(input.expectedVersion),
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/transactions/${input.transactionId}/confirm`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ expected_version: input.expectedVersion, confirmation_hash: confirmationHash }),
+    });
+  } catch {
+    throw new Error("连接在交易确认前中断。请刷新案件台账核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as { object_id?: string; object_type?: string; matter_version?: number } | ErrorEnvelope;
+  const receipt = payload as { object_id?: string; object_type?: string; matter_version?: number };
+  if (!response.ok || receipt.object_type !== "TRANSACTION" || !MATTER_ID_PATTERN.test(receipt.object_id ?? "") || !Number.isInteger(receipt.matter_version)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "交易候选未确认。"));
   }
   return { objectId: receipt.object_id!, matterVersion: receipt.matter_version!, requestId: response.headers.get("X-Request-ID") };
 }

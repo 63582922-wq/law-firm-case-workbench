@@ -5,6 +5,7 @@ import {
   caseDataSourceConfig,
   approvePaymentClassification,
   confirmSyntheticFact,
+  confirmPersistentTransaction,
   createPaymentClassificationCandidate,
   decidePersistentFact,
   loadCaseReview,
@@ -32,6 +33,10 @@ export function FactsWorkbench() {
   const [classificationDraft, setClassificationDraft] = useState<PaymentClassificationDraft | null>(null);
   const [classificationBusy, setClassificationBusy] = useState<string | null>(null);
   const [classificationNotice, setClassificationNotice] = useState<string | null>(null);
+  const [transactionConfirming, setTransactionConfirming] = useState<string | null>(null);
+  const [transactionConfirmation, setTransactionConfirmation] = useState<string | null>(null);
+  const [transactionConfirmed, setTransactionConfirmed] = useState(false);
+  const [transactionNotice, setTransactionNotice] = useState<string | null>(null);
 
   useEffect(() => {
     void reloadReview();
@@ -130,6 +135,32 @@ export function FactsWorkbench() {
     }
   }
 
+  function startTransactionConfirmation(transactionId: string) {
+    setTransactionNotice(null);
+    setTransactionConfirmation(transactionId);
+    setTransactionConfirmed(false);
+  }
+
+  async function confirmTransaction(transaction: CaseReviewView["transactions"][number]) {
+    if (!review || review.sourceKind !== "persistent-preview" || review.matterVersion === null || !transactionConfirmed) {
+      setTransactionNotice("请先确认已按原始页核对交易日期、金额、币种、方向和主体。 ");
+      return;
+    }
+    setTransactionConfirming(transaction.transactionId);
+    setTransactionNotice(null);
+    try {
+      const receipt = await confirmPersistentTransaction({ expectedVersion: review.matterVersion, transactionId: transaction.transactionId });
+      await reloadReview();
+      setTransactionConfirmation(null);
+      setTransactionConfirmed(false);
+      setTransactionNotice(`交易已确认（案件版本 ${receipt.matterVersion}）。现在可以另行建立付款分类，分类获批前不会进入利息计算。`);
+    } catch (cause) {
+      setTransactionNotice(cause instanceof Error ? cause.message : "交易候选未确认。 ");
+    } finally {
+      setTransactionConfirming(null);
+    }
+  }
+
   if (error) return <section className={styles.calculationBlocked}><p className={styles.eyebrow}>事实与争点</p><h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "持久化模式未启用" : "案件台账未连接"}</h3><p>{error}</p><small>系统没有回退到另一套数据，也没有把未连接状态显示为成功。</small><button className={styles.candidateAction} onClick={() => void reloadReview()} type="button">重新载入案件</button></section>;
   if (!review) return <section className={styles.calculationLoading}>正在读取案件审批链生成的版本化快照…</section>;
 
@@ -147,7 +178,16 @@ export function FactsWorkbench() {
         {review.issues.map((issue) => <div className={styles.ledgerRow} key={issue.issueId}><strong>{issue.question}</strong><small>{statusLabel(issue.status)} · {issue.factCount} 项确认事实 · {issue.claimCount} 项诉请范围</small></div>)}
       </LedgerSection>
       <LedgerSection title="计算前交易快照" note="付款性质决定是否可进入测算。">
-        {review.transactions.map((transaction) => <div className={styles.ledgerRow} key={transaction.transactionId}><strong>{transaction.date ?? "日期待确认"} · {currencySymbol(transaction.currency)} {transaction.amount}</strong><small>{statusLabel(transaction.status)} · {statusLabel(transaction.nature)} · {transaction.application} · {transaction.currency}</small>{transaction.classification && <small>分类来源：{statusLabel(transaction.classification.origin)}；{transaction.classification.sameDaySequence ? `同日第 ${transaction.classification.sameDaySequence} 笔；` : "未设同日顺序；"}{transaction.classification.allocations.length ? `债务单元 ${transaction.classification.allocations.map((item) => `${item.obligationId} / ${item.amount} ${item.currency}`).join("；")}` : "不进入本金、利息计算。"}</small>}{review.sourceKind === "persistent-preview" && transaction.sourceStatus === "CONFIRMED" && transaction.classification?.status !== "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => startClassification(transaction)} type="button">{transaction.classification ? "更正付款分类" : "建立付款分类"}</button>}{review.sourceKind === "persistent-preview" && transaction.classification?.status === "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => void approveClassification(transaction)} type="button">{classificationBusy === transaction.transactionId ? "正在批准…" : "批准该付款分类"}</button>}{classificationDraft?.transactionId === transaction.transactionId && <PaymentClassificationForm draft={classificationDraft} transaction={transaction} busy={classificationBusy === transaction.transactionId} onChange={setClassificationDraft} onCancel={() => setClassificationDraft(null)} onSubmit={() => void saveClassification(transaction)} />}</div>)}
+        {review.transactions.map((transaction) => <div className={styles.ledgerRow} key={transaction.transactionId}>
+          <strong>{transaction.date ?? "日期待确认"} · {currencySymbol(transaction.currency)} {transaction.amount}</strong>
+          <small>{statusLabel(transaction.status)} · {statusLabel(transaction.nature)} · {transaction.application} · {transaction.currency}</small>
+          {transaction.classification && <small>分类来源：{statusLabel(transaction.classification.origin)}；{transaction.classification.sameDaySequence ? `同日第 ${transaction.classification.sameDaySequence} 笔；` : "未设同日顺序；"}{transaction.classification.allocations.length ? `债务单元 ${transaction.classification.allocations.map((item) => `${item.obligationId} / ${item.amount} ${item.currency}`).join("；")}` : "不进入本金、利息计算。"}</small>}
+          {review.sourceKind === "persistent-preview" && transaction.sourceStatus === "CANDIDATE" && transactionConfirmation !== transaction.transactionId && <button className={styles.candidateAction} disabled={transactionConfirming === transaction.transactionId} onClick={() => startTransactionConfirmation(transaction.transactionId)} type="button">核验并确认交易候选</button>}
+          {review.sourceKind === "persistent-preview" && transaction.sourceStatus === "CANDIDATE" && transactionConfirmation === transaction.transactionId && <div className={styles.paymentClassificationForm}><p>确认会固定此笔候选交易的版本与审计哈希；付款性质、本金冲抵及利息属性仍需在下一步另行判断。</p><label className={styles.formalCalculationCheck}><input checked={transactionConfirmed} disabled={transactionConfirming === transaction.transactionId} onChange={(event) => setTransactionConfirmed(event.target.checked)} type="checkbox" /><span>我已按原始证据逐项核验日期、金额、币种、方向、收付款主体及重复情况。</span></label><div className={styles.formalCalculationActions}><button disabled={transactionConfirming === transaction.transactionId || !transactionConfirmed} onClick={() => void confirmTransaction(transaction)} type="button">{transactionConfirming === transaction.transactionId ? "正在确认…" : "确认本笔交易"}</button><button className={styles.secondaryAction} disabled={transactionConfirming === transaction.transactionId} onClick={() => { setTransactionConfirmation(null); setTransactionConfirmed(false); }} type="button">取消</button></div></div>}
+          {review.sourceKind === "persistent-preview" && transaction.sourceStatus === "CONFIRMED" && transaction.classification?.status !== "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => startClassification(transaction)} type="button">{transaction.classification ? "更正付款分类" : "建立付款分类"}</button>}
+          {review.sourceKind === "persistent-preview" && transaction.classification?.status === "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => void approveClassification(transaction)} type="button">{classificationBusy === transaction.transactionId ? "正在批准…" : "批准该付款分类"}</button>}
+          {classificationDraft?.transactionId === transaction.transactionId && <PaymentClassificationForm draft={classificationDraft} transaction={transaction} busy={classificationBusy === transaction.transactionId} onChange={setClassificationDraft} onCancel={() => setClassificationDraft(null)} onSubmit={() => void saveClassification(transaction)} />}
+        </div>)}
         <LedgerPagination loaded={review.transactionPage.loadedCount} total={review.transactionPage.totalCount} hasMore={review.transactionPage.hasMore} busy={loadingMore === "transactions"} onMore={() => void loadMore("transactions")} />
       </LedgerSection>
       {review.pendingFacts.length > 0 && <LedgerSection title="待律师确认的事实候选" note={review.sourceKind === "synthetic-alpha" ? "此操作仅改变本机合成台账。" : "确认操作固定案件版本、事实标识、决定状态与审计哈希；上游依赖会随决定变化重新核验。"}>
@@ -156,6 +196,7 @@ export function FactsWorkbench() {
     </div>
     {pageError && <div className={styles.inlineError} role="alert"><strong>后续记录未载入</strong><span>{pageError}</span><button className={styles.candidateAction} onClick={() => void reloadReview()} type="button">重新载入当前案件</button></div>}
     {classificationNotice && <div className={styles.inlineError} role="status"><strong>付款分类</strong><span>{classificationNotice}</span></div>}
+    {transactionNotice && <div className={styles.inlineError} role="status"><strong>交易确认</strong><span>{transactionNotice}</span></div>}
     <p className={styles.resultHash}>案件摘要投影 {review.snapshotHash.slice(0, 16)}…{review.transactionSnapshotHash ? `；交易快照 ${review.transactionSnapshotHash.slice(0, 16)}…` : ""}。后续页严格绑定案件版本；修改上游材料或律师决定后，必须重新载入。{review.requestId ? ` 请求号 ${review.requestId}` : ""}</p>
   </section>;
 }
