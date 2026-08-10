@@ -647,7 +647,7 @@ def run() -> int:
                     "challenge_sha256": sha256(challenge.encode("ascii")).hexdigest(),
                     "identity": identity.phase,
                     "persistence": (
-                        "POSTGRES_INTERNAL_PREVIEW"
+                        "CONFIGURED"
                         if persistent_runtime is not None
                         else "NOT_CONFIGURED"
                     ),
