@@ -3,6 +3,25 @@
   "skills": [
     {
       "allowed_tools": [
+        "review_document_consistency"
+      ],
+      "approval_gate": "NONE",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "DocumentConsistencyReport",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ"
+      ],
+      "skill_id": "document_consistency_review",
+      "title": "文书一致性与来源缺口审查",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
         "create_reviewable_docx_draft",
         "create_pdf_derivative"
       ],

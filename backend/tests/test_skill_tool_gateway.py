@@ -10,6 +10,8 @@ import zipfile
 from PIL import Image
 
 from case_kernel.local_access_grants import AuthorizedOriginalFile
+from case_kernel.approved_draft_worker import ApprovedDraft, ApprovedSection
+from case_kernel.document_consistency_reviewer import ApprovedDocumentSnapshot, CanonicalDocumentField
 from case_kernel.skill_registry import CapabilityScope, default_case_skill_registry
 from case_kernel.skill_tool_gateway import CaseSkillToolGateway, SkillToolGatewayBlocked
 
@@ -108,6 +110,29 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
         )
         self.assertEqual(len(result.segments), 2)
         self.assertEqual(len(output_hash), 64)
+
+    def test_document_consistency_review_is_non_mutating_and_available_to_the_agent(self) -> None:
+        draft = ApprovedDraft(
+            title="民事答辩状",
+            sections=(ApprovedSection("意见", ("案号为（2026）粤01民初100号。",), ("fact:1",)),),
+            approval_hash="a" * 64,
+        )
+        result, output_hash = self.gateway.execute(
+            skill_id="document_consistency_review",
+            tool_id="review_document_consistency",
+            payload={
+                "documents": (ApprovedDocumentSnapshot("document-1", "DEFENCE_STATEMENT", draft),),
+                "canonical_fields": (
+                    CanonicalDocumentField("case_no", "案号", "（2026）粤01民初100号", ("DEFENCE_STATEMENT",)),
+                ),
+            },
+            granted_scopes=frozenset({CapabilityScope.CASE_READ}),
+            lawyer_approved=False,
+            release_locked=False,
+        )
+        self.assertEqual(result.blocking_count, 0)
+        self.assertEqual(len(output_hash), 64)
+        self.assertEqual(draft.sections[0].paragraphs[0], "案号为（2026）粤01民初100号。")
 
 
 if __name__ == "__main__":

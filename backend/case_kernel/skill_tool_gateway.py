@@ -24,6 +24,11 @@ from .private_lending_transition_planner import (
     plan_private_lending_interest_transition,
 )
 from .reviewable_draft_worker import create_reviewable_docx_draft, create_reviewable_xlsx_ledger
+from .document_consistency_reviewer import (
+    ApprovedDocumentSnapshot,
+    CanonicalDocumentField,
+    review_document_consistency,
+)
 from .skill_registry import CapabilityScope, CaseSkillRegistry, SkillRegistryBlocked
 
 
@@ -87,6 +92,11 @@ class CaseSkillToolGateway:
                 columns=_text_tuple(payload, "columns"),
                 rows=_ledger_rows(payload),
                 converter=_required_office_converter(self._office_pdf_converter),
+            )
+        elif tool_id == "review_document_consistency":
+            result = review_document_consistency(
+                documents=_document_snapshots(payload),
+                canonical_fields=_canonical_fields(payload),
             )
         elif tool_id == "plan_private_lending_transition":
             result = plan_private_lending_interest_transition(
@@ -169,6 +179,20 @@ def _ledger_rows(payload: dict[str, Any]) -> tuple[tuple[str | int | float | Non
             raise SkillToolGatewayBlocked("ledger rows have an unsupported value type")
         rows.append(row)
     return tuple(rows)
+
+
+def _document_snapshots(payload: dict[str, Any]) -> tuple[ApprovedDocumentSnapshot, ...]:
+    value = payload.get("documents")
+    if not isinstance(value, tuple) or not all(isinstance(item, ApprovedDocumentSnapshot) for item in value):
+        raise SkillToolGatewayBlocked("tool requires tuple[ApprovedDocumentSnapshot] documents")
+    return value
+
+
+def _canonical_fields(payload: dict[str, Any]) -> tuple[CanonicalDocumentField, ...]:
+    value = payload.get("canonical_fields")
+    if not isinstance(value, tuple) or not all(isinstance(item, CanonicalDocumentField) for item in value):
+        raise SkillToolGatewayBlocked("tool requires tuple[CanonicalDocumentField] canonical_fields")
+    return value
 
 
 def _result_hash(result: Any) -> str:
