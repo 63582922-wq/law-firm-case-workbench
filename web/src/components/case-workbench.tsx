@@ -7,7 +7,11 @@ import { FactsWorkbench } from "@/components/facts-workbench";
 import { LegalWorkbench } from "@/components/legal-workbench";
 import { IdentitySecurityWorkbench } from "@/components/identity-security-workbench";
 import { SubmissionWorkbench } from "@/components/submission-workbench";
-import { caseDataSourceConfig } from "@/lib/case-data-source";
+import {
+  caseDataSourceConfig,
+  loadCaseReview,
+  type CaseReviewView,
+} from "@/lib/case-data-source";
 import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
@@ -169,34 +173,7 @@ function Overview({
   syntheticSource: boolean;
 }) {
   if (!syntheticSource) {
-    return (
-      <section className={styles.content} aria-label="案件总览">
-        <div className={styles.contentTopline}>
-          <span>案件总览</span>
-          <span className={styles.statusPill}>等待版本化材料</span>
-        </div>
-        <article className={styles.nextDecision}>
-          <div>
-            <p className={styles.eyebrow}>案件尚未形成可展示的总览快照</p>
-            <h2>先确认案卷范围并接收材料</h2>
-            <p>系统不会以示例案情、示例金额、示例期限或模拟审计记录填充真实案件。完成材料盘点后，证据、事实、法律和计算页面会分别展示各自的版本化快照。</p>
-          </div>
-          <a className={styles.primaryAction} href="/evidence">进入证据核验</a>
-        </article>
-        <section className={styles.overviewGrid} aria-label="案件建立顺序">
-          <article className={styles.paperCard}>
-            <p className={styles.cardKicker}>第一步</p>
-            <h3>本机案卷范围</h3>
-            <p className={styles.cardNote}>由律师选择案件文件夹；系统只登记相对路径、受检哈希和材料状态，不改写原件。</p>
-          </article>
-          <article className={styles.paperCard}>
-            <p className={styles.cardKicker}>第二步</p>
-            <h3>事实与规则</h3>
-            <p className={styles.cardNote}>证据、付款性质、法源和利率期间均须分别确认；没有正式快照时不显示金额或法律结论。</p>
-          </article>
-        </section>
-      </section>
-    );
+    return <PersistentOverview />;
   }
   return (
     <section className={styles.content} aria-label="案件总览">
@@ -248,6 +225,89 @@ function Overview({
           <div className={styles.auditRow} role="row"><span>合成操作员</span><span>创建合成案件</span><span>2026年08月09日 09:30</span></div>
           <div className={styles.auditRow} role="row"><span>系统</span><span>生成原始页摘要</span><span>2026年08月09日 09:31</span></div>
           <div className={styles.auditRow} role="row"><span>系统</span><span>标记疑似重复页（17 / 18）</span><span>2026年08月09日 09:32</span></div>
+        </div>
+      </section>
+    </section>
+  );
+}
+
+function PersistentOverview() {
+  const [state, setState] = useState<
+    | { status: "loading" }
+    | { status: "ready"; review: CaseReviewView }
+    | { status: "blocked"; message: string }
+  >({ status: "loading" });
+
+  useEffect(() => {
+    let active = true;
+    loadCaseReview()
+      .then((review) => {
+        if (active) setState({ status: "ready", review });
+      })
+      .catch((reason: unknown) => {
+        if (active) setState({
+          status: "blocked",
+          message: reason instanceof Error ? reason.message : "案件总览快照读取失败",
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (state.status === "loading") {
+    return <section className={styles.content} aria-label="案件总览"><div className={styles.calculationLoading}>正在读取版本化案件总览…</div></section>;
+  }
+  if (state.status === "blocked") {
+    return (
+      <section className={styles.content} aria-label="案件总览">
+        <div className={styles.contentTopline}><span>案件总览</span><span className={styles.statusPill}>等待版本化材料</span></div>
+        <article className={styles.nextDecision}>
+          <div>
+            <p className={styles.eyebrow}>案件尚未形成可展示的总览快照</p>
+            <h2>先确认案卷范围并接收材料</h2>
+            <p>{state.message}。系统不会以示例案情、示例金额、示例期限或模拟审计记录填充真实案件。</p>
+          </div>
+          <a className={styles.primaryAction} href="/evidence">进入证据核验</a>
+        </article>
+      </section>
+    );
+  }
+  const { review } = state;
+  return (
+    <section className={styles.content} aria-label="案件总览">
+      <div className={styles.contentTopline}>
+        <span>案件总览</span>
+        <span className={styles.statusPill}>案件版本 {review.matterVersion}</span>
+      </div>
+      <article className={styles.nextDecision}>
+        <div>
+          <p className={styles.eyebrow}>版本化案件快照</p>
+          <h2>{review.matterTitle ?? "案件标题待核验"}</h2>
+          <p>总览仅汇集事实与交易台账的数量和快照标识；金额、利率、期限和诉讼结论仍须进入相应工作区复核。</p>
+        </div>
+        <a className={styles.primaryAction} href="/facts">进入事实与争点</a>
+      </article>
+      <section className={styles.overviewGrid} aria-label="案件台账状态">
+        <article className={styles.paperCard}>
+          <p className={styles.cardKicker}>事实台账</p>
+          <h3>{review.factPage.totalCount} 项</h3>
+          <p className={styles.cardNote}>当前页已读取 {review.factPage.loadedCount} 项；待确认 {review.pendingFacts.length} 项。</p>
+        </article>
+        <article className={styles.paperCard}>
+          <p className={styles.cardKicker}>交易台账</p>
+          <h3>{review.transactionPage.totalCount} 项</h3>
+          <p className={styles.cardNote}>当前页已读取 {review.transactionPage.loadedCount} 项；金额与付款性质不在首页推定。</p>
+        </article>
+      </section>
+      <section className={styles.auditBlock} aria-labelledby="persistent-overview-trace">
+        <div className={styles.sectionHeading}>
+          <div><p className={styles.eyebrow}>可追溯性</p><h2 id="persistent-overview-trace">总览快照</h2></div>
+          <span>只读</span>
+        </div>
+        <div className={styles.auditTable} role="table" aria-label="案件总览快照">
+          <div className={styles.auditRow} role="row"><span>数据来源</span><span>{review.sourceLabel}</span><span>案件版本 {review.matterVersion}</span></div>
+          <div className={styles.auditRow} role="row"><span>快照标识</span><span>{review.snapshotHash.slice(0, 16)}…</span><span>{review.requestId ?? "无请求号"}</span></div>
         </div>
       </section>
     </section>
