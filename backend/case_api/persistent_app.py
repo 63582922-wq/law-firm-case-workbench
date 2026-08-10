@@ -96,6 +96,7 @@ from case_kernel.external_request_postgres import (
     PersistentExternalRequestSnapshot,
     PostgresExternalRequestStore,
 )
+from case_kernel.ocr_review_candidate_postgres import PostgresOcrReviewCandidateStore
 from case_kernel.submission_access import (
     SubmissionAccessBlocked,
     SubmissionExportAccessBroker,
@@ -398,6 +399,10 @@ class PersistentExternalRequestPort(Protocol):
 
     def validate_single_page_ocr_execution(self, **kwargs) -> None: ...
 
+
+class PersistentOcrReviewCandidatePort(Protocol):
+    def stage(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot: ...
 
 
@@ -471,6 +476,7 @@ class PersistentApiDependencies:
     local_evidence_intake_authorizations: LocalEvidenceIntakeAuthorizationRegistry | None = None
     original_page_access_broker: OriginalPageAccessBroker | None = None
     native_model_worker: Actor | None = None
+    ocr_review_candidate_store: PersistentOcrReviewCandidatePort | None = None
 
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
@@ -530,6 +536,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.external_request_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL external-request store")
+        if self.ocr_review_candidate_store is not None and not isinstance(
+            self.ocr_review_candidate_store, PostgresOcrReviewCandidateStore
+        ):
+            if not getattr(self.ocr_review_candidate_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL OCR candidate store")
         if (
             self.artifact_access_broker is not None
             or self.submission_access_broker is not None

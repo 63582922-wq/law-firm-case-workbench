@@ -100,6 +100,7 @@ def build_desktop_persistent_runtime(
             services.agent_draft_candidate_store,
             services.document_consistency_store,
             services.external_request_store,
+            services.ocr_review_candidate_store,
             services.artifact_store,
         )
     ):
@@ -130,6 +131,7 @@ def build_desktop_persistent_runtime(
         agent_execution_store=services.agent_execution_store,
         document_consistency_store=services.document_consistency_store,
         external_request_store=services.external_request_store,
+        ocr_review_candidate_store=services.ocr_review_candidate_store,
         artifact_access_broker=EphemeralArtifactAccessBroker(),
         submission_access_broker=SubmissionExportAccessBroker(),
         reviewable_draft_access_broker=ReviewableOfficeDraftAccessBroker(),

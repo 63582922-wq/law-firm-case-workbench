@@ -27,6 +27,7 @@ from .agent_execution_postgres import PostgresAgentExecutionStore
 from .agent_draft_candidate_postgres import PostgresAgentDraftCandidateStore
 from .document_consistency_postgres import PostgresDocumentConsistencyReviewStore
 from .external_request_postgres import PostgresExternalRequestStore
+from .ocr_review_candidate_postgres import PostgresOcrReviewCandidateStore
 from .submission_postgres import PostgresSubmissionStore
 from .skill_registry import default_case_skill_registry
 from .store import InMemoryMatterStore, MatterStore
@@ -123,6 +124,7 @@ class RuntimeServices:
     agent_draft_candidate_store: PostgresAgentDraftCandidateStore | None
     document_consistency_store: PostgresDocumentConsistencyReviewStore | None
     external_request_store: PostgresExternalRequestStore | None
+    ocr_review_candidate_store: PostgresOcrReviewCandidateStore | None
     artifact_store: LocalEncryptedArtifactStore | None
     office_pdf_converter: SandboxedOfficePdfConverter | None
     persistence_label: str
@@ -157,6 +159,7 @@ def build_runtime_services(
             agent_draft_candidate_store=None,
             document_consistency_store=None,
             external_request_store=None,
+            ocr_review_candidate_store=None,
             artifact_store=None,
             office_pdf_converter=None,
             persistence_label="in-memory-synthetic-only",
@@ -203,6 +206,9 @@ def build_runtime_services(
         ),
         document_consistency_store=PostgresDocumentConsistencyReviewStore(dsn),
         external_request_store=PostgresExternalRequestStore(dsn),
+        ocr_review_candidate_store=PostgresOcrReviewCandidateStore(
+            dsn, artifact_reader=artifact_reader
+        ),
         artifact_store=artifact_store,
         office_pdf_converter=office_converter,
         persistence_label="postgres-internal-preview",
