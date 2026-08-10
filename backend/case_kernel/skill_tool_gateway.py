@@ -19,6 +19,7 @@ from .evidence_normalization_worker import normalize_authorized_material
 from .local_access_grants import AuthorizedOriginalFile
 from .office_reading_worker import read_authorized_office_document
 from .office_pdf_conversion_worker import SandboxedOfficePdfConverter
+from .pdf_reading_worker import read_authorized_pdf_document
 from .private_lending_transition_planner import (
     HistoricalInterestPayment,
     plan_private_lending_interest_transition,
@@ -72,6 +73,8 @@ class CaseSkillToolGateway:
         if tool_id == "parse_office_document":
             source = _authorized_source(payload)
             result = read_authorized_office_document(source, detected_kind=_text(payload, "detected_kind"))
+        elif tool_id == "extract_pdf_text":
+            result = read_authorized_pdf_document(_authorized_source(payload))
         elif tool_id == "normalize_image_or_text_pdf":
             source = _authorized_source(payload)
             result = normalize_authorized_material(source, detected_kind=_text(payload, "detected_kind"))

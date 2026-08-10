@@ -163,6 +163,25 @@
     },
     {
       "allowed_tools": [
+        "extract_pdf_text"
+      ],
+      "approval_gate": "MATERIAL_SCOPE",
+      "maturity": "IMPLEMENTED",
+      "output_kind": "PdfExtraction",
+      "prohibited_actions": [
+        "不得改写、删除或移动律师选择的原始案卷文件",
+        "不得把案卷内容发送给未获批准的外部服务",
+        "不得以模型结论替代律师审批或确定性计算"
+      ],
+      "required_scopes": [
+        "CASE_READ"
+      ],
+      "skill_id": "pdf_reading",
+      "title": "PDF 证据受控读取",
+      "version": "1.0.0"
+    },
+    {
+      "allowed_tools": [
         "create_reviewable_xlsx_ledger"
       ],
       "approval_gate": "LAWYER_REVIEW",

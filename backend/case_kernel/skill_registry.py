@@ -128,6 +128,7 @@ def default_case_skill_registry(*, reviewable_office_drafts_enabled: bool = Fals
     tools = (
         ToolDefinition("register_source_file", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
         ToolDefinition("inspect_pdf_structure", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
+        ToolDefinition("extract_pdf_text", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
         ToolDefinition("inspect_non_pdf_structure", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
         ToolDefinition("normalize_image_or_text_pdf", "1.0.0", frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), False, False, True),
         ToolDefinition("render_registered_page", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
@@ -150,6 +151,7 @@ def default_case_skill_registry(*, reviewable_office_drafts_enabled: bool = Fals
     )
     skills = (
         SkillDefinition("material_inventory", "1.0.0", "材料盘点与安全读取", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("register_source_file", "inspect_pdf_structure", "inspect_non_pdf_structure"), ApprovalGate.MATERIAL_SCOPE, "EvidenceInventory", no_original_mutation),
+        SkillDefinition("pdf_reading", "1.0.0", "PDF 证据受控读取", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("extract_pdf_text",), ApprovalGate.MATERIAL_SCOPE, "PdfExtraction", no_original_mutation),
         SkillDefinition("evidence_pdf_normalization", "1.0.0", "图片与文本证据 PDF 规范化", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("normalize_image_or_text_pdf", "render_registered_page"), ApprovalGate.MATERIAL_SCOPE, "NormalizedEvidencePdf", no_original_mutation),
         SkillDefinition("office_reading", "1.0.0", "Word 与 Excel 受控读取", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("parse_office_document",), ApprovalGate.MATERIAL_SCOPE, "OfficeExtraction", no_original_mutation),
         SkillDefinition("office_pdf_rendering", "1.0.0", "Word 与 Excel 隔离转 PDF", SkillMaturity.IMPLEMENTED if reviewable_office_drafts_enabled else SkillMaturity.GATED, frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("render_office_to_pdf",), ApprovalGate.MATERIAL_SCOPE, "RenderedOfficePdf", no_original_mutation),

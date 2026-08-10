@@ -8,6 +8,7 @@ import unittest
 import zipfile
 
 from PIL import Image
+from reportlab.pdfgen import canvas
 
 from case_kernel.local_access_grants import AuthorizedOriginalFile
 from case_kernel.approved_draft_worker import ApprovedDraft, ApprovedSection
@@ -63,6 +64,32 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
             )
         self.assertEqual(result.paragraphs[0].text, "已付利息")
         self.assertEqual(len(output_hash), 64)
+
+    def test_enabled_pdf_reading_requires_an_authorized_handle(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "付款凭证.pdf"
+            document = canvas.Canvas(str(path))
+            document.drawString(72, 720, "已付利息 300 元")
+            document.save()
+            result, output_hash = self.gateway.execute(
+                skill_id="pdf_reading",
+                tool_id="extract_pdf_text",
+                payload={"source": self._source(path)},
+                granted_scopes=frozenset({CapabilityScope.CASE_READ}),
+                lawyer_approved=False,
+                release_locked=False,
+            )
+        self.assertIn("300", result.pages[0].text)
+        self.assertEqual(len(output_hash), 64)
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "authorized original"):
+            self.gateway.execute(
+                skill_id="pdf_reading",
+                tool_id="extract_pdf_text",
+                payload={"source": "/arbitrary/path.pdf"},
+                granted_scopes=frozenset({CapabilityScope.CASE_READ}),
+                lawyer_approved=False,
+                release_locked=False,
+            )
 
     def test_gated_drafting_and_unregistered_adapter_are_blocked(self) -> None:
         with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):

@@ -53,6 +53,7 @@ change_log:
 |---|---|---|
 | `matter_intake` | 案件角色、案由、材料范围 | 当事人角色、委托范围 |
 | `material_inventory` | 原件清单、哈希、页数、异常、缺口 | 材料范围 |
+| `pdf_reading` | 已授权静态 PDF 的逐页文本及页级哈希 | 材料范围 |
 | `page_deduplication` | 重复组、保留页建议 | 疑似重复页处理 |
 | `relevant_page_extraction` | 相关页和红框坐标 | 保留/排除范围 |
 | `identity_alias_resolution` | 人、昵称、账号、账户映射 | 低置信身份关系 |
