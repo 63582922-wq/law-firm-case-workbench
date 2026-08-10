@@ -63,6 +63,10 @@ from case_api.desktop_agent_draft_runtime import (
     DesktopAgentDraftRuntimeBlocked,
     build_desktop_agent_draft_runtime,
 )
+from case_api.desktop_evidence_intake_runtime import (
+    DesktopEvidenceIntakeRuntimeBlocked,
+    build_desktop_evidence_intake_runtime,
+)
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeSettings
 
@@ -652,11 +656,21 @@ def run() -> int:
             if persistent_runtime is not None
             else None
         )
+        intake_runtime = (
+            build_desktop_evidence_intake_runtime(
+                identity=identity,
+                environ=os.environ,
+                persistent_runtime=persistent_runtime,
+            )
+            if persistent_runtime is not None
+            else None
+        )
     except (
         RuntimeConfigurationBlocked,
         DesktopPersistentRuntimeBlocked,
         DesktopOfficialCaptureRuntimeBlocked,
         DesktopAgentDraftRuntimeBlocked,
+        DesktopEvidenceIntakeRuntimeBlocked,
     ):
         server_socket.close()
         print("本机受控服务的持久化前置条件未通过。", file=sys.stderr, flush=True)
@@ -691,6 +705,9 @@ def run() -> int:
                         "ASSEMBLED"
                         if agent_draft_runtime is not None
                         else "NOT_CONFIGURED"
+                    ),
+                    "evidence_intake_worker": (
+                        "ASSEMBLED" if intake_runtime is not None else "NOT_CONFIGURED"
                     ),
                     "enrollment_trust": trust.phase,
                 },
@@ -735,11 +752,19 @@ def run() -> int:
             daemon=True,
             name="lawcase-official-capture-worker",
         ).start()
+    if intake_runtime is not None:
+        Thread(
+            target=intake_runtime.supervisor.run,
+            daemon=True,
+            name="lawcase-evidence-intake-worker",
+        ).start()
     try:
         server.run(sockets=[server_socket])
     finally:
         if capture_runtime is not None:
             capture_runtime.stop.set()
+        if intake_runtime is not None:
+            intake_runtime.stop.set()
         server_socket.close()
     return 0
 

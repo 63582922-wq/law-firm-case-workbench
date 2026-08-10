@@ -59,6 +59,7 @@ from case_kernel.local_access_grants import (
     LocalFolderGrantRegistry,
     LocalSessionProof,
 )
+from case_kernel.local_intake_authorizations import LocalEvidenceIntakeAuthorizationRegistry
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
 from case_kernel.original_page_access import (
     OriginalPageAccessBlocked,
@@ -464,6 +465,7 @@ class PersistentApiDependencies:
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
     local_folder_grants: LocalFolderGrantRegistry | None = None
+    local_evidence_intake_authorizations: LocalEvidenceIntakeAuthorizationRegistry | None = None
     original_page_access_broker: OriginalPageAccessBroker | None = None
 
     def validate(self) -> None:
@@ -555,6 +557,9 @@ class PersistentApiDependencies:
                 and self.original_page_access_broker.artifact_store is not self.artifact_store
             ):
                 raise ValueError("normalized original-page access must use the configured encrypted artifact store")
+        if self.local_evidence_intake_authorizations is not None:
+            if self.local_folder_grants is None or self.evidence_manifest_store is None:
+                raise ValueError("local intake authorization requires folder grants and evidence persistence")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
@@ -2867,17 +2872,25 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             raise LocalFolderAccessBlocked(
                 "the case folder changed after approval; rescan and approve the new scope before material intake"
             )
-        return _receipt(
-            evidence_store.enqueue_evidence_intake_run(
-                matter_id=str(matter_id),
-                scan_id=str(body.scan_id),
-                actor=identity.actor,
-                expected_version=body.expected_version,
-                idempotency_key=idempotency_key,
-                scan_manifest_hash=body.scan_manifest_hash,
-                approval_hash=body.approval_hash,
-            )
+        receipt = evidence_store.enqueue_evidence_intake_run(
+            matter_id=str(matter_id),
+            scan_id=str(body.scan_id),
+            actor=identity.actor,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
+            scan_manifest_hash=body.scan_manifest_hash,
+            approval_hash=body.approval_hash,
         )
+        if dependencies.local_evidence_intake_authorizations is not None:
+            dependencies.local_evidence_intake_authorizations.bind(
+                run_id=receipt.object_id,
+                matter_id=str(matter_id),
+                folder_grant_id=str(body.folder_grant_id),
+                grant_actor=identity.actor,
+                grant_session=_local_session(identity),
+                expected_version=receipt.matter_version,
+            )
+        return _receipt(receipt)
 
     @app.post(
         "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/claim",

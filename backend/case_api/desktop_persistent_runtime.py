@@ -16,6 +16,7 @@ from typing import Mapping
 from case_kernel.artifact_access import EphemeralArtifactAccessBroker
 from case_kernel.artifact_key_provider import ArtifactKeyProvider, MacOSKeychainArtifactKeyProvider
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
+from case_kernel.local_intake_authorizations import LocalEvidenceIntakeAuthorizationRegistry
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.original_page_access import OriginalPageAccessBroker
 from case_kernel.reviewable_draft_access import ReviewableOfficeDraftAccessBroker
@@ -106,6 +107,7 @@ def build_desktop_persistent_runtime(
         )
 
     folder_grants = LocalFolderGrantRegistry()
+    intake_authorizations = LocalEvidenceIntakeAuthorizationRegistry()
     dependencies = PersistentApiDependencies(
         settings=settings,
         matter_store=services.matter_store,
@@ -126,6 +128,7 @@ def build_desktop_persistent_runtime(
         reviewable_draft_access_broker=ReviewableOfficeDraftAccessBroker(),
         artifact_store=services.artifact_store,
         local_folder_grants=folder_grants,
+        local_evidence_intake_authorizations=intake_authorizations,
         original_page_access_broker=OriginalPageAccessBroker(
             folder_grants=folder_grants,
             artifact_store=services.artifact_store,

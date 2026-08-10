@@ -92,6 +92,7 @@ struct LocalApiReady {
     enrollment_trust: String,
     persistence: String,
     agent_draft_executor: String,
+    evidence_intake_worker: String,
 }
 
 #[derive(Deserialize)]
@@ -232,6 +233,10 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         || !matches!(ready.persistence.as_str(), "NOT_CONFIGURED" | "CONFIGURED")
         || !matches!(
             ready.agent_draft_executor.as_str(),
+            "NOT_CONFIGURED" | "ASSEMBLED"
+        )
+        || !matches!(
+            ready.evidence_intake_worker.as_str(),
             "NOT_CONFIGURED" | "ASSEMBLED"
         )
     {
@@ -1237,7 +1242,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let payload = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
@@ -1252,7 +1257,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let extra = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         let invalid = extra.replace(",\"role\":\"ADMIN\"", "").replace(
