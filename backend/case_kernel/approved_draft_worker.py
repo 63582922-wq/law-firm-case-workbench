@@ -145,6 +145,12 @@ def create_pdf_draft(draft: ApprovedDraft) -> DraftArtifact:
     return _artifact("application/pdf", destination.getvalue())
 
 
+def validate_approved_draft(draft: ApprovedDraft) -> None:
+    """Validate a bounded approved snapshot for controlled downstream workers."""
+
+    _validate_draft(draft)
+
+
 def _validate_draft(draft: ApprovedDraft) -> None:
     _validate_approval_hash(draft.approval_hash)
     if not draft.title.strip() or len(draft.title) > 240:
