@@ -143,7 +143,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
         </aside>
 
         {view === "overview" ? (
-          <Overview unresolvedCount={unresolvedCount} />
+          <Overview unresolvedCount={unresolvedCount} syntheticSource={syntheticSource} />
         ) : view === "evidence" ? (
           <EvidenceManifestWorkbench />
         ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : view === "calculation" ? (
@@ -161,7 +161,43 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
   );
 }
 
-function Overview({ unresolvedCount }: { unresolvedCount: number }) {
+function Overview({
+  unresolvedCount,
+  syntheticSource,
+}: {
+  unresolvedCount: number;
+  syntheticSource: boolean;
+}) {
+  if (!syntheticSource) {
+    return (
+      <section className={styles.content} aria-label="案件总览">
+        <div className={styles.contentTopline}>
+          <span>案件总览</span>
+          <span className={styles.statusPill}>等待版本化材料</span>
+        </div>
+        <article className={styles.nextDecision}>
+          <div>
+            <p className={styles.eyebrow}>案件尚未形成可展示的总览快照</p>
+            <h2>先确认案卷范围并接收材料</h2>
+            <p>系统不会以示例案情、示例金额、示例期限或模拟审计记录填充真实案件。完成材料盘点后，证据、事实、法律和计算页面会分别展示各自的版本化快照。</p>
+          </div>
+          <a className={styles.primaryAction} href="/evidence">进入证据核验</a>
+        </article>
+        <section className={styles.overviewGrid} aria-label="案件建立顺序">
+          <article className={styles.paperCard}>
+            <p className={styles.cardKicker}>第一步</p>
+            <h3>本机案卷范围</h3>
+            <p className={styles.cardNote}>由律师选择案件文件夹；系统只登记相对路径、受检哈希和材料状态，不改写原件。</p>
+          </article>
+          <article className={styles.paperCard}>
+            <p className={styles.cardKicker}>第二步</p>
+            <h3>事实与规则</h3>
+            <p className={styles.cardNote}>证据、付款性质、法源和利率期间均须分别确认；没有正式快照时不显示金额或法律结论。</p>
+          </article>
+        </section>
+      </section>
+    );
+  }
   return (
     <section className={styles.content} aria-label="案件总览">
       <div className={styles.contentTopline}>
