@@ -68,7 +68,7 @@ _RESEARCH_INPUTS: dict[str, tuple[str, str]] = {
     ),
     "SPC-PRIVATE-LENDING-2020-SECOND-REVISION": (
         "民间借贷利率保护与过渡规则",
-        "民间借贷司法解释 2020年第二次修正 第二十五条 第三十一条",
+        "民间借贷司法解释 2020年第二次修正 第二十四条至第三十一条 利率保护 过渡规则",
     ),
     "SPC-PRIVATE-LENDING-2020-FIRST-REVISION": (
         "民间借贷2020年第一次修正历史文本",

@@ -49,10 +49,40 @@ _TITLE = "最高人民法院关于审理民间借贷案件适用法律若干问�
 _VERSION_MARKERS = ("第一次修正", "第二次修正")
 _ARTICLE_RULES = (
     (
+        "PRIVATE_LENDING_ARTICLE_24",
+        "第二十四条",
+        "第二十五条",
+        ("没有约定利息", "自然人之间", "约定不明"),
+    ),
+    (
         "PRIVATE_LENDING_ARTICLE_25",
         "第二十五条",
         "第二十六条",
         ("合同成立时", "一年期贷款市场报价利率四倍", "2019年8月20日"),
+    ),
+    (
+        "PRIVATE_LENDING_ARTICLE_26",
+        "第二十六条",
+        "第二十七条",
+        ("债权凭证载明的借款金额", "预先在本金中扣除利息", "实际出借的金额"),
+    ),
+    (
+        "PRIVATE_LENDING_ARTICLE_27",
+        "第二十七条",
+        "第二十八条",
+        ("前期借款本息结算", "利息计入后期借款本金", "超过部分的利息"),
+    ),
+    (
+        "PRIVATE_LENDING_ARTICLE_28",
+        "第二十八条",
+        "第二十九条",
+        ("逾期利率", "当时一年期贷款市场报价利率", "借期内利率"),
+    ),
+    (
+        "PRIVATE_LENDING_ARTICLE_29",
+        "第二十九条",
+        "第三十条",
+        ("逾期利率", "违约金或者其他费用", "合同成立时一年期贷款市场报价利率四倍"),
     ),
     (
         "PRIVATE_LENDING_ARTICLE_31",
@@ -332,9 +362,9 @@ def _anchored_republished_segment(text: str) -> str:
     version_prefix = segment[:1200]
     if any(marker not in version_prefix for marker in _VERSION_MARKERS):
         raise LegalProvisionParseBlocked("republished private-lending version history is incomplete")
-    article_25 = segment.find("第二十五条")
+    article_24 = segment.find("第二十四条")
     article_31 = segment.find("第三十一条")
-    if article_25 < 0 or article_31 <= article_25:
+    if article_24 < 0 or article_31 <= article_24:
         raise LegalProvisionParseBlocked("republished private-lending article order is invalid")
     return segment
 

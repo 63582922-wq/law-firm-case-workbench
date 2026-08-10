@@ -83,21 +83,32 @@ class LegalProvisionParserTests(unittest.TestCase):
         <h1>最高人民法院 关于审理民间借贷案件适用法律若干问题的规定</h1>
         <p>根据2020年8月18日决定第一次修正，根据2020年12月23日决定第二次修正。</p>
         <p>第一条 本规定适用于民间借贷。</p>
+        <p>第二十四条 借贷双方没有约定利息，出借人主张支付利息的，人民法院不予支持。自然人之间借贷对利息约定不明，出借人主张支付利息的，人民法院不予支持。</p>
         <p>第二十五条 出借人请求借款人按照合同约定利率支付利息的，人民法院应予支持，但是双方约定的利率超过{article_25_marker}一年期贷款市场报价利率四倍的除外。前款所称一年期贷款市场报价利率，是指自2019年8月20日起每月发布的数据。</p>
-        <p>第二十六条 实际出借金额为本金。</p>
+        <p>第二十六条 借据、收据、欠条等债权凭证载明的借款金额，一般认定为本金。预先在本金中扣除利息的，人民法院应当将实际出借的金额认定为本金。</p>
+        <p>第二十七条 借贷双方对前期借款本息结算后将利息计入后期借款本金，超过部分的利息，不应认定为后期借款本金。</p>
+        <p>第二十八条 借贷双方对逾期利率有约定的，从其约定。既未约定借期内利率，也未约定逾期利率的，参照当时一年期贷款市场报价利率标准计算。约定了借期内利率但是未约定逾期利率的，按照借期内利率计算。</p>
+        <p>第二十九条 出借人与借款人既约定了逾期利率，又约定了违约金或者其他费用，总计超过合同成立时一年期贷款市场报价利率四倍的部分，人民法院不予支持。</p>
+        <p>第三十条 借款人可以提前偿还借款。</p>
         <p>第三十一条 本规定施行后新受理的一审案件适用本规定。2020年8月20日之后新受理且合同成立在此前的案件，合同成立至2020年8月19日按请求审查；此后部分适用起诉时本规定的利率保护标准。以本规定为准。</p>
         </article></body></html>"""
         return html.encode("utf-8")
 
-    def test_parser_anchors_inside_republished_document_and_extracts_articles_25_and_31(self) -> None:
+    def test_parser_anchors_inside_republished_document_and_extracts_the_interest_rule_set(self) -> None:
         parsed = parse_private_lending_second_revision(
             capture=self.capture(self.document()), artifact_store=self.store
         )
         self.assertEqual(parsed.version_label, "2020年第二次修正")
-        self.assertEqual([item.provision_label for item in parsed.provisions], ["第二十五条", "第三十一条"])
-        self.assertIn("合同成立时", parsed.provisions[0].normalized_text)
-        self.assertIn("适用起诉时", parsed.provisions[1].normalized_text)
-        self.assertNotIn("无关条文", parsed.provisions[0].normalized_text)
+        self.assertEqual(
+            [item.provision_label for item in parsed.provisions],
+            ["第二十四条", "第二十五条", "第二十六条", "第二十七条", "第二十八条", "第二十九条", "第三十一条"],
+        )
+        self.assertIn("没有约定利息", parsed.provisions[0].normalized_text)
+        self.assertIn("合同成立时", parsed.provisions[1].normalized_text)
+        self.assertIn("预先在本金中扣除利息", parsed.provisions[2].normalized_text)
+        self.assertIn("逾期利率", parsed.provisions[4].normalized_text)
+        self.assertIn("适用起诉时", parsed.provisions[-1].normalized_text)
+        self.assertNotIn("无关条文", parsed.provisions[1].normalized_text)
         self.assertEqual(parsed.review_status, "HUMAN_REVIEW_REQUIRED")
 
     def test_missing_temporal_marker_or_version_history_is_blocked(self) -> None:
