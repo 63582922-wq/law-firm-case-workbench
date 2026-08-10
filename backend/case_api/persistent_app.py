@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from ipaddress import ip_address
 from typing import Annotated, Protocol
+from urllib.parse import quote
 from uuid import UUID
 from uuid import uuid4
 
@@ -65,6 +66,15 @@ from case_kernel.submission_postgres import (
     PersistentSubmissionSnapshot,
     PostgresSubmissionStore,
     SubmissionComponentSelection,
+)
+from case_kernel.reviewable_draft_access import (
+    ReviewableDraftAccessBlocked,
+    ReviewableDraftAccessPurpose,
+    ReviewableOfficeDraftAccessBroker,
+)
+from case_kernel.reviewable_draft_postgres import (
+    PersistentReviewableOfficeDraftSnapshot,
+    PostgresReviewableDraftStore,
 )
 from case_kernel.submission_access import (
     SubmissionAccessBlocked,
@@ -160,6 +170,9 @@ from .schemas import (
     PersistentSubmissionQaRequest,
     PersistentSubmissionSnapshotResponse,
     PersistentSubmissionWorkProductRequest,
+    PersistentReviewableOfficeDraftAccessRequest,
+    PersistentReviewableOfficeDraftAccessResponse,
+    PersistentReviewableOfficeDraftSnapshotResponse,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
     PersistentTransactionPageResponse,
@@ -314,6 +327,16 @@ class PersistentSubmissionPort(Protocol):
     def get_verified_export_locator(self, **kwargs): ...
 
 
+class PersistentReviewableDraftPort(Protocol):
+    def approve_reviewable_office_draft_pair(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_reviewable_office_draft_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentReviewableOfficeDraftSnapshot: ...
+
+    def get_reviewable_office_draft_artifact_locator(self, **kwargs): ...
+
+
 class PersistentOfficialSourceCapturePort(Protocol):
     def queue_capture(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -344,6 +367,10 @@ class PersistentSubmissionServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentReviewableDraftServiceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PersistentApiDependencies:
     settings: RuntimeSettings
@@ -355,7 +382,9 @@ class PersistentApiDependencies:
     legal_source_store: PersistentLegalSourcePort | None = None
     official_source_capture_store: PersistentOfficialSourceCapturePort | None = None
     submission_store: PersistentSubmissionPort | None = None
+    reviewable_draft_store: PersistentReviewableDraftPort | None = None
     submission_access_broker: SubmissionExportAccessBroker | None = None
+    reviewable_draft_access_broker: ReviewableOfficeDraftAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
     artifact_store: LocalEncryptedArtifactStore | None = None
     local_folder_grants: LocalFolderGrantRegistry | None = None
@@ -396,14 +425,21 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.submission_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL submission store")
+        if self.reviewable_draft_store is not None and not isinstance(
+            self.reviewable_draft_store, PostgresReviewableDraftStore
+        ):
+            if not getattr(self.reviewable_draft_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL reviewable-draft store")
         if (
             self.artifact_access_broker is not None
             or self.submission_access_broker is not None
+            or self.reviewable_draft_access_broker is not None
         ) and self.artifact_store is None:
             raise ValueError("artifact access brokers require the encrypted artifact store")
         if self.artifact_store is not None and (
             self.artifact_access_broker is None
             and self.submission_access_broker is None
+            and self.reviewable_draft_access_broker is None
             and self.original_page_access_broker is None
         ):
             raise ValueError("encrypted artifact store requires at least one guarded access broker")
@@ -411,6 +447,8 @@ class PersistentApiDependencies:
             raise ValueError("artifact access requires the guarded evidence Manifest store")
         if self.submission_access_broker is not None and self.submission_store is None:
             raise ValueError("submission access requires the guarded submission store")
+        if self.reviewable_draft_access_broker is not None and self.reviewable_draft_store is None:
+            raise ValueError("reviewable draft access requires the guarded reviewable-draft store")
         if (self.local_folder_grants is None) != (self.original_page_access_broker is None):
             raise ValueError("original-page access requires both the folder grant registry and preview broker")
         if self.original_page_access_broker is not None:
@@ -482,8 +520,10 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "legal_source": "configured" if dependencies.legal_source_store else "not-configured",
             "official_source_capture": "configured" if dependencies.official_source_capture_store else "not-configured",
             "submission": "configured" if dependencies.submission_store else "not-configured",
+            "reviewable_drafts": "configured" if dependencies.reviewable_draft_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
+            "reviewable_draft_access": "configured" if dependencies.reviewable_draft_access_broker else "not-configured",
             "original_page_access": "configured" if dependencies.original_page_access_broker else "not-configured",
             "desktop_session": "configured" if dependencies.desktop_session_authority else "not-configured",
         }
@@ -536,6 +576,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             )
         return dependencies.submission_store
 
+    def get_reviewable_draft_store() -> PersistentReviewableDraftPort:
+        if dependencies.reviewable_draft_store is None:
+            raise PersistentReviewableDraftServiceUnavailable(
+                "reviewable Office draft persistence is not configured"
+            )
+        return dependencies.reviewable_draft_store
+
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
             raise PersistentEvidenceServiceUnavailable("encrypted artifact access is not configured")
@@ -549,6 +596,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "verified submission export access is not configured"
             )
         return dependencies.submission_access_broker, dependencies.artifact_store
+
+    def require_reviewable_draft_artifact_services() -> tuple[
+        ReviewableOfficeDraftAccessBroker, LocalEncryptedArtifactStore
+    ]:
+        if dependencies.reviewable_draft_access_broker is None or dependencies.artifact_store is None:
+            raise PersistentReviewableDraftServiceUnavailable(
+                "reviewable Office draft encrypted access is not configured"
+            )
+        return dependencies.reviewable_draft_access_broker, dependencies.artifact_store
 
     def require_original_page_services() -> tuple[LocalFolderGrantRegistry, OriginalPageAccessBroker]:
         if dependencies.local_folder_grants is None or dependencies.original_page_access_broker is None:
@@ -652,6 +708,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "提交材料服务尚未启用，未生成或回退到合成文件。",
         )
 
+    @app.exception_handler(PersistentReviewableDraftServiceUnavailable)
+    async def reviewable_draft_service_handler(_: Request, exc: PersistentReviewableDraftServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "REVIEWABLE_DRAFT_SERVICE_UNAVAILABLE",
+            "可审阅 Word/Excel 草稿服务尚未启用，系统不会暴露未验证文件。",
+        )
+
     @app.exception_handler(ManagedArtifactBlocked)
     async def managed_artifact_handler(_: Request, exc: ManagedArtifactBlocked):
         del exc
@@ -686,6 +751,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_403_FORBIDDEN,
             "SUBMISSION_ACCESS_DENIED",
             "法院提交包下载许可无效、已过期或不属于当前本机会话。",
+        )
+
+    @app.exception_handler(ReviewableDraftAccessBlocked)
+    async def reviewable_draft_access_handler(_: Request, exc: ReviewableDraftAccessBlocked):
+        del exc
+        return _error(
+            status.HTTP_403_FORBIDDEN,
+            "REVIEWABLE_DRAFT_ACCESS_DENIED",
+            "可审阅草稿访问许可无效、已过期或不属于当前本机会话。",
         )
 
     if dependencies.desktop_session_authority is not None:
@@ -1205,6 +1279,102 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 work_product_id=str(work_product_id),
                 approval_hash=body.approval_hash,
             )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/reviewable-office-drafts",
+        response_model=PersistentReviewableOfficeDraftSnapshotResponse,
+        tags=["draft-review"],
+    )
+    async def get_reviewable_office_drafts(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        draft_store: Annotated[PersistentReviewableDraftPort, Depends(get_reviewable_draft_store)],
+    ) -> PersistentReviewableOfficeDraftSnapshotResponse:
+        snapshot = draft_store.get_reviewable_office_draft_snapshot(
+            matter_id=str(matter_id), actor=identity.actor
+        )
+        return PersistentReviewableOfficeDraftSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/reviewable-office-drafts/{pair_id}/approve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["draft-review"],
+    )
+    async def approve_reviewable_office_draft(
+        matter_id: UUID,
+        pair_id: UUID,
+        body: PersistentApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        draft_store: Annotated[PersistentReviewableDraftPort, Depends(get_reviewable_draft_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            draft_store.approve_reviewable_office_draft_pair(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                pair_id=str(pair_id), approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/reviewable-office-drafts/{pair_id}/access",
+        response_model=PersistentReviewableOfficeDraftAccessResponse,
+        tags=["draft-review"],
+    )
+    async def issue_reviewable_office_draft_access(
+        matter_id: UUID,
+        pair_id: UUID,
+        body: PersistentReviewableOfficeDraftAccessRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        draft_store: Annotated[PersistentReviewableDraftPort, Depends(get_reviewable_draft_store)],
+    ) -> PersistentReviewableOfficeDraftAccessResponse:
+        broker, _ = require_reviewable_draft_artifact_services()
+        purpose = ReviewableDraftAccessPurpose(body.purpose)
+        locator = draft_store.get_reviewable_office_draft_artifact_locator(
+            matter_id=str(matter_id), pair_id=str(pair_id), purpose=purpose, actor=identity.actor,
+        )
+        issued = broker.issue(locator=locator, actor=identity.actor, session=_local_session(identity))
+        return PersistentReviewableOfficeDraftAccessResponse(
+            grant_id=issued.grant_id, pair_id=issued.pair_id, purpose=issued.purpose.value,
+            access_token=issued.access_token, expires_at=issued.expires_at,
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/reviewable-office-drafts/{pair_id}/content",
+        response_class=Response,
+        tags=["draft-review"],
+    )
+    async def deliver_reviewable_office_draft(
+        matter_id: UUID,
+        pair_id: UUID,
+        request: Request,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        authorization: Annotated[str | None, Header()] = None,
+    ) -> Response:
+        broker, artifact_store = require_reviewable_draft_artifact_services()
+        if request.client is None:
+            raise PersistentRequestBlocked("local client address is unavailable")
+        delivery = broker.deliver(
+            access_token=_bearer_token(authorization), actor=identity.actor,
+            matter_id=str(matter_id), pair_id=str(pair_id), session=_local_session(identity),
+            client_ip=request.client.host, artifact_store=artifact_store,
+        )
+        disposition = "inline" if delivery.purpose is ReviewableDraftAccessPurpose.REVIEW_PDF else "attachment"
+        fallback_name = "reviewable-draft.pdf" if disposition == "inline" else "reviewable-draft-office"
+        content_disposition = (
+            f'{disposition}; filename="{fallback_name}"; '
+            f"filename*=UTF-8''{quote(delivery.file_name)}"
+        )
+        return Response(
+            content=delivery.content, media_type=delivery.media_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Content-Disposition": content_disposition,
+                "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-SHA256": delivery.artifact_sha256,
+            },
         )
 
     @app.post(

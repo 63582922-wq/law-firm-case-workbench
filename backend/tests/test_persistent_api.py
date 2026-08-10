@@ -42,6 +42,12 @@ from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
+from case_kernel.reviewable_draft_access import (
+    ReviewableDraftAccessPurpose,
+    ReviewableOfficeDraftAccessBroker,
+    ReviewableOfficeDraftArtifactLocator,
+)
+from case_kernel.reviewable_draft_postgres import PersistentReviewableOfficeDraftSnapshot
 from case_kernel.official_source_capture_postgres import PersistentOfficialSourceCaptureSnapshot
 from case_kernel.runtime import RuntimeMode, RuntimeSettings
 from case_kernel.submission_postgres import PersistentSubmissionSnapshot
@@ -625,6 +631,63 @@ class FakePersistentSubmissionStore:
         if self.locator is None:
             raise KeyError(kwargs["export_id"])
         return self.locator
+
+
+class FakePersistentReviewableDraftStore:
+    """A deliberately narrow persistent API double; encrypted keys never reach JSON."""
+
+    persistent_test_double = True
+
+    def __init__(self, *, pair_id: str, locator: ReviewableOfficeDraftArtifactLocator) -> None:
+        self.pair_id = pair_id
+        self.locator = locator
+        self.calls: list[tuple[str, dict]] = []
+
+    def get_reviewable_office_draft_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
+        now = datetime.now(timezone.utc).isoformat()
+        return PersistentReviewableOfficeDraftSnapshot(
+            matter_id=matter_id,
+            matter_version=12,
+            pairs=(
+                {
+                    "pair_id": self.pair_id,
+                    "document_kind": "DEFENCE_STATEMENT",
+                    "editable_media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "editable_sha256": "a" * 64,
+                    "editable_bytes": 32,
+                    "review_pdf_sha256": self.locator.artifact_sha256,
+                    "review_pdf_bytes": self.locator.byte_size,
+                    "review_pdf_page_count": 1,
+                    "approval_input_hash": "b" * 64,
+                    "render_verification_hash": "c" * 64,
+                    "review_input_hash": "d" * 64,
+                    "status": "CANDIDATE",
+                    "registered_by": actor.actor_id,
+                    "approved_by": None,
+                    "approval_hash": None,
+                    "approved_at": None,
+                    "created_at": now,
+                },
+            ),
+            snapshot_hash="e" * 64,
+        )
+
+    def get_reviewable_office_draft_artifact_locator(self, **kwargs):
+        self.calls.append(("get_artifact_locator", kwargs))
+        return self.locator
+
+    def approve_reviewable_office_draft_pair(self, **kwargs):
+        self.calls.append(("approve", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="APPROVE_REVIEWABLE_OFFICE_DRAFT_PAIR",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="REVIEWABLE_OFFICE_DRAFT_PAIR",
+            object_id=kwargs["pair_id"],
+        )
 
 
 class FakePersistentOfficialSourceCaptureStore:
@@ -1792,6 +1855,98 @@ class PersistentApiTests(unittest.TestCase):
             )
             self.assertEqual(replay.status_code, 403)
             self.assertEqual(replay.json()["code"], "SUBMISSION_ACCESS_DENIED")
+
+    def test_reviewable_office_draft_preview_is_private_and_one_use(self) -> None:
+        with TemporaryDirectory(prefix="persistent-reviewable-draft-api-test-") as temporary:
+            root = Path(temporary)
+            case_root = root / "case"
+            case_root.mkdir()
+            review_pdf = b"%PDF-1.4\n1 0 obj <<>>\nendobj\ntrailer <<>>\n%%EOF\n"
+            review_hash = sha256(review_pdf).hexdigest()
+            artifact_store = LocalEncryptedArtifactStore(
+                root / "managed",
+                key_id="synthetic-reviewable-draft-api-key-v1",
+                encryption_key=b"r" * 32,
+            )
+            stored = artifact_store.put_bytes(
+                review_pdf, expected_sha256=review_hash, case_root=case_root
+            )
+            pair_id = str(uuid4())
+            locator = ReviewableOfficeDraftArtifactLocator(
+                firm_id=self.firm_id,
+                matter_id=self.matter_id,
+                pair_id=pair_id,
+                purpose=ReviewableDraftAccessPurpose.REVIEW_PDF,
+                media_type="application/pdf",
+                object_key=stored.object_key,
+                artifact_sha256=review_hash,
+                byte_size=len(review_pdf),
+                pair_status="CANDIDATE",
+            )
+            draft_store = FakePersistentReviewableDraftStore(pair_id=pair_id, locator=locator)
+            client = TestClient(
+                create_persistent_app(
+                    PersistentApiDependencies(
+                        settings=self.settings,
+                        case_ledger_store=FakePersistentFactStore(),
+                        identity_resolver=StaticIdentityResolver(self.identity),
+                        reviewable_draft_store=draft_store,
+                        reviewable_draft_access_broker=ReviewableOfficeDraftAccessBroker(),
+                        artifact_store=artifact_store,
+                    )
+                ),
+                client=("127.0.0.1", 51002),
+            )
+            snapshot = client.get(f"/v1/matters/{self.matter_id}/reviewable-office-drafts")
+            self.assertEqual(snapshot.status_code, 200, snapshot.text)
+            self.assertEqual(snapshot.json()["pairs"][0]["pair_id"], pair_id)
+            self.assertNotIn("object_key", snapshot.text)
+
+            issued = client.post(
+                f"/v1/matters/{self.matter_id}/reviewable-office-drafts/{pair_id}/access",
+                json={"purpose": "REVIEW_PDF"},
+            )
+            self.assertEqual(issued.status_code, 200, issued.text)
+            token = issued.json()["access_token"]
+            delivered = client.get(
+                f"/v1/matters/{self.matter_id}/reviewable-office-drafts/{pair_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(delivered.status_code, 200, delivered.text)
+            self.assertEqual(delivered.content, review_pdf)
+            self.assertEqual(delivered.headers["x-artifact-sha256"], review_hash)
+            self.assertIn("inline", delivered.headers["content-disposition"])
+            self.assertEqual(delivered.headers["cache-control"], "no-store, private")
+            replay = client.get(
+                f"/v1/matters/{self.matter_id}/reviewable-office-drafts/{pair_id}/content",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            self.assertEqual(replay.status_code, 403)
+            self.assertEqual(replay.json()["code"], "REVIEWABLE_DRAFT_ACCESS_DENIED")
+
+            approved = client.post(
+                f"/v1/matters/{self.matter_id}/reviewable-office-drafts/{pair_id}/approve",
+                headers={"Idempotency-Key": "reviewable-draft-approve-api-001"},
+                json={"expected_version": 12, "approval_hash": "d" * 64},
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            approval_call = next(call for name, call in draft_store.calls if name == "approve")
+            self.assertEqual(approval_call["actor"], self.identity.actor)
+            self.assertEqual(approval_call["pair_id"], pair_id)
+
+    def test_reviewable_office_draft_routes_fail_closed_without_draft_store(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/reviewable-office-drafts")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "REVIEWABLE_DRAFT_SERVICE_UNAVAILABLE")
 
 
 if __name__ == "__main__":

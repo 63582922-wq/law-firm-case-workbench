@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Callable, Iterator
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 from io import BytesIO
 from zipfile import BadZipFile, ZipFile
@@ -18,6 +19,7 @@ from .case_ledger_postgres import (
     CaseLedgerPersistenceBlocked,
     _advisory_lock,
     _authorize_and_lock_matter,
+    _authorize_matter_read,
     _finish_command,
     _payload_hash,
     _prior_receipt,
@@ -25,10 +27,15 @@ from .case_ledger_postgres import (
     _require_roles,
     _require_text,
     _validate_command_identity,
+    _validate_read_identity,
     _validate_sha256,
     _validate_uuid,
 )
 from .models import Actor, Role
+from .reviewable_draft_access import (
+    ReviewableDraftAccessPurpose,
+    ReviewableOfficeDraftArtifactLocator,
+)
 
 
 _DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -37,11 +44,20 @@ _MAX_EDITABLE_BYTES = 64 * 1024 * 1024
 _MAX_PDF_BYTES = 128 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class PersistentReviewableOfficeDraftSnapshot:
+    matter_id: str
+    matter_version: int
+    pairs: tuple[dict[str, Any], ...]
+    snapshot_hash: str
+
+
 class PostgresReviewableDraftStore:
     """Registers an encrypted editable Office file and review PDF atomically."""
 
     _REGISTER_ROLES = frozenset({Role.SYSTEM_WORKER})
     _APPROVE_ROLES = frozenset({Role.LEAD_LAWYER, Role.REVIEWER})
+    _READ_ROLES = frozenset({Role.LEAD_LAWYER, Role.REVIEWER})
 
     def __init__(self, dsn: str, *, artifact_reader: Callable[[str, str], bytes] | None = None) -> None:
         if not dsn.strip():
@@ -196,6 +212,84 @@ class PostgresReviewableDraftStore:
                 stale_submission=False, stale_calculations=False,
             )
 
+    def get_reviewable_office_draft_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentReviewableOfficeDraftSnapshot:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._READ_ROLES)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection, actor=actor, matter_id=matter_id, allowed_roles=self._READ_ROLES
+            )
+            matter = connection.execute(
+                "SELECT version FROM matters WHERE matter_id = %s AND firm_id = %s",
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if matter is None:
+                raise KeyError(matter_id)
+            rows = connection.execute(
+                """
+                SELECT pair_id, document_kind, editable_media_type, editable_sha256,
+                       editable_bytes, review_pdf_sha256, review_pdf_bytes,
+                       review_pdf_page_count, approval_input_hash,
+                       render_verification_hash, review_input_hash, status,
+                       registered_by, approved_by, approval_hash, approved_at, created_at
+                FROM reviewable_office_draft_pairs
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY created_at DESC, pair_id DESC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+        pairs = tuple(_serialize_pair_row(row) for row in rows)
+        payload = {"matter_id": matter_id, "matter_version": matter["version"], "pairs": pairs}
+        return PersistentReviewableOfficeDraftSnapshot(
+            matter_id=matter_id,
+            matter_version=matter["version"],
+            pairs=pairs,
+            snapshot_hash=_payload_hash(payload),
+        )
+
+    def get_reviewable_office_draft_artifact_locator(
+        self,
+        *,
+        matter_id: str,
+        pair_id: str,
+        purpose: ReviewableDraftAccessPurpose,
+        actor: Actor,
+    ) -> ReviewableOfficeDraftArtifactLocator:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("pair_id", pair_id)
+        _require_roles(actor, self._READ_ROLES)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection, actor=actor, matter_id=matter_id, allowed_roles=self._READ_ROLES
+            )
+            row = connection.execute(
+                """
+                SELECT editable_media_type, editable_object_key, editable_sha256, editable_bytes,
+                       review_pdf_object_key, review_pdf_sha256, review_pdf_bytes, status
+                FROM reviewable_office_draft_pairs
+                WHERE pair_id = %s AND matter_id = %s AND firm_id = %s
+                """,
+                (pair_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(pair_id)
+        if row["status"] not in {"CANDIDATE", "APPROVED"}:
+            raise CaseLedgerPersistenceBlocked("reviewable Office draft pair is not available")
+        if purpose is ReviewableDraftAccessPurpose.REVIEW_PDF:
+            return ReviewableOfficeDraftArtifactLocator(
+                firm_id=actor.firm_id, matter_id=matter_id, pair_id=pair_id, purpose=purpose,
+                media_type="application/pdf", object_key=row["review_pdf_object_key"],
+                artifact_sha256=row["review_pdf_sha256"], byte_size=row["review_pdf_bytes"],
+                pair_status=row["status"],
+            )
+        return ReviewableOfficeDraftArtifactLocator(
+            firm_id=actor.firm_id, matter_id=matter_id, pair_id=pair_id, purpose=purpose,
+            media_type=row["editable_media_type"], object_key=row["editable_object_key"],
+            artifact_sha256=row["editable_sha256"], byte_size=row["editable_bytes"],
+            pair_status=row["status"],
+        )
     def _read_authenticated_artifact(self, object_key: str, expected_hash: str) -> bytes:
         if self._artifact_reader is None:
             raise CaseLedgerPersistenceBlocked("reviewable Office draft registration requires an encrypted-object verifier")
@@ -225,6 +319,13 @@ class PostgresReviewableDraftStore:
     @contextmanager
     def _transaction(self, firm_id: str) -> Iterator[psycopg.Connection]:
         with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            connection.execute("SELECT set_config('app.firm_id', %s, true)", (firm_id,))
+            yield connection
+
+    @contextmanager
+    def _read_transaction(self, firm_id: str) -> Iterator[psycopg.Connection]:
+        with psycopg.connect(self._dsn, row_factory=dict_row) as connection:
+            connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (firm_id,))
             yield connection
 
@@ -266,3 +367,15 @@ def _review_input_hash(*, editable_media_type: str, editable_sha256: str, editab
         "render_verification_hash": render_verification_hash,
     }
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _serialize_pair_row(row: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in row.items():
+        if (key.endswith("_id") or key in {"registered_by", "approved_by"}) and value is not None:
+            result[key] = str(value)
+        elif hasattr(value, "isoformat"):
+            result[key] = value.isoformat()
+        else:
+            result[key] = value
+    return result

@@ -1329,3 +1329,42 @@ class PersistentSubmissionAccessResponse(BaseModel):
     export_id: UUID
     access_token: str = Field(min_length=20, max_length=200)
     expires_at: datetime
+
+
+class PersistentReviewableOfficeDraftPairResponse(BaseModel):
+    pair_id: UUID
+    document_kind: str
+    editable_media_type: str
+    editable_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    editable_bytes: int = Field(ge=1)
+    review_pdf_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_pdf_bytes: int = Field(ge=1)
+    review_pdf_page_count: int = Field(ge=1)
+    approval_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    render_verification_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["CANDIDATE", "APPROVED"]
+    registered_by: UUID
+    approved_by: UUID | None
+    approval_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    approved_at: datetime | None
+    created_at: datetime
+
+
+class PersistentReviewableOfficeDraftSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    pairs: tuple[PersistentReviewableOfficeDraftPairResponse, ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentReviewableOfficeDraftAccessRequest(BaseModel):
+    purpose: Literal["REVIEW_PDF", "DOWNLOAD_EDITABLE"]
+
+
+class PersistentReviewableOfficeDraftAccessResponse(BaseModel):
+    grant_id: UUID
+    pair_id: UUID
+    purpose: Literal["REVIEW_PDF", "DOWNLOAD_EDITABLE"]
+    access_token: str = Field(min_length=20, max_length=200)
+    expires_at: datetime
