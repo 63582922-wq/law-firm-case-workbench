@@ -5,6 +5,7 @@ import {
 } from "@/lib/synthetic-calculation";
 import { persistentApiFetch } from "@/lib/persistent-api-client";
 import { syntheticMatter } from "@/lib/synthetic-matter";
+import officialSourceCatalog from "../../../knowledge/official_sources/registry.json";
 
 export type CaseDataSourceConfig =
   | { kind: "synthetic-alpha"; label: "本机合成数据" }
@@ -2912,50 +2913,13 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
   };
 }
 
-const OFFICIAL_LEGAL_SOURCE_DISCOVERY: ReadonlyArray<Pick<
-  LegalReviewView["sources"][number],
-  "sourceId" | "publisher" | "authorityLevel" | "officialUrl" | "provisionLocator"
->> = [
-  {
-    sourceId: "CN-CIVIL-CODE-680",
-    publisher: "国家法律法规数据库 / 最高人民法院",
-    authorityLevel: "PRIMARY_LAW",
-    officialUrl: "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
-    provisionLocator: "《中华人民共和国民法典》第六百七十九条至第六百八十条",
-  },
-  {
-    sourceId: "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
-    publisher: "最高人民法院",
-    authorityLevel: "JUDICIAL_INTERPRETATION",
-    officialUrl: "https://www.court.gov.cn/zixun/xiangqing/282621.html",
-    provisionLocator: "民间借贷司法解释第二十四条至第三十一条（2020年第二次修正）",
-  },
-  {
-    sourceId: "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
-    publisher: "最高人民法院",
-    authorityLevel: "JUDICIAL_INTERPRETATION",
-    officialUrl: "https://www.court.gov.cn/zixun/xiangqing/249031.html",
-    provisionLocator: "法释〔2020〕6号及修正后第二十五条至第三十二条",
-  },
-  {
-    sourceId: "SPC-PRIVATE-LENDING-2015-ORIGINAL",
-    publisher: "最高人民法院公报",
-    authorityLevel: "JUDICIAL_INTERPRETATION",
-    officialUrl: "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
-    provisionLocator: "法释〔2015〕18号第二十六条、第三十一条",
-  },
-  {
-    sourceId: "CFETS-LPR-HISTORY",
-    publisher: "全国银行间同业拆借中心（中国货币网）",
-    authorityLevel: "OFFICIAL_RATE_DATA",
-    officialUrl: "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
-    provisionLocator: "一年期贷款市场报价利率历史数据",
-  },
-];
-
 function legalSourceDiscoveryRows(): LegalReviewView["sources"] {
-  return OFFICIAL_LEGAL_SOURCE_DISCOVERY.map((item) => ({
-    ...item,
+  return officialSourceCatalog.sources.map((item) => ({
+    sourceId: item.source_id,
+    publisher: item.publisher,
+    authorityLevel: item.authority_level,
+    officialUrl: item.official_url,
+    provisionLocator: item.provision_locator,
     snapshotId: null,
     verificationStatus: "NOT_CAPTURED",
     licenseStatus: "DISCOVERY_ONLY",

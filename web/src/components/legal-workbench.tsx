@@ -12,6 +12,7 @@ import {
   type OfficialSourceCaptureView,
 } from "@/lib/case-data-source";
 import { officialCasePolicyLinks, officialCaseResearchCatalog } from "@/lib/official-case-catalog";
+import officialSourceCatalog from "../../../knowledge/official_sources/registry.json";
 import styles from "./case-workbench.module.css";
 
 export function LegalWorkbench() {
@@ -488,20 +489,22 @@ function formulaLabel(rule: LegalReviewView["ruleVersions"][number]) {
 }
 
 function officialCaptureTargets(sourceId: string, defaultUrl: string) {
-  if (sourceId === "CFETS-LPR-HISTORY") {
-    return [{ label: "官方历史数据接口", url: "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN" }];
+  const source = officialSourceCatalog.sources.find((item) => item.source_id === sourceId);
+  if (!source) return [{ label: "登记官方原文", url: defaultUrl }];
+  if ("official_data_api" in source && source.official_data_api) {
+    return [{ label: "官方历史数据接口", url: source.official_data_api }];
   }
-  const fallbacks: Record<string, { label: string; url: string }[]> = {
-    "CN-CIVIL-CODE-680": [
-      { label: "最高人民法院公开页", url: "https://www.court.gov.cn/zixun/xiangqing/233181.html" },
-    ],
-    "SPC-PRIVATE-LENDING-2020-SECOND-REVISION": [
-      { label: "国际商事法庭官方镜像", url: "https://cicc.court.gov.cn/html/1/380/385/12844.html" },
-    ],
-  };
+  const parserCompatibleFallbacks = new Set([
+    "CN-CIVIL-CODE-680",
+    "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+  ]);
   return [
     { label: "登记官方原文", url: defaultUrl },
-    ...(fallbacks[sourceId] ?? []),
+    ...(
+      parserCompatibleFallbacks.has(sourceId) && "fallback_official_url" in source && source.fallback_official_url
+        ? [{ label: "已登记官方备用页", url: source.fallback_official_url }]
+        : []
+    ),
   ];
 }
 
