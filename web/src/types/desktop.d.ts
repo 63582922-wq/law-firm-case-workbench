@@ -29,6 +29,8 @@ declare global {
           | "CREDENTIAL_PRESENT_UNVERIFIED"
           | "BROKEN_LOCAL_CREDENTIAL"
           | "REMOTE_REVOKED_CONFIRMED"
+          | "REMOTE_OPERATION_PENDING"
+          | "REMOTE_OPERATION_REJECTED"
           | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
           | "UNAVAILABLE";
         message: string;
@@ -60,6 +62,12 @@ declare global {
         enrollmentEnvelopePresent: boolean;
       }>;
       revokeEnrollment(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
+      resolvePendingEnrollment(): Promise<{
         phase: string;
         message: string;
         installationInitialized: boolean;

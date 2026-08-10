@@ -14,6 +14,8 @@ from case_api.desktop_enrollment import SignedDesktopEnrollmentVerifier, Trusted
 from case_api.desktop_enrollment_lifecycle import (
     DesktopEnrollmentLifecycle,
     DesktopEnrollmentLifecycleBlocked,
+    EnrollmentOperationRemoteStatus,
+    EnrollmentOperationStatusRequest,
     EnrollmentRegistrationRequest,
     EnrollmentRenewalRequest,
     EnrollmentRevocationReceipt,
@@ -40,6 +42,9 @@ class FakeVault:
             raise KeyError("missing")
         return self.envelope
 
+    def current_envelope_optional(self) -> str | None:
+        return self.envelope
+
     def replace_enrollment(self, *, expected_sha256: str | None, envelope_text: str) -> None:
         current_hash = sha256(self.envelope.encode("utf-8")).hexdigest() if self.envelope is not None else None
         if current_hash != expected_sha256:
@@ -55,13 +60,22 @@ class FakeVault:
 
 
 class FakeIssuer:
-    def __init__(self, *, registration: str, renewal: str, receipt: EnrollmentRevocationReceipt) -> None:
+    def __init__(
+        self,
+        *,
+        registration: str,
+        renewal: str,
+        receipt: EnrollmentRevocationReceipt,
+        remote_status: EnrollmentOperationRemoteStatus | None = None,
+    ) -> None:
         self.registration = registration
         self.renewal = renewal
         self.receipt = receipt
+        self.remote_status = remote_status
         self.register_requests: list[EnrollmentRegistrationRequest] = []
         self.renew_requests: list[EnrollmentRenewalRequest] = []
         self.revoke_requests: list[EnrollmentRevocationRequest] = []
+        self.query_requests: list[EnrollmentOperationStatusRequest] = []
 
     def register(self, request: EnrollmentRegistrationRequest) -> str:
         self.register_requests.append(request)
@@ -74,6 +88,15 @@ class FakeIssuer:
     def revoke(self, request: EnrollmentRevocationRequest) -> EnrollmentRevocationReceipt:
         self.revoke_requests.append(request)
         return self.receipt
+
+    def query_operation(
+        self,
+        request: EnrollmentOperationStatusRequest,
+    ) -> EnrollmentOperationRemoteStatus:
+        self.query_requests.append(request)
+        if self.remote_status is None:
+            raise AssertionError("unexpected operation status query")
+        return self.remote_status
 
 
 class DesktopEnrollmentLifecycleTests(unittest.TestCase):
@@ -195,6 +218,139 @@ class DesktopEnrollmentLifecycleTests(unittest.TestCase):
         self.assertEqual(result.status, "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED")
         self.assertIsNone(result.enrollment_id)
         self.assertIsNone(damaged_vault.envelope)
+
+    def test_successful_activation_status_is_verified_before_empty_vault_commit(self) -> None:
+        vault = FakeVault()
+        remote = EnrollmentOperationRemoteStatus(
+            operation_id=NONCE,
+            operation_kind="ACTIVATE",
+            state="SUCCEEDED",
+            enrollment_envelope=self.current,
+            revocation_receipt=None,
+        )
+        issuer = FakeIssuer(
+            registration=self.current,
+            renewal=self.renewal,
+            receipt=self.receipt,
+            remote_status=remote,
+        )
+
+        resolution = self._lifecycle(vault, issuer).resolve_remote_operation(
+            operation_id=NONCE,
+            operation_kind="ACTIVATE",
+        )
+
+        self.assertEqual(resolution.state, "SUCCEEDED")
+        self.assertEqual(resolution.result.status, "REGISTERED")
+        self.assertEqual(vault.replace_calls, [(None, self.current)])
+        request = issuer.query_requests[0]
+        self.assertIsNone(request.current_envelope_sha256)
+        self.assertEqual(request.installation_binding_sha256, sha256(SECRET).hexdigest())
+
+    def test_successful_renewal_and_revocation_status_use_current_compare_and_set(self) -> None:
+        renewal_remote = EnrollmentOperationRemoteStatus(
+            operation_id=NONCE,
+            operation_kind="RENEW",
+            state="SUCCEEDED",
+            enrollment_envelope=self.renewal,
+            revocation_receipt=None,
+        )
+        vault = FakeVault(self.current)
+        issuer = FakeIssuer(
+            registration=self.current,
+            renewal=self.renewal,
+            receipt=self.receipt,
+            remote_status=renewal_remote,
+        )
+        resolution = self._lifecycle(vault, issuer).resolve_remote_operation(
+            operation_id=NONCE,
+            operation_kind="RENEW",
+        )
+        current_hash = sha256(self.current.encode("utf-8")).hexdigest()
+        self.assertEqual(resolution.result.status, "RENEWED")
+        self.assertEqual(vault.replace_calls, [(current_hash, self.renewal)])
+        self.assertEqual(issuer.query_requests[0].current_envelope_sha256, current_hash)
+
+        revocation_remote = EnrollmentOperationRemoteStatus(
+            operation_id=NONCE,
+            operation_kind="REVOKE",
+            state="SUCCEEDED",
+            enrollment_envelope=None,
+            revocation_receipt=self.receipt,
+        )
+        vault = FakeVault(self.current)
+        issuer = FakeIssuer(
+            registration=self.current,
+            renewal=self.renewal,
+            receipt=self.receipt,
+            remote_status=revocation_remote,
+        )
+        resolution = self._lifecycle(vault, issuer).resolve_remote_operation(
+            operation_id=NONCE,
+            operation_kind="REVOKE",
+        )
+        self.assertEqual(resolution.result.status, "REVOKED")
+        self.assertTrue(resolution.result.remote_revocation_confirmed)
+        self.assertEqual(vault.delete_calls, [current_hash])
+
+    def test_pending_and_rejected_status_never_mutate_the_vault(self) -> None:
+        for state in ("PENDING", "REJECTED"):
+            with self.subTest(state=state):
+                remote = EnrollmentOperationRemoteStatus(
+                    operation_id=NONCE,
+                    operation_kind="RENEW",
+                    state=state,
+                    enrollment_envelope=None,
+                    revocation_receipt=None,
+                )
+                vault = FakeVault(self.current)
+                issuer = FakeIssuer(
+                    registration=self.current,
+                    renewal=self.renewal,
+                    receipt=self.receipt,
+                    remote_status=remote,
+                )
+                resolution = self._lifecycle(vault, issuer).resolve_remote_operation(
+                    operation_id=NONCE,
+                    operation_kind="RENEW",
+                )
+                self.assertEqual(resolution.state, state)
+                self.assertIsNone(resolution.result)
+                self.assertEqual(vault.replace_calls, [])
+                self.assertEqual(vault.delete_calls, [])
+
+    def test_operation_status_mismatch_or_unfinished_result_material_fails_closed(self) -> None:
+        invalid_statuses = (
+            EnrollmentOperationRemoteStatus(
+                operation_id="x" * 64,
+                operation_kind="RENEW",
+                state="PENDING",
+                enrollment_envelope=None,
+                revocation_receipt=None,
+            ),
+            EnrollmentOperationRemoteStatus(
+                operation_id=NONCE,
+                operation_kind="RENEW",
+                state="PENDING",
+                enrollment_envelope=self.renewal,
+                revocation_receipt=None,
+            ),
+        )
+        for remote in invalid_statuses:
+            with self.subTest(remote=remote):
+                vault = FakeVault(self.current)
+                issuer = FakeIssuer(
+                    registration=self.current,
+                    renewal=self.renewal,
+                    receipt=self.receipt,
+                    remote_status=remote,
+                )
+                with self.assertRaises(DesktopEnrollmentLifecycleBlocked):
+                    self._lifecycle(vault, issuer).resolve_remote_operation(
+                        operation_id=NONCE,
+                        operation_kind="RENEW",
+                    )
+                self.assertEqual(vault.replace_calls, [])
 
     def test_secrets_invalid_reason_and_transport_failures_are_redacted(self) -> None:
         with self.assertRaisesRegex(DesktopEnrollmentLifecycleBlocked, "activation secret"):

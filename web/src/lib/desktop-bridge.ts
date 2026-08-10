@@ -33,6 +33,8 @@ export type DesktopEnrollmentVaultStatus = {
     | "CREDENTIAL_PRESENT_UNVERIFIED"
     | "BROKEN_LOCAL_CREDENTIAL"
     | "REMOTE_REVOKED_CONFIRMED"
+    | "REMOTE_OPERATION_PENDING"
+    | "REMOTE_OPERATION_REJECTED"
     | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
     | "UNAVAILABLE";
   message: string;
@@ -82,6 +84,10 @@ export async function revokeDesktopEnrollment(): Promise<DesktopEnrollmentVaultS
   return invoke<DesktopEnrollmentVaultStatus>("revoke_desktop_enrollment");
 }
 
+export async function resolvePendingDesktopEnrollment(): Promise<DesktopEnrollmentVaultStatus> {
+  return invoke<DesktopEnrollmentVaultStatus>("resolve_pending_desktop_enrollment");
+}
+
 export function installDesktopBridge(): void {
   if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined || window.lawCaseDesktop) {
     return;
@@ -96,6 +102,7 @@ export function installDesktopBridge(): void {
     activateEnrollment: activateDesktopEnrollment,
     renewEnrollment: renewDesktopEnrollment,
     revokeEnrollment: revokeDesktopEnrollment,
+    resolvePendingEnrollment: resolvePendingDesktopEnrollment,
     disableLocalEnrollment,
     async selectCaseFolder({ matterId }) {
       if (!UUID_PATTERN.test(matterId)) {

@@ -57,12 +57,16 @@ PROTOCOL = "lawcase-local-api-v1"
 _CHALLENGE_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _PARENT_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _BINDING_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_OPERATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,160}$")
 _VERIFY_REQUEST_FIELDS = frozenset({"envelope_text", "installation_binding_sha256"})
 _MAX_VERIFY_REQUEST_BYTES = 20_000
-_ACTIVATION_REQUEST_FIELDS = frozenset({"activation_secret"})
+_ACTIVATION_REQUEST_FIELDS = frozenset({"activation_secret", "operation_id"})
 _MAX_ACTIVATION_REQUEST_BYTES = 1_024
-_REMOTE_REVOCATION_FIELDS = frozenset({"confirmation"})
+_RENEWAL_REQUEST_FIELDS = frozenset({"operation_id"})
+_REMOTE_REVOCATION_FIELDS = frozenset({"confirmation", "operation_id"})
 _REMOTE_REVOCATION_CONFIRMATION = "CONFIRM_REMOTE_REVOCATION"
+_REMOTE_STATUS_FIELDS = frozenset({"operation_id", "operation_kind"})
+_REMOTE_OPERATION_KINDS = frozenset({"ACTIVATE", "RENEW", "REVOKE"})
 
 
 class DesktopSidecarBlocked(RuntimeError):
@@ -217,12 +221,18 @@ def create_desktop_sidecar_app(
                 if frozenset(payload) != _ACTIVATION_REQUEST_FIELDS:
                     raise ValueError("invalid fields")
                 activation_secret = payload.get("activation_secret")
-                if not isinstance(activation_secret, str):
+                operation_id = payload.get("operation_id")
+                if (
+                    not isinstance(activation_secret, str)
+                    or not isinstance(operation_id, str)
+                    or not _OPERATION_ID_PATTERN.fullmatch(operation_id)
+                ):
                     raise ValueError("invalid secret")
                 lifecycle, vault = _staged_registration_lifecycle(
                     trust=trust,
                     issuer=enrollment_issuer,
                     keychain_runner=keychain_runner,
+                    operation_id=operation_id,
                 )
                 result = lifecycle.register(activation_secret=activation_secret)
             except (
@@ -235,6 +245,7 @@ def create_desktop_sidecar_app(
             envelope_text = vault.current_envelope()
             return {
                 "status": "REGISTERED",
+                "operation_id": operation_id,
                 "enrollment_id": result.enrollment_id or "",
                 "envelope_text": envelope_text,
                 "envelope_sha256": sha256(envelope_text.encode("utf-8")).hexdigest(),
@@ -247,20 +258,36 @@ def create_desktop_sidecar_app(
         @app.post("/v1/desktop-enrollment/renew")
         async def renew_desktop_enrollment(request: Request) -> dict[str, str]:
             _require_parent_authorization(request, parent_api_token)
-            if await request.body():
-                raise HTTPException(status_code=422, detail="invalid renewal request")
+            body = await request.body()
+            if not body or len(body) > 256:
+                raise HTTPException(status_code=422, detail="renewal unavailable")
             try:
+                payload = _strict_request_json(body)
+                if frozenset(payload) != _RENEWAL_REQUEST_FIELDS:
+                    raise ValueError("invalid fields")
+                operation_id = payload.get("operation_id")
+                if not isinstance(operation_id, str) or not _OPERATION_ID_PATTERN.fullmatch(
+                    operation_id
+                ):
+                    raise ValueError("invalid operation")
                 lifecycle, vault = _staged_lifecycle(
                     trust=trust,
                     issuer=enrollment_issuer,
                     keychain_runner=keychain_runner,
+                    operation_id=operation_id,
                 )
                 result = lifecycle.renew()
-            except (DesktopEnrollmentBlocked, DesktopEnrollmentLifecycleBlocked):
+            except (
+                DesktopEnrollmentBlocked,
+                DesktopEnrollmentLifecycleBlocked,
+                UnicodeDecodeError,
+                ValueError,
+            ):
                 raise HTTPException(status_code=422, detail="renewal unavailable") from None
             envelope_text = vault.current_envelope()
             return {
                 "status": "RENEWED",
+                "operation_id": operation_id,
                 "enrollment_id": result.enrollment_id or "",
                 "envelope_text": envelope_text,
                 "envelope_sha256": sha256(envelope_text.encode("utf-8")).hexdigest(),
@@ -283,20 +310,78 @@ def create_desktop_sidecar_app(
                     raise ValueError("invalid fields")
                 if payload.get("confirmation") != _REMOTE_REVOCATION_CONFIRMATION:
                     raise ValueError("invalid confirmation")
+                operation_id = payload.get("operation_id")
+                if not isinstance(operation_id, str) or not _OPERATION_ID_PATTERN.fullmatch(
+                    operation_id
+                ):
+                    raise ValueError("invalid operation")
                 lifecycle, vault = _staged_lifecycle(
                     trust=trust,
                     issuer=enrollment_issuer,
                     keychain_runner=keychain_runner,
+                    operation_id=operation_id,
                 )
                 result = lifecycle.revoke(reason="用户在本机主动请求撤销登记")
             except (DesktopEnrollmentBlocked, DesktopEnrollmentLifecycleBlocked, ValueError):
                 raise HTTPException(status_code=422, detail="revocation unavailable") from None
             return {
                 "status": "REVOKED",
+                "operation_id": operation_id,
                 "enrollment_id": result.enrollment_id or "",
                 "expected_current_sha256": vault.initial_envelope_sha256,
                 "remote_revocation_confirmed": result.remote_revocation_confirmed,
             }
+
+        @app.post("/v1/desktop-enrollment/status")
+        async def desktop_enrollment_operation_status(
+            request: Request,
+        ) -> dict[str, str | bool | None]:
+            _require_parent_authorization(request, parent_api_token)
+            body = await request.body()
+            if not body or len(body) > 512:
+                raise HTTPException(status_code=422, detail="operation status unavailable")
+            try:
+                payload = _strict_request_json(body)
+                if frozenset(payload) != _REMOTE_STATUS_FIELDS:
+                    raise ValueError("invalid fields")
+                operation_id = payload.get("operation_id")
+                operation_kind = payload.get("operation_kind")
+                if (
+                    not isinstance(operation_id, str)
+                    or not _OPERATION_ID_PATTERN.fullmatch(operation_id)
+                    or not isinstance(operation_kind, str)
+                    or operation_kind not in _REMOTE_OPERATION_KINDS
+                ):
+                    raise ValueError("invalid operation")
+                if operation_kind == "ACTIVATE":
+                    lifecycle, vault = _staged_registration_lifecycle(
+                        trust=trust,
+                        issuer=enrollment_issuer,
+                        keychain_runner=keychain_runner,
+                        operation_id=operation_id,
+                    )
+                else:
+                    lifecycle, vault = _staged_lifecycle(
+                        trust=trust,
+                        issuer=enrollment_issuer,
+                        keychain_runner=keychain_runner,
+                        operation_id=operation_id,
+                    )
+                resolution = lifecycle.resolve_remote_operation(
+                    operation_id=operation_id,
+                    operation_kind=operation_kind,
+                )
+                return _operation_resolution_payload(resolution, vault)
+            except (
+                DesktopEnrollmentBlocked,
+                DesktopEnrollmentLifecycleBlocked,
+                UnicodeDecodeError,
+                ValueError,
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail="operation status unavailable",
+                ) from None
 
     return app
 
@@ -326,6 +411,9 @@ class _StagedEnrollmentVault:
             raise KeyError("missing")
         return self._envelope
 
+    def current_envelope_optional(self) -> str | None:
+        return self._envelope
+
     def replace_enrollment(self, *, expected_sha256: str | None, envelope_text: str) -> None:
         current = (
             sha256(self._envelope.encode("utf-8")).hexdigest()
@@ -348,6 +436,7 @@ def _staged_lifecycle(
     trust: DesktopEnrollmentTrustRuntime,
     issuer: AuthenticatedFirmEnrollmentIssuer,
     keychain_runner=None,
+    operation_id: str | None = None,
 ) -> tuple[DesktopEnrollmentLifecycle, _StagedEnrollmentVault]:
     if trust.catalog is None:
         raise DesktopEnrollmentLifecycleBlocked("trust catalog is unavailable")
@@ -370,6 +459,7 @@ def _staged_lifecycle(
         issuer=issuer,
         vault=vault,
         verifier=verifier,
+        nonce_factory=(lambda: operation_id) if operation_id is not None else None,
     ), vault
 
 
@@ -378,6 +468,7 @@ def _staged_registration_lifecycle(
     trust: DesktopEnrollmentTrustRuntime,
     issuer: AuthenticatedFirmEnrollmentIssuer,
     keychain_runner=None,
+    operation_id: str | None = None,
 ) -> tuple[DesktopEnrollmentLifecycle, _StagedEnrollmentVault]:
     if trust.catalog is None:
         raise DesktopEnrollmentLifecycleBlocked("trust catalog is unavailable")
@@ -398,7 +489,38 @@ def _staged_registration_lifecycle(
         issuer=issuer,
         vault=vault,
         verifier=verifier,
+        nonce_factory=(lambda: operation_id) if operation_id is not None else None,
     ), vault
+
+
+def _operation_resolution_payload(resolution, vault: _StagedEnrollmentVault):
+    result = resolution.result
+    envelope_text = ""
+    envelope_sha256 = ""
+    if resolution.state == "SUCCEEDED" and resolution.operation_kind in {
+        "ACTIVATE",
+        "RENEW",
+    }:
+        envelope_text = vault.current_envelope()
+        envelope_sha256 = sha256(envelope_text.encode("utf-8")).hexdigest()
+    return {
+        "status": resolution.state,
+        "operation_id": resolution.operation_id,
+        "operation_kind": resolution.operation_kind,
+        "enrollment_id": result.enrollment_id if result is not None else "",
+        "envelope_text": envelope_text,
+        "envelope_sha256": envelope_sha256,
+        "expected_current_sha256": vault.initial_envelope_sha256,
+        "installation_binding_sha256": vault.installation_binding_sha256,
+        "expires_at": (
+            result.expires_at.isoformat().replace("+00:00", "Z")
+            if result is not None and result.expires_at is not None
+            else ""
+        ),
+        "remote_revocation_confirmed": (
+            result.remote_revocation_confirmed if result is not None else False
+        ),
+    }
 
 
 def _strict_request_json(body: bytes) -> dict[str, object]:

@@ -14,6 +14,7 @@ from cryptography.x509.oid import NameOID
 from case_api.desktop_enrollment_http import JsonFirmEnrollmentIssuer, PinnedHttpsJsonTransport
 from case_api.desktop_enrollment_lifecycle import (
     DesktopEnrollmentLifecycleBlocked,
+    EnrollmentOperationStatusRequest,
     EnrollmentRegistrationRequest,
     EnrollmentRenewalRequest,
     EnrollmentRevocationRequest,
@@ -177,6 +178,85 @@ class FirmEnrollmentIssuerTests(unittest.TestCase):
         path, payload = transport.calls[0]
         self.assertEqual(path, "/v1/desktop-enrollments/renew")
         self.assertEqual(payload["current_envelope_sha256"], "b" * 64)
+
+    def test_operation_status_query_is_fixed_strict_and_request_bound(self) -> None:
+        transport = FakeTransport(
+            {
+                "operation_id": "o" * 64,
+                "operation_kind": "RENEW",
+                "state": "SUCCEEDED",
+                "enrollment_envelope": "signed-renewed-envelope",
+                "revocation_receipt": None,
+            }
+        )
+        issuer = JsonFirmEnrollmentIssuer(transport)
+        request = EnrollmentOperationStatusRequest(
+            operation_id="o" * 64,
+            operation_kind="RENEW",
+            installation_binding_sha256="a" * 64,
+            current_envelope_sha256="b" * 64,
+        )
+
+        status = issuer.query_operation(request)
+
+        self.assertEqual(status.state, "SUCCEEDED")
+        path, payload = transport.calls[0]
+        self.assertEqual(path, "/v1/desktop-enrollments/status")
+        self.assertEqual(
+            set(payload),
+            {
+                "operation_id",
+                "operation_kind",
+                "installation_binding_sha256",
+                "current_envelope_sha256",
+            },
+        )
+
+        transport.response = {**transport.response, "role": "ADMIN"}
+        with self.assertRaisesRegex(DesktopEnrollmentLifecycleBlocked, "fields"):
+            issuer.query_operation(request)
+
+        transport.response = {
+            "operation_id": "x" * 64,
+            "operation_kind": "RENEW",
+            "state": "PENDING",
+            "enrollment_envelope": None,
+            "revocation_receipt": None,
+        }
+        with self.assertRaisesRegex(DesktopEnrollmentLifecycleBlocked, "does not match"):
+            issuer.query_operation(request)
+
+    def test_successful_revocation_status_parses_a_strict_receipt(self) -> None:
+        transport = FakeTransport(
+            {
+                "operation_id": "o" * 64,
+                "operation_kind": "REVOKE",
+                "state": "SUCCEEDED",
+                "enrollment_envelope": None,
+                "revocation_receipt": {
+                    "revocation_id": "44444444-4444-4444-8444-444444444444",
+                    "enrollment_id": "11111111-1111-4111-8111-111111111111",
+                    "issuer": "synthetic-firm-issuer",
+                    "effective_at": "2026-08-10T12:00:00Z",
+                    "accepted": True,
+                },
+            }
+        )
+        request = EnrollmentOperationStatusRequest(
+            operation_id="o" * 64,
+            operation_kind="REVOKE",
+            installation_binding_sha256="a" * 64,
+            current_envelope_sha256="b" * 64,
+        )
+        status = JsonFirmEnrollmentIssuer(transport).query_operation(request)
+        self.assertTrue(status.revocation_receipt.accepted)
+
+        transport.response["revocation_receipt"] = {
+            **transport.response["revocation_receipt"],
+            "role": "ADMIN",
+        }
+        with self.assertRaisesRegex(DesktopEnrollmentLifecycleBlocked, "receipt"):
+            JsonFirmEnrollmentIssuer(transport).query_operation(request)
 
     def test_revocation_receipt_is_strict_and_typed(self) -> None:
         transport = FakeTransport(

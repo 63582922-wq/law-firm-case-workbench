@@ -38,6 +38,8 @@
 
 实施记录：`2026-08-10 完成一次性激活码原生安全链：WebView 只触发无参数命令，macOS NSSecureTextField 收集并清除激活码；sidecar 经父进程私有 Bearer 读取 Keychain 安装绑定并拒绝覆盖已有登记，再通过签名目录固定的 HTTPS/SPKI 服务换取、验签并内存 staging envelope，Rust 以当前无登记为 CAS 前置条件保存。生产目录未配置时不显示输入框、不挂载端点且不联网`
 
+实施记录：`2026-08-10 完成激活、续期和撤销断线未知结果消解：原生层在远程请求前把 UUID 操作号、类型、原凭据哈希和设备绑定写入第三个 Keychain 项；未知结果禁止重试并可跨重启恢复，固定 HTTPS 状态查询仅接受 PENDING/REJECTED/SUCCEEDED，成功结果重新验签并与待决标记、原凭据 CAS 一并提交。默认 NOT_CONFIGURED 仍不挂载端点或联网`
+
 当前阶段：`Phase 1/2 并行实施（仅合成数据）；Phase 0 人类证据持续收集，作为试点/生产放行门`
 
 首个案由：`民间借贷案件被告一审应诉`

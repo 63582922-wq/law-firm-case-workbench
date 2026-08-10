@@ -14,7 +14,10 @@ from fastapi.testclient import TestClient
 
 from case_api.desktop_enrollment import TrustedEnrollmentIssuer
 from case_api.desktop_identity_runtime import DesktopIdentityRuntime
-from case_api.desktop_enrollment_lifecycle import EnrollmentRevocationReceipt
+from case_api.desktop_enrollment_lifecycle import (
+    EnrollmentOperationRemoteStatus,
+    EnrollmentRevocationReceipt,
+)
 from case_api.desktop_sidecar import (
     DesktopSidecarBlocked,
     PROTOCOL,
@@ -104,6 +107,7 @@ class DesktopSidecarTests(unittest.TestCase):
         self.assertEqual(client.post("/v1/desktop-enrollment/activate").status_code, 404)
         self.assertEqual(client.post("/v1/desktop-enrollment/renew").status_code, 404)
         self.assertEqual(client.post("/v1/desktop-enrollment/revoke").status_code, 404)
+        self.assertEqual(client.post("/v1/desktop-enrollment/status").status_code, 404)
 
     def test_invalid_trust_bootstrap_is_visible_but_never_opens_case_routes(self) -> None:
         client = TestClient(
@@ -189,25 +193,34 @@ class DesktopSidecarTests(unittest.TestCase):
         endpoint = "/v1/desktop-enrollment/activate"
         authorization = {"Authorization": f"Bearer {'c' * 64}"}
         activation_secret = "A" * 32
+        operation_id = "o" * 64
         self.assertEqual(
-            client.post(endpoint, json={"activation_secret": activation_secret}).status_code,
+            client.post(
+                endpoint,
+                json={"activation_secret": activation_secret, "operation_id": operation_id},
+            ).status_code,
             404,
         )
         self.assertEqual(
             client.post(
                 endpoint,
                 headers=authorization,
-                json={"activation_secret": activation_secret, "role": "ADMIN"},
+                json={
+                    "activation_secret": activation_secret,
+                    "operation_id": operation_id,
+                    "role": "ADMIN",
+                },
             ).status_code,
             422,
         )
         activated = client.post(
             endpoint,
             headers=authorization,
-            json={"activation_secret": activation_secret},
+            json={"activation_secret": activation_secret, "operation_id": operation_id},
         )
         self.assertEqual(activated.status_code, 200, activated.text)
         self.assertEqual(activated.json()["status"], "REGISTERED")
+        self.assertEqual(activated.json()["operation_id"], operation_id)
         self.assertEqual(activated.json()["envelope_text"], envelope)
         self.assertEqual(
             activated.json()["installation_binding_sha256"],
@@ -393,6 +406,26 @@ class DesktopSidecarTests(unittest.TestCase):
                     accepted=True,
                 )
 
+            def query_operation(self, request):
+                self.query_request = request
+                return EnrollmentOperationRemoteStatus(
+                    operation_id=request.operation_id,
+                    operation_kind=request.operation_kind,
+                    state="SUCCEEDED",
+                    enrollment_envelope=renewed if request.operation_kind == "RENEW" else None,
+                    revocation_receipt=(
+                        EnrollmentRevocationReceipt(
+                            revocation_id="44444444-4444-4444-8444-444444444444",
+                            enrollment_id="11111111-1111-4111-8111-111111111111",
+                            issuer=issuer.issuer,
+                            effective_at=now,
+                            accepted=True,
+                        )
+                        if request.operation_kind == "REVOKE"
+                        else None
+                    ),
+                )
+
         lifecycle_issuer = Issuer()
 
         def keychain_runner(command, **kwargs):
@@ -410,10 +443,16 @@ class DesktopSidecarTests(unittest.TestCase):
             )
         )
         authorization = {"Authorization": f"Bearer {'c' * 64}"}
+        renewal_operation_id = "r" * 64
         self.assertEqual(client.post("/v1/desktop-enrollment/renew").status_code, 404)
-        renewal = client.post("/v1/desktop-enrollment/renew", headers=authorization)
+        renewal = client.post(
+            "/v1/desktop-enrollment/renew",
+            headers=authorization,
+            json={"operation_id": renewal_operation_id},
+        )
         self.assertEqual(renewal.status_code, 200, renewal.text)
         self.assertEqual(renewal.json()["status"], "RENEWED")
+        self.assertEqual(renewal.json()["operation_id"], renewal_operation_id)
         self.assertEqual(renewal.json()["envelope_text"], renewed)
         self.assertEqual(
             renewal.json()["expected_current_sha256"],
@@ -425,20 +464,51 @@ class DesktopSidecarTests(unittest.TestCase):
             client.post(
                 "/v1/desktop-enrollment/revoke",
                 headers=authorization,
-                json={"confirmation": "wrong"},
+                json={"confirmation": "wrong", "operation_id": "v" * 64},
             ).status_code,
             422,
         )
         revocation = client.post(
             "/v1/desktop-enrollment/revoke",
             headers=authorization,
-            json={"confirmation": "CONFIRM_REMOTE_REVOCATION"},
+            json={
+                "confirmation": "CONFIRM_REMOTE_REVOCATION",
+                "operation_id": "v" * 64,
+            },
         )
         self.assertEqual(revocation.status_code, 200, revocation.text)
         self.assertTrue(revocation.json()["remote_revocation_confirmed"])
         self.assertEqual(
             revocation.json()["expected_current_sha256"],
             sha256(current.encode("utf-8")).hexdigest(),
+        )
+
+        recovered = client.post(
+            "/v1/desktop-enrollment/status",
+            headers=authorization,
+            json={"operation_id": "q" * 64, "operation_kind": "RENEW"},
+        )
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(recovered.json()["status"], "SUCCEEDED")
+        self.assertEqual(recovered.json()["operation_id"], "q" * 64)
+        self.assertEqual(recovered.json()["operation_kind"], "RENEW")
+        self.assertEqual(recovered.json()["envelope_text"], renewed)
+        self.assertEqual(
+            recovered.json()["expected_current_sha256"],
+            sha256(current.encode("utf-8")).hexdigest(),
+        )
+
+        self.assertEqual(
+            client.post(
+                "/v1/desktop-enrollment/status",
+                headers=authorization,
+                json={
+                    "operation_id": "q" * 64,
+                    "operation_kind": "RENEW",
+                    "role": "ADMIN",
+                },
+            ).status_code,
+            422,
         )
 
 

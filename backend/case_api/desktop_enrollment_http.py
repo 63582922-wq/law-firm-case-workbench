@@ -26,6 +26,8 @@ from cryptography.hazmat.primitives import serialization
 from .desktop_enrollment_lifecycle import (
     AuthenticatedFirmEnrollmentIssuer,
     DesktopEnrollmentLifecycleBlocked,
+    EnrollmentOperationRemoteStatus,
+    EnrollmentOperationStatusRequest,
     EnrollmentRegistrationRequest,
     EnrollmentRenewalRequest,
     EnrollmentRevocationReceipt,
@@ -41,12 +43,22 @@ _ALLOWED_PATHS = frozenset(
         "/v1/desktop-enrollments/activate",
         "/v1/desktop-enrollments/renew",
         "/v1/desktop-enrollments/revoke",
+        "/v1/desktop-enrollments/status",
     }
 )
 _DNS_NAME = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _ENVELOPE_RESPONSE_FIELDS = frozenset({"enrollment_envelope"})
 _REVOCATION_RESPONSE_FIELDS = frozenset(
     {"revocation_id", "enrollment_id", "issuer", "effective_at", "accepted"}
+)
+_OPERATION_STATUS_RESPONSE_FIELDS = frozenset(
+    {
+        "operation_id",
+        "operation_kind",
+        "state",
+        "enrollment_envelope",
+        "revocation_receipt",
+    }
 )
 
 
@@ -200,6 +212,50 @@ class JsonFirmEnrollmentIssuer(AuthenticatedFirmEnrollmentIssuer):
             effective_at=_required_utc_timestamp(payload.get("effective_at")),
             accepted=payload.get("accepted") is True,
         )
+
+    def query_operation(
+        self,
+        request: EnrollmentOperationStatusRequest,
+    ) -> EnrollmentOperationRemoteStatus:
+        payload = self._transport.post_json(
+            "/v1/desktop-enrollments/status",
+            asdict(request),
+        )
+        if frozenset(payload) != _OPERATION_STATUS_RESPONSE_FIELDS:
+            raise DesktopEnrollmentLifecycleBlocked(
+                "firm operation status response fields are invalid"
+            )
+        envelope = payload.get("enrollment_envelope")
+        if envelope is not None and not isinstance(envelope, str):
+            raise DesktopEnrollmentLifecycleBlocked(
+                "firm operation status envelope is invalid"
+            )
+        receipt_payload = payload.get("revocation_receipt")
+        receipt = None
+        if receipt_payload is not None:
+            if (
+                not isinstance(receipt_payload, dict)
+                or frozenset(receipt_payload) != _REVOCATION_RESPONSE_FIELDS
+            ):
+                raise DesktopEnrollmentLifecycleBlocked(
+                    "firm operation status receipt is invalid"
+                )
+            receipt = EnrollmentRevocationReceipt(
+                revocation_id=_required_text(receipt_payload.get("revocation_id")),
+                enrollment_id=_required_text(receipt_payload.get("enrollment_id")),
+                issuer=_required_text(receipt_payload.get("issuer")),
+                effective_at=_required_utc_timestamp(receipt_payload.get("effective_at")),
+                accepted=receipt_payload.get("accepted") is True,
+            )
+        status = EnrollmentOperationRemoteStatus(
+            operation_id=_required_text(payload.get("operation_id")),
+            operation_kind=_required_text(payload.get("operation_kind")),
+            state=_required_text(payload.get("state")),
+            enrollment_envelope=envelope,
+            revocation_receipt=receipt,
+        )
+        status.validate(request=request)
+        return status
 
     @staticmethod
     def _envelope(payload: dict[str, object]) -> str:

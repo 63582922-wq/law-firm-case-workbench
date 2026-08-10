@@ -1,17 +1,21 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Utc};
 use keyring::{Entry, Error as KeyringError};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
+use uuid::Uuid;
 use zeroize::Zeroizing;
 
 const SERVICE: &str = "cn.lawcase.workbench.desktop-enrollment";
 const ENROLLMENT_ACCOUNT: &str = "signed-enrollment-v1";
 const INSTALLATION_ACCOUNT: &str = "installation-binding-v1";
+const PENDING_OPERATION_ACCOUNT: &str = "pending-enrollment-operation-v1";
 const INITIALIZE_CONFIRMATION: &str = "INIT_LOCAL_KEYCHAIN";
 const LOCAL_DISABLE_CONFIRMATION: &str = "DISABLE_LOCAL_ENROLLMENT";
 const INSTALLATION_SECRET_BYTES: usize = 32;
 const MAX_ENROLLMENT_BYTES: usize = 16_384;
+const PENDING_OPERATION_VERSION: u8 = 1;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +74,17 @@ pub(crate) struct EnrollmentVault {
 pub(crate) struct EnrollmentVerificationContext {
     pub(crate) installation_binding_sha256: String,
     pub(crate) expected_current_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PendingEnrollmentOperation {
+    version: u8,
+    pub(crate) operation_id: String,
+    pub(crate) operation_kind: String,
+    pub(crate) expected_current_sha256: Option<String>,
+    pub(crate) installation_binding_sha256: String,
+    pub(crate) created_at: String,
 }
 
 impl Default for EnrollmentVault {
@@ -150,6 +165,9 @@ impl EnrollmentVault {
             .operation_lock
             .lock()
             .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        if self.read_pending_operation()?.is_some() {
+            return Err("存在尚未消解的远程登记操作；不能先清除本机凭证。".to_string());
+        }
         self.store
             .delete(ENROLLMENT_ACCOUNT)
             .map_err(|_| "无法删除本机登记凭证；远程撤销状态未改变。".to_string())?;
@@ -164,6 +182,9 @@ impl EnrollmentVault {
             .operation_lock
             .lock()
             .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        if self.read_pending_operation()?.is_some() {
+            return Err("存在尚未消解的远程登记操作；请先查询远程状态。".to_string());
+        }
         let secret = self
             .read_installation_secret()?
             .ok_or_else(|| "请先初始化本机安全存储，再导入律所登记包。".to_string())?;
@@ -175,6 +196,200 @@ impl EnrollmentVault {
             installation_binding_sha256: format!("{:x}", Sha256::digest(secret.as_slice())),
             expected_current_sha256: current.as_deref().map(envelope_sha256),
         })
+    }
+
+    pub(crate) fn begin_remote_operation(
+        &self,
+        operation_id: &str,
+        operation_kind: &str,
+        expected_current_sha256: Option<&str>,
+        created_at: &str,
+    ) -> Result<PendingEnrollmentOperation, String> {
+        validate_pending_fields(
+            operation_id,
+            operation_kind,
+            expected_current_sha256,
+            None,
+            created_at,
+        )?;
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        if self.read_pending_operation()?.is_some() {
+            return Err("已有远程登记操作结果待确认；请先查询状态，不能重复提交。".to_string());
+        }
+        let installation_secret = self
+            .read_installation_secret()?
+            .ok_or_else(|| "本机安装秘密尚未就绪；未开始远程操作。".to_string())?;
+        let installation_binding_sha256 =
+            format!("{:x}", Sha256::digest(installation_secret.as_slice()));
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未开始远程操作。".to_string())?;
+        let current_hash = current.as_deref().map(envelope_sha256);
+        let expected = expected_current_sha256.map(str::to_string);
+        if current_hash != expected
+            || (operation_kind == "ACTIVATE" && expected.is_some())
+            || (operation_kind != "ACTIVATE" && expected.is_none())
+        {
+            return Err("当前登记凭证与远程操作前置状态不一致；未提交请求。".to_string());
+        }
+        let pending = PendingEnrollmentOperation {
+            version: PENDING_OPERATION_VERSION,
+            operation_id: operation_id.to_string(),
+            operation_kind: operation_kind.to_string(),
+            expected_current_sha256: expected,
+            installation_binding_sha256,
+            created_at: created_at.to_string(),
+        };
+        let serialized = serde_json::to_string(&pending)
+            .map_err(|_| "无法记录远程操作标识；未提交请求。".to_string())?;
+        self.store
+            .set(PENDING_OPERATION_ACCOUNT, &serialized)
+            .map_err(|_| "无法在 Keychain 记录待决操作；未提交请求。".to_string())?;
+        if self.read_pending_operation()? != Some(pending.clone()) {
+            let _ = self.store.delete(PENDING_OPERATION_ACCOUNT);
+            return Err("待决操作写入 Keychain 后复核失败；未提交请求。".to_string());
+        }
+        Ok(pending)
+    }
+
+    pub(crate) fn pending_remote_operation(&self) -> Result<PendingEnrollmentOperation, String> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        self.read_pending_operation()?
+            .ok_or_else(|| "当前没有待确认的远程登记操作。".to_string())
+    }
+
+    pub(crate) fn clear_rejected_remote_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<EnrollmentVaultStatus, String> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let pending = self.require_pending_operation(operation_id, None, None)?;
+        self.store
+            .delete(PENDING_OPERATION_ACCOUNT)
+            .map_err(|_| "无法清除已拒绝的待决操作；本机凭证未改变。".to_string())?;
+        if self.read_pending_operation()?.is_some() {
+            let _ = self.restore_pending_operation(&pending);
+            return Err("待决操作清除后复核失败；本机凭证未改变。".to_string());
+        }
+        let mut status = self.base_status_locked();
+        status.phase = "REMOTE_OPERATION_REJECTED".to_string();
+        status.message = "律所服务端已明确拒绝该操作；本机登记凭证未改变。".to_string();
+        Ok(status)
+    }
+
+    pub(crate) fn commit_remote_enrollment_operation(
+        &self,
+        operation_id: &str,
+        operation_kind: &str,
+        envelope_text: &str,
+        verified_envelope_sha256: &str,
+        verified_installation_binding_sha256: &str,
+        expected_current_sha256: Option<&str>,
+    ) -> Result<EnrollmentVaultStatus, String> {
+        if !matches!(operation_kind, "ACTIVATE" | "RENEW")
+            || !valid_enrollment_shape(envelope_text)
+            || !valid_sha256(verified_envelope_sha256)
+            || !valid_sha256(verified_installation_binding_sha256)
+            || expected_current_sha256.is_some_and(|value| !valid_sha256(value))
+            || envelope_sha256(envelope_text) != verified_envelope_sha256
+        {
+            return Err("远程登记成功回执格式无效；未写入本机凭证。".to_string());
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let pending = self.require_pending_operation(
+            operation_id,
+            Some(operation_kind),
+            Some(expected_current_sha256),
+        )?;
+        let current_secret = self
+            .read_installation_secret()?
+            .ok_or_else(|| "本机安装秘密尚未就绪；未写入登记凭证。".to_string())?;
+        if format!("{:x}", Sha256::digest(current_secret.as_slice()))
+            != verified_installation_binding_sha256
+        {
+            return Err("本机安装秘密已变化；未保存绑定旧设备状态的凭证。".to_string());
+        }
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未执行替换。".to_string())?;
+        if current.as_deref().map(envelope_sha256) != expected_current_sha256.map(str::to_string) {
+            return Err("当前登记凭证已变化；未覆盖较新的本机状态。".to_string());
+        }
+        self.store
+            .set(ENROLLMENT_ACCOUNT, envelope_text)
+            .map_err(|_| "无法写入已验签登记凭证。".to_string())?;
+        if !matches!(self.store.get(ENROLLMENT_ACCOUNT), Ok(Some(ref value)) if value == envelope_text)
+        {
+            self.restore_enrollment(current.as_deref());
+            return Err("登记凭证写入后复核失败；已尝试恢复原状态。".to_string());
+        }
+        if self.store.delete(PENDING_OPERATION_ACCOUNT).is_err()
+            || !matches!(self.read_pending_operation(), Ok(None))
+        {
+            self.restore_enrollment(current.as_deref());
+            let _ = self.restore_pending_operation(&pending);
+            return Err("登记凭证与待决标记无法共同提交；已尝试恢复原状态。".to_string());
+        }
+        Ok(self.base_status_locked())
+    }
+
+    pub(crate) fn commit_remote_revocation_operation(
+        &self,
+        operation_id: &str,
+        expected_current_sha256: &str,
+    ) -> Result<EnrollmentVaultStatus, String> {
+        if !valid_sha256(expected_current_sha256) {
+            return Err("远程撤销回执格式无效；未删除本机登记。".to_string());
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let pending = self.require_pending_operation(
+            operation_id,
+            Some("REVOKE"),
+            Some(Some(expected_current_sha256)),
+        )?;
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未完成远程撤销。".to_string())?
+            .ok_or_else(|| "当前没有可撤销的本机登记凭证。".to_string())?;
+        if envelope_sha256(&current) != expected_current_sha256 {
+            return Err("当前登记凭证已变化；未删除较新的本机状态。".to_string());
+        }
+        self.store
+            .delete(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "律所已接受撤销，但本机凭证删除失败；请立即联系管理员。".to_string())?;
+        if !matches!(self.store.get(ENROLLMENT_ACCOUNT), Ok(None)) {
+            let _ = self.store.set(ENROLLMENT_ACCOUNT, &current);
+            return Err("本机凭证删除后复核失败；已尝试恢复并请联系管理员。".to_string());
+        }
+        if self.store.delete(PENDING_OPERATION_ACCOUNT).is_err()
+            || !matches!(self.read_pending_operation(), Ok(None))
+        {
+            let _ = self.store.set(ENROLLMENT_ACCOUNT, &current);
+            let _ = self.restore_pending_operation(&pending);
+            return Err("远程撤销与待决标记无法共同提交；已尝试恢复本机凭证。".to_string());
+        }
+        let mut status = self.base_status_locked();
+        status.phase = "REMOTE_REVOKED_CONFIRMED".to_string();
+        status.message = "律所服务端已接受撤销，本机登记凭证也已清除。".to_string();
+        Ok(status)
     }
 
     /// Persist an envelope only after a trusted verifier has authenticated the
@@ -237,44 +452,24 @@ impl EnrollmentVault {
         Ok(self.status_locked())
     }
 
-    /// Delete the current envelope only after the parent-protected sidecar has
-    /// returned an accepted remote revocation receipt bound to its exact hash.
-    pub(crate) fn commit_remote_revocation(
-        &self,
-        expected_current_sha256: &str,
-    ) -> Result<EnrollmentVaultStatus, String> {
-        if !valid_sha256(expected_current_sha256) {
-            return Err("远程撤销回执格式无效；未删除本机登记。".to_string());
-        }
-        let _guard = self
-            .operation_lock
-            .lock()
-            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
-        let current = self
-            .store
-            .get(ENROLLMENT_ACCOUNT)
-            .map_err(|_| "无法读取当前登记凭证；未完成远程撤销。".to_string())?
-            .ok_or_else(|| "当前没有可撤销的本机登记凭证。".to_string())?;
-        if envelope_sha256(&current) != expected_current_sha256 {
-            return Err("当前登记凭证已变化；未删除较新的本机状态。".to_string());
-        }
-        self.store
-            .delete(ENROLLMENT_ACCOUNT)
-            .map_err(|_| "律所已接受撤销，但本机凭证删除失败；请立即联系管理员。".to_string())?;
-        match self.store.get(ENROLLMENT_ACCOUNT) {
-            Ok(None) => {}
-            Ok(Some(_)) | Err(_) => {
-                let _ = self.store.set(ENROLLMENT_ACCOUNT, &current);
-                return Err("本机凭证删除后复核失败；已尝试恢复并请联系管理员。".to_string());
+    fn status_locked(&self) -> EnrollmentVaultStatus {
+        let mut status = self.base_status_locked();
+        match self.read_pending_operation() {
+            Ok(Some(pending)) => {
+                status.phase = "REMOTE_OPERATION_PENDING".to_string();
+                status.message = format!(
+                    "{}操作的远程结果尚未确认（始于 {}）；请查询状态，不要重复提交。",
+                    operation_kind_label(&pending.operation_kind),
+                    pending.created_at
+                );
             }
+            Ok(None) => {}
+            Err(message) => return blocked_status(&message),
         }
-        let mut status = self.status_locked();
-        status.phase = "REMOTE_REVOKED_CONFIRMED".to_string();
-        status.message = "律所服务端已接受撤销，本机登记凭证也已清除。".to_string();
-        Ok(status)
+        status
     }
 
-    fn status_locked(&self) -> EnrollmentVaultStatus {
+    fn base_status_locked(&self) -> EnrollmentVaultStatus {
         let secret = match self.read_installation_secret() {
             Ok(secret) => secret,
             Err(message) => return blocked_status(&message),
@@ -323,6 +518,73 @@ impl EnrollmentVault {
         }
     }
 
+    fn require_pending_operation(
+        &self,
+        operation_id: &str,
+        operation_kind: Option<&str>,
+        expected_current_sha256: Option<Option<&str>>,
+    ) -> Result<PendingEnrollmentOperation, String> {
+        let pending = self
+            .read_pending_operation()?
+            .ok_or_else(|| "待决远程操作标记不存在；拒绝提交回执。".to_string())?;
+        if pending.operation_id != operation_id
+            || operation_kind.is_some_and(|kind| pending.operation_kind != kind)
+            || expected_current_sha256
+                .is_some_and(|expected| pending.expected_current_sha256.as_deref() != expected)
+        {
+            return Err("远程操作回执与 Keychain 待决标记不一致；本机状态未改变。".to_string());
+        }
+        Ok(pending)
+    }
+
+    fn read_pending_operation(&self) -> Result<Option<PendingEnrollmentOperation>, String> {
+        let Some(serialized) = self
+            .store
+            .get(PENDING_OPERATION_ACCOUNT)
+            .map_err(|_| "无法读取 Keychain 待决操作状态。".to_string())?
+        else {
+            return Ok(None);
+        };
+        if serialized.is_empty() || serialized.len() > 1024 {
+            return Err("Keychain 中的待决操作标记格式异常；案件访问保持禁用。".to_string());
+        }
+        let pending: PendingEnrollmentOperation = serde_json::from_str(&serialized)
+            .map_err(|_| "Keychain 中的待决操作标记格式异常；案件访问保持禁用。".to_string())?;
+        if pending.version != PENDING_OPERATION_VERSION {
+            return Err("Keychain 中的待决操作版本不受支持；案件访问保持禁用。".to_string());
+        }
+        validate_pending_fields(
+            &pending.operation_id,
+            &pending.operation_kind,
+            pending.expected_current_sha256.as_deref(),
+            Some(&pending.installation_binding_sha256),
+            &pending.created_at,
+        )?;
+        Ok(Some(pending))
+    }
+
+    fn restore_pending_operation(
+        &self,
+        pending: &PendingEnrollmentOperation,
+    ) -> Result<(), String> {
+        let serialized = serde_json::to_string(pending)
+            .map_err(|_| "无法恢复 Keychain 待决操作标记。".to_string())?;
+        self.store
+            .set(PENDING_OPERATION_ACCOUNT, &serialized)
+            .map_err(|_| "无法恢复 Keychain 待决操作标记。".to_string())
+    }
+
+    fn restore_enrollment(&self, prior: Option<&str>) {
+        match prior {
+            Some(value) => {
+                let _ = self.store.set(ENROLLMENT_ACCOUNT, value);
+            }
+            None => {
+                let _ = self.store.delete(ENROLLMENT_ACCOUNT);
+            }
+        }
+    }
+
     fn read_installation_secret(&self) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
         let Some(encoded) = self
             .store
@@ -338,6 +600,42 @@ impl EnrollmentVault {
             return Err("Keychain 中的本机安装秘密长度异常。".to_string());
         }
         Ok(Some(Zeroizing::new(decoded)))
+    }
+}
+
+fn validate_pending_fields(
+    operation_id: &str,
+    operation_kind: &str,
+    expected_current_sha256: Option<&str>,
+    installation_binding_sha256: Option<&str>,
+    created_at: &str,
+) -> Result<(), String> {
+    let valid_kind = matches!(operation_kind, "ACTIVATE" | "RENEW" | "REVOKE");
+    let expected_shape = if operation_kind == "ACTIVATE" {
+        expected_current_sha256.is_none()
+    } else {
+        expected_current_sha256.is_some_and(valid_sha256)
+    };
+    if Uuid::parse_str(operation_id).is_err()
+        || !valid_kind
+        || !expected_shape
+        || installation_binding_sha256.is_some_and(|value| !valid_sha256(value))
+        || !created_at.ends_with('Z')
+        || DateTime::parse_from_rfc3339(created_at)
+            .map(|value| value.with_timezone(&Utc))
+            .is_err()
+    {
+        return Err("待决远程操作标记字段无效；未改变本机状态。".to_string());
+    }
+    Ok(())
+}
+
+fn operation_kind_label(operation_kind: &str) -> &'static str {
+    match operation_kind {
+        "ACTIVATE" => "激活",
+        "RENEW" => "续期",
+        "REVOKE" => "撤销",
+        _ => "登记",
     }
 }
 
@@ -380,7 +678,8 @@ fn blocked_status(message: &str) -> EnrollmentVaultStatus {
 mod tests {
     use super::{
         CredentialStore, ENROLLMENT_ACCOUNT, EnrollmentVault, INITIALIZE_CONFIRMATION,
-        INSTALLATION_ACCOUNT, LOCAL_DISABLE_CONFIRMATION, StoreFailure, envelope_sha256,
+        INSTALLATION_ACCOUNT, LOCAL_DISABLE_CONFIRMATION, PENDING_OPERATION_ACCOUNT, StoreFailure,
+        envelope_sha256,
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
@@ -616,7 +915,25 @@ mod tests {
             .lock()
             .unwrap()
             .insert(ENROLLMENT_ACCOUNT.to_string(), envelope.to_string());
-        assert!(vault.commit_remote_revocation(&"0".repeat(64)).is_err());
+        let expected = envelope_sha256(envelope);
+        let operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        vault
+            .begin_remote_operation(
+                operation_id,
+                "REVOKE",
+                Some(&expected),
+                "2026-08-10T12:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(vault.status().phase, "REMOTE_OPERATION_PENDING");
+        assert!(
+            vault
+                .commit_remote_revocation_operation(
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    &expected,
+                )
+                .is_err()
+        );
         assert!(
             store
                 .values
@@ -625,7 +942,7 @@ mod tests {
                 .contains_key(ENROLLMENT_ACCOUNT)
         );
         let status = vault
-            .commit_remote_revocation(&envelope_sha256(envelope))
+            .commit_remote_revocation_operation(operation_id, &expected)
             .unwrap();
         assert_eq!(status.phase, "REMOTE_REVOKED_CONFIRMED");
         assert!(
@@ -634,6 +951,116 @@ mod tests {
                 .lock()
                 .unwrap()
                 .contains_key(ENROLLMENT_ACCOUNT)
+        );
+        assert!(vault.pending_remote_operation().is_err());
+    }
+
+    #[test]
+    fn pending_activation_survives_restart_and_commits_with_the_exact_marker() {
+        let store = Arc::new(MemoryStore::default());
+        let vault = EnrollmentVault::with_store(store.clone());
+        vault
+            .initialize_installation_with_secret(INITIALIZE_CONFIRMATION, Some([7_u8; 32]))
+            .unwrap();
+        let operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let pending = vault
+            .begin_remote_operation(operation_id, "ACTIVATE", None, "2026-08-10T12:00:00Z")
+            .unwrap();
+        assert_eq!(pending.operation_kind, "ACTIVATE");
+
+        let restarted = EnrollmentVault::with_store(store.clone());
+        assert_eq!(
+            restarted.pending_remote_operation().unwrap().operation_id,
+            operation_id
+        );
+        assert!(
+            restarted
+                .begin_remote_operation(
+                    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "ACTIVATE",
+                    None,
+                    "2026-08-10T12:01:00Z",
+                )
+                .is_err()
+        );
+        let envelope = r#"{"credential":{},"signature":"activated"}"#;
+        let status = restarted
+            .commit_remote_enrollment_operation(
+                operation_id,
+                "ACTIVATE",
+                envelope,
+                &envelope_sha256(envelope),
+                &format!("{:x}", Sha256::digest([7_u8; 32])),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status.phase, "CREDENTIAL_PRESENT_UNVERIFIED");
+        assert_eq!(
+            store.values.lock().unwrap().get(ENROLLMENT_ACCOUNT),
+            Some(&envelope.to_string())
+        );
+        assert!(restarted.pending_remote_operation().is_err());
+    }
+
+    #[test]
+    fn rejected_operation_clears_only_the_exact_marker_and_preserves_enrollment() {
+        let store = Arc::new(MemoryStore::default());
+        let vault = EnrollmentVault::with_store(store.clone());
+        vault
+            .initialize_installation_with_secret(INITIALIZE_CONFIRMATION, Some([7_u8; 32]))
+            .unwrap();
+        let envelope = r#"{"credential":{},"signature":"current"}"#;
+        store
+            .values
+            .lock()
+            .unwrap()
+            .insert(ENROLLMENT_ACCOUNT.to_string(), envelope.to_string());
+        let expected = envelope_sha256(envelope);
+        let operation_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        vault
+            .begin_remote_operation(
+                operation_id,
+                "RENEW",
+                Some(&expected),
+                "2026-08-10T12:00:00Z",
+            )
+            .unwrap();
+        assert!(
+            vault
+                .clear_rejected_remote_operation("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+                .is_err()
+        );
+        assert!(vault.pending_remote_operation().is_ok());
+        let status = vault.clear_rejected_remote_operation(operation_id).unwrap();
+        assert_eq!(status.phase, "REMOTE_OPERATION_REJECTED");
+        assert_eq!(
+            store.values.lock().unwrap().get(ENROLLMENT_ACCOUNT),
+            Some(&envelope.to_string())
+        );
+    }
+
+    #[test]
+    fn malformed_pending_marker_blocks_status_and_new_operations() {
+        let store = Arc::new(MemoryStore::default());
+        let vault = EnrollmentVault::with_store(store.clone());
+        vault
+            .initialize_installation_with_secret(INITIALIZE_CONFIRMATION, Some([7_u8; 32]))
+            .unwrap();
+        store.values.lock().unwrap().insert(
+            PENDING_OPERATION_ACCOUNT.to_string(),
+            r#"{"version":1,"operation_id":"forged"}"#.to_string(),
+        );
+        assert_eq!(vault.status().phase, "UNAVAILABLE");
+        assert!(vault.pending_remote_operation().is_err());
+        assert!(
+            vault
+                .begin_remote_operation(
+                    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "ACTIVATE",
+                    None,
+                    "2026-08-10T12:00:00Z",
+                )
+                .is_err()
         );
     }
 }

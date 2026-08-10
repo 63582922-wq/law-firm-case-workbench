@@ -12,8 +12,8 @@
 2. Rust 在 macOS 主线程显示 `NSSecureTextField` 原生密码框，说明激活码用途和身份边界。取消、五分钟超时或不满足 24—256 字节 ASCII 可见字符格式时，不发送任何请求。
 3. 原生层只有在受监护 sidecar、生产信任目录和本机安装秘密就绪，且 Keychain 不存在登记 envelope 时才显示输入框；在线激活不能覆盖现有登记。
 4. 激活码在 Rust 中使用可清零容器，原生字段读取后立即置空；JSON 请求缓冲区也在使用后清零。它只经父进程私有 Bearer 保护的数字 loopback 请求交给 sidecar。
-5. sidecar 只接受严格的 `{"activation_secret": ...}`，不允许 actor、firm、role 或客户端设备摘要。sidecar 从固定 Keychain 项读取 32 字节安装秘密，并再次确认登记 envelope 不存在。
-6. sidecar 通过当前门限签名目录固定的 HTTPS Origin 和 SPKI pin 调用律所激活端点；请求只由生命周期层增加设备绑定摘要和随机 nonce。无重定向、无自动重试、错误不回显服务正文。
+5. sidecar 只接受严格的 `{"activation_secret": ..., "operation_id": ...}`，不允许 actor、firm、role 或客户端设备摘要。sidecar 从固定 Keychain 项读取 32 字节安装秘密，并再次确认登记 envelope 不存在。
+6. sidecar 通过当前门限签名目录固定的 HTTPS Origin 和 SPKI pin 调用律所激活端点；请求只由生命周期层增加设备绑定摘要，并把原生层预先持久化的 `operation_id` 作为幂等 nonce。无重定向、无自动重试、错误不回显服务正文。
 7. 返回 envelope 必须按当前目录重新验签并匹配设备绑定、字段、签发方和有效期。sidecar 只在内存 staging，Rust 再核对 UUID、哈希、设备绑定和最长有效期，并以“当前无登记”为 CAS 前置条件写入、回读 Keychain。
 8. 激活成功不热启用身份。用户重启桌面应用后，启动链重新读取 Keychain、按当前信任目录验签，再决定是否交换短时会话。
 9. 生产信任未配置时激活端点不挂载，页面按钮禁用，默认应用不显示原生输入框，也不访问网络。
@@ -30,6 +30,6 @@
 ## 仍未放行
 
 - 律所真实激活服务、一次性码签发/失效策略、管理员 MFA 与双人复核；
-- 请求已被服务端处理但客户端未取得回执时的独立状态查询；当前绝不自动重试；
+- 真实律所服务需按 ADR-0017 实现幂等操作号和独立状态查询；客户端代码已完成，仍未作生产互操作验收；
 - 生产信任根、域名、TLS SPKI 轮换和真实 Mac 交互演练；
 - Developer ID 签名、公证、设备遗失处理及律所安全负责人验收。

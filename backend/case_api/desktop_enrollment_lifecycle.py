@@ -33,6 +33,8 @@ _NONCE = re.compile(r"^[A-Za-z0-9_-]{32,160}$")
 _REASON = re.compile(r"^[^\x00-\x1f\x7f]{2,200}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_OPERATION_KINDS = frozenset({"ACTIVATE", "RENEW", "REVOKE"})
+_REMOTE_STATES = frozenset({"PENDING", "REJECTED", "SUCCEEDED"})
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,56 @@ class EnrollmentRevocationReceipt:
 
 
 @dataclass(frozen=True)
+class EnrollmentOperationStatusRequest:
+    operation_id: str
+    operation_kind: str
+    installation_binding_sha256: str
+    current_envelope_sha256: str | None
+
+    def __post_init__(self) -> None:
+        _require_nonce(self.operation_id)
+        _require_operation_kind(self.operation_kind)
+        _require_sha256(self.installation_binding_sha256)
+        if self.operation_kind == "ACTIVATE":
+            if self.current_envelope_sha256 is not None:
+                raise DesktopEnrollmentLifecycleBlocked(
+                    "activation status cannot target an existing enrollment"
+                )
+        else:
+            _require_sha256(self.current_envelope_sha256)
+
+
+@dataclass(frozen=True)
+class EnrollmentOperationRemoteStatus:
+    operation_id: str
+    operation_kind: str
+    state: str
+    enrollment_envelope: str | None
+    revocation_receipt: EnrollmentRevocationReceipt | None
+
+    def validate(self, *, request: EnrollmentOperationStatusRequest) -> None:
+        _require_nonce(self.operation_id)
+        _require_operation_kind(self.operation_kind)
+        if self.operation_id != request.operation_id or self.operation_kind != request.operation_kind:
+            raise DesktopEnrollmentLifecycleBlocked("remote operation status does not match request")
+        if self.state not in _REMOTE_STATES:
+            raise DesktopEnrollmentLifecycleBlocked("remote operation status is invalid")
+        if self.state != "SUCCEEDED":
+            if self.enrollment_envelope is not None or self.revocation_receipt is not None:
+                raise DesktopEnrollmentLifecycleBlocked("unfinished operation returned result material")
+            return
+        if self.operation_kind in {"ACTIVATE", "RENEW"}:
+            if not isinstance(self.enrollment_envelope, str) or not self.enrollment_envelope:
+                raise DesktopEnrollmentLifecycleBlocked("successful operation envelope is unavailable")
+            if self.revocation_receipt is not None:
+                raise DesktopEnrollmentLifecycleBlocked("successful enrollment operation returned a receipt")
+        elif self.enrollment_envelope is not None or not isinstance(
+            self.revocation_receipt, EnrollmentRevocationReceipt
+        ):
+            raise DesktopEnrollmentLifecycleBlocked("successful revocation result is invalid")
+
+
+@dataclass(frozen=True)
 class EnrollmentOperationResult:
     status: str
     enrollment_id: str | None
@@ -109,6 +161,14 @@ class EnrollmentOperationResult:
     firm_id: str | None
     expires_at: datetime | None
     remote_revocation_confirmed: bool
+
+
+@dataclass(frozen=True)
+class EnrollmentOperationResolution:
+    operation_id: str
+    operation_kind: str
+    state: str
+    result: EnrollmentOperationResult | None
 
 
 class AuthenticatedFirmEnrollmentIssuer(Protocol):
@@ -119,6 +179,11 @@ class AuthenticatedFirmEnrollmentIssuer(Protocol):
     def renew(self, request: EnrollmentRenewalRequest) -> str: ...
 
     def revoke(self, request: EnrollmentRevocationRequest) -> EnrollmentRevocationReceipt: ...
+
+    def query_operation(
+        self,
+        request: EnrollmentOperationStatusRequest,
+    ) -> EnrollmentOperationRemoteStatus: ...
 
 
 class DesktopEnrollmentCredentialVault(Protocol):
@@ -132,6 +197,8 @@ class DesktopEnrollmentCredentialVault(Protocol):
     def installation_secret(self) -> bytes: ...
 
     def current_envelope(self) -> str: ...
+
+    def current_envelope_optional(self) -> str | None: ...
 
     def replace_enrollment(self, *, expected_sha256: str | None, envelope_text: str) -> None: ...
 
@@ -239,6 +306,120 @@ class DesktopEnrollmentLifecycle:
             remote_revocation_confirmed=False,
         )
 
+    def resolve_remote_operation(
+        self,
+        *,
+        operation_id: str,
+        operation_kind: str,
+    ) -> EnrollmentOperationResolution:
+        _require_nonce(operation_id)
+        _require_operation_kind(operation_kind)
+        secret = self._installation_secret()
+        current_envelope = self._current_envelope_optional()
+        if operation_kind == "ACTIVATE" and current_envelope is not None:
+            raise DesktopEnrollmentLifecycleBlocked(
+                "activation status cannot overwrite an existing enrollment"
+            )
+        if operation_kind != "ACTIVATE" and current_envelope is None:
+            raise DesktopEnrollmentLifecycleBlocked("current desktop enrollment is unavailable")
+        current_hash = (
+            _envelope_hash(current_envelope) if current_envelope is not None else None
+        )
+        request = EnrollmentOperationStatusRequest(
+            operation_id=operation_id,
+            operation_kind=operation_kind,
+            installation_binding_sha256=sha256(secret).hexdigest(),
+            current_envelope_sha256=current_hash,
+        )
+        remote = self._issuer_call(
+            lambda: self._issuer.query_operation(request),
+            "operation status",
+        )
+        if not isinstance(remote, EnrollmentOperationRemoteStatus):
+            raise DesktopEnrollmentLifecycleBlocked("remote operation status is invalid")
+        remote.validate(request=request)
+        if remote.state != "SUCCEEDED":
+            return EnrollmentOperationResolution(
+                operation_id=operation_id,
+                operation_kind=operation_kind,
+                state=remote.state,
+                result=None,
+            )
+
+        if operation_kind == "ACTIVATE":
+            envelope = remote.enrollment_envelope
+            enrollment = self._verify_envelope(envelope, secret=secret)
+            self._vault_call(
+                lambda: self._vault.replace_enrollment(
+                    expected_sha256=None,
+                    envelope_text=envelope,
+                ),
+                "registration recovery",
+            )
+            result = _result(
+                "REGISTERED",
+                enrollment,
+                remote_revocation_confirmed=False,
+            )
+        else:
+            if current_envelope is None or current_hash is None:
+                raise DesktopEnrollmentLifecycleBlocked(
+                    "current desktop enrollment is unavailable"
+                )
+            current = self._verify_envelope(current_envelope, secret=secret)
+            if operation_kind == "RENEW":
+                renewed_envelope = remote.enrollment_envelope
+                renewed = self._verify_envelope(renewed_envelope, secret=secret)
+                if (
+                    renewed.enrollment_id != current.enrollment_id
+                    or renewed.actor.actor_id != current.actor.actor_id
+                    or renewed.actor.firm_id != current.actor.firm_id
+                    or renewed.expires_at <= current.expires_at
+                ):
+                    raise DesktopEnrollmentLifecycleBlocked(
+                        "recovered renewal does not match current enrollment"
+                    )
+                self._vault_call(
+                    lambda: self._vault.replace_enrollment(
+                        expected_sha256=current_hash,
+                        envelope_text=renewed_envelope,
+                    ),
+                    "renewal recovery",
+                )
+                result = _result(
+                    "RENEWED",
+                    renewed,
+                    remote_revocation_confirmed=False,
+                )
+            else:
+                receipt = remote.revocation_receipt
+                if not isinstance(receipt, EnrollmentRevocationReceipt):
+                    raise DesktopEnrollmentLifecycleBlocked(
+                        "recovered revocation receipt is invalid"
+                    )
+                receipt.validate(
+                    expected_enrollment_id=current.enrollment_id,
+                    now=self._now(),
+                )
+                self._vault_call(
+                    lambda: self._vault.delete_enrollment(
+                        expected_sha256=current_hash,
+                    ),
+                    "revocation recovery",
+                )
+                result = _result(
+                    "REVOKED",
+                    current,
+                    remote_revocation_confirmed=True,
+                    expires_at=None,
+                )
+        return EnrollmentOperationResolution(
+            operation_id=operation_id,
+            operation_kind=operation_kind,
+            state="SUCCEEDED",
+            result=result,
+        )
+
     def _installation_secret(self) -> bytes:
         try:
             secret = self._vault.installation_secret()
@@ -255,6 +436,19 @@ class DesktopEnrollmentLifecycle:
             raise DesktopEnrollmentLifecycleBlocked("current desktop enrollment is unavailable") from error
         if not isinstance(envelope, str) or not envelope:
             raise DesktopEnrollmentLifecycleBlocked("current desktop enrollment is unavailable")
+        return envelope
+
+    def _current_envelope_optional(self) -> str | None:
+        try:
+            envelope = self._vault.current_envelope_optional()
+        except Exception as error:
+            raise DesktopEnrollmentLifecycleBlocked(
+                "current desktop enrollment state is unavailable"
+            ) from error
+        if envelope is not None and (not isinstance(envelope, str) or not envelope):
+            raise DesktopEnrollmentLifecycleBlocked(
+                "current desktop enrollment state is unavailable"
+            )
         return envelope
 
     def _verify_envelope(self, envelope: object, *, secret: bytes) -> DesktopEnrollment:
@@ -325,6 +519,11 @@ def _require_opaque_secret(value: object) -> None:
 def _require_nonce(value: object) -> None:
     if not isinstance(value, str) or not _NONCE.fullmatch(value):
         raise DesktopEnrollmentLifecycleBlocked("desktop enrollment nonce is invalid")
+
+
+def _require_operation_kind(value: object) -> None:
+    if not isinstance(value, str) or value not in _OPERATION_KINDS:
+        raise DesktopEnrollmentLifecycleBlocked("desktop enrollment operation kind is invalid")
 
 
 def _require_sha256(value: object) -> None:

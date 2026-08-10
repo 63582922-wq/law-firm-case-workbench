@@ -8,6 +8,7 @@ import {
   initializeDesktopInstallation,
   readDesktopEnrollmentVaultStatus,
   renewDesktopEnrollment,
+  resolvePendingDesktopEnrollment,
   revokeDesktopEnrollment,
 } from "@/lib/desktop-bridge";
 import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
@@ -19,7 +20,7 @@ export function IdentitySecurityWorkbench({
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
   const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
-  const [vaultBusy, setVaultBusy] = useState<"initialize" | "activate" | "import" | "renew" | "revoke" | "disable" | null>(null);
+  const [vaultBusy, setVaultBusy] = useState<"initialize" | "activate" | "import" | "renew" | "revoke" | "resolve" | "disable" | null>(null);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
   const [revokeArmed, setRevokeArmed] = useState(false);
@@ -150,6 +151,20 @@ export function IdentitySecurityWorkbench({
     }
   }
 
+  async function resolvePendingEnrollment() {
+    setVaultBusy("resolve");
+    setVaultMessage(null);
+    try {
+      const status = await resolvePendingDesktopEnrollment();
+      setVaultStatus(status);
+      setVaultMessage(status.message);
+    } catch (error) {
+      setVaultMessage(readableError(error, "尚未取得确定的远程结果；操作号仍安全保留，请稍后再次查询。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
   return (
     <section className={styles.securityArea} aria-label="身份与安全">
       <header className={styles.securityHeading}>
@@ -245,14 +260,23 @@ export function IdentitySecurityWorkbench({
           <p>初始化只在本机 Keychain 生成安装秘密；一次性激活码只进入 macOS 原生密码框，并由受信律所服务决定身份和角色。</p>
         </div>
         <div className={styles.securityActionButtons}>
+          {vaultStatus?.phase === "REMOTE_OPERATION_PENDING" ? (
+            <button
+              disabled={!trustReady || vaultBusy !== null}
+              onClick={() => void resolvePendingEnrollment()}
+              type="button"
+            >
+              {vaultBusy === "resolve" ? "正在核对远程结果…" : "查询待决远程操作"}
+            </button>
+          ) : null}
           <button
-            disabled={vaultBusy !== null || vaultStatus === null || vaultStatus.installationInitialized}
+            disabled={vaultBusy !== null || vaultStatus === null || vaultStatus.installationInitialized || vaultStatus.phase === "REMOTE_OPERATION_PENDING"}
             onClick={() => void initializeVault()}
             type="button"
           >
             {vaultBusy === "initialize" ? "正在写入并复核…" : vaultStatus?.installationInitialized ? "本机安全存储已就绪" : "初始化本机安全存储"}
           </button>
-          {vaultStatus?.installationInitialized && !vaultStatus.enrollmentEnvelopePresent ? (
+          {vaultStatus?.installationInitialized && !vaultStatus.enrollmentEnvelopePresent && vaultStatus.phase !== "REMOTE_OPERATION_PENDING" ? (
             <button
               disabled={!trustReady || vaultBusy !== null}
               onClick={() => void activateEnrollment()}
@@ -263,14 +287,14 @@ export function IdentitySecurityWorkbench({
             </button>
           ) : null}
           <button
-            disabled={!trustReady || !vaultStatus?.installationInitialized || vaultBusy !== null}
+            disabled={!trustReady || !vaultStatus?.installationInitialized || vaultBusy !== null || vaultStatus.phase === "REMOTE_OPERATION_PENDING"}
             onClick={() => void importEnrollment()}
             type="button"
             title={trustReady ? "只从原生文件选择器读取 .lawenroll 登记包" : "需要生产信任目录和律所签发服务"}
           >
             {vaultBusy === "import" ? "正在受信验签…" : "导入律所签名登记包"}
           </button>
-          {vaultStatus?.enrollmentEnvelopePresent ? (
+          {vaultStatus?.enrollmentEnvelopePresent && vaultStatus.phase !== "REMOTE_OPERATION_PENDING" ? (
             <button
               disabled={!trustReady || vaultBusy !== null}
               onClick={() => void renewEnrollment()}
@@ -279,7 +303,7 @@ export function IdentitySecurityWorkbench({
               {vaultBusy === "renew" ? "正在联系律所续期…" : "续期律所签名登记"}
             </button>
           ) : null}
-          {vaultStatus?.enrollmentEnvelopePresent ? (
+          {vaultStatus?.enrollmentEnvelopePresent && vaultStatus.phase !== "REMOTE_OPERATION_PENDING" ? (
             <button
               className={styles.securityDangerButton}
               disabled={!trustReady || vaultBusy !== null}
@@ -289,7 +313,7 @@ export function IdentitySecurityWorkbench({
               {vaultBusy === "revoke" ? "正在确认远程撤销…" : revokeArmed ? "确认远程撤销登记" : "远程撤销登记"}
             </button>
           ) : null}
-          {vaultStatus?.enrollmentEnvelopePresent ? (
+          {vaultStatus?.enrollmentEnvelopePresent && vaultStatus.phase !== "REMOTE_OPERATION_PENDING" ? (
             <button
               className={styles.securityDangerButton}
               disabled={vaultBusy !== null}

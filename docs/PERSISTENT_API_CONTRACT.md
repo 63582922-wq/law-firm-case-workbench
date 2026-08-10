@@ -46,7 +46,7 @@ API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数�
 
 ## 未完成门槛
 
-- 律所真实激活/续期/撤销服务及断线状态查询、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；
+- 律所真实激活/续期/撤销/状态服务与操作号保留策略、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；客户端断线状态消解已实现但未做生产互操作验收；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
 - 大案件分页、按角色最小展示与字段级脱敏；
 - 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；
