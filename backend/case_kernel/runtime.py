@@ -197,6 +197,9 @@ def build_runtime_services(
         agent_draft_candidate_store=PostgresAgentDraftCandidateStore(
             dsn,
             artifact_reader=artifact_reader,
+            registry=default_case_skill_registry(
+                reviewable_office_drafts_enabled=office_converter is not None and artifact_store is not None
+            ),
         ),
         document_consistency_store=PostgresDocumentConsistencyReviewStore(dsn),
         external_request_store=PostgresExternalRequestStore(dsn),

@@ -21,7 +21,7 @@ from .agent_draft_review import prepare_docx_review_candidate, prepare_xlsx_revi
 from .agent_structured_draft import parse_docx_candidate, parse_xlsx_candidate
 from .case_ledger_postgres import CaseLedgerCommandReceipt, CaseLedgerPersistenceBlocked, _advisory_lock, _authorize_and_lock_matter, _finish_command, _payload_hash, _prior_receipt, _require_positive_version, _require_roles, _validate_command_identity, _validate_sha256
 from .models import Actor, Role
-from .skill_registry import default_case_skill_registry
+from .skill_registry import CaseSkillRegistry, SkillMaturity, default_case_skill_registry
 
 
 @dataclass(frozen=True)
@@ -39,9 +39,10 @@ class PostgresAgentDraftCandidateStore:
     _REGISTER = frozenset({Role.SYSTEM_WORKER})
     _APPROVE = frozenset({Role.LEAD_LAWYER, Role.REVIEWER})
 
-    def __init__(self, dsn: str, *, artifact_reader: Callable[[str, str], bytes] | None) -> None:
+    def __init__(self, dsn: str, *, artifact_reader: Callable[[str, str], bytes] | None, registry: CaseSkillRegistry | None = None) -> None:
         self._dsn = dsn
         self._reader = artifact_reader
+        self._registry = registry or default_case_skill_registry()
 
     def stage(self, *, matter_id: str, actor: Actor, expected_version: int, idempotency_key: str, spec: AgentDraftCandidateSpec) -> CaseLedgerCommandReceipt:
         _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
@@ -59,9 +60,10 @@ class PostgresAgentDraftCandidateStore:
             if row is None: raise KeyError(candidate_id)
             if row["status"] != "CANDIDATE" or row["review_hash"] != approval_hash: raise CaseLedgerPersistenceBlocked("Agent draft candidate approval must bind to its current exact review hash")
             run_id, proposal_id = str(uuid4()), str(uuid4())
-            registry = default_case_skill_registry(reviewable_office_drafts_enabled=True)
-            skill = registry.get_skill(row["skill_id"])
-            connection.execute("INSERT INTO agent_runs (run_id, firm_id, matter_id, requested_by, agent_id, agent_version, policy_manifest_hash, input_hash, input_matter_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (run_id, actor.firm_id, matter_id, actor.actor_id, row["agent_id"], row["agent_version"], _policy_hash(), row["input_hash"], expected_version))
+            skill = self._registry.get_skill(row["skill_id"])
+            if skill.maturity is not SkillMaturity.IMPLEMENTED or row["tool_id"] not in skill.allowed_tools:
+                raise CaseLedgerPersistenceBlocked("reviewable Office drafting is not enabled for this desktop runtime")
+            connection.execute("INSERT INTO agent_runs (run_id, firm_id, matter_id, requested_by, agent_id, agent_version, policy_manifest_hash, input_hash, input_matter_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (run_id, actor.firm_id, matter_id, actor.actor_id, row["agent_id"], row["agent_version"], _policy_hash(self._registry), row["input_hash"], expected_version))
             connection.execute("INSERT INTO agent_action_proposals (proposal_id, firm_id, matter_id, run_id, sequence, skill_id, skill_version, tool_id, approval_gate, required_scopes, input_hash, rationale_hash) VALUES (%s,%s,%s,%s,1,%s,%s,%s,%s,%s::jsonb,%s,%s)", (proposal_id, actor.firm_id, matter_id, run_id, row["skill_id"], skill.version, row["tool_id"], skill.approval_gate.value, "[\"MANAGED_DERIVATIVE_WRITE\"]", row["input_hash"], row["rationale_hash"]))
             connection.execute("UPDATE agent_draft_candidates SET status = 'APPROVED', approved_by = %s, approval_hash = %s, approved_at = now(), run_id = %s, proposal_id = %s WHERE candidate_id = %s", (actor.actor_id, approval_hash, run_id, proposal_id, candidate_id))
             return run_id, proposal_id
@@ -97,5 +99,5 @@ class PostgresAgentDraftCandidateStore:
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (firm_id,)); yield connection
 
 
-def _policy_hash() -> str:
-    return _payload_hash({"registry": [(s.skill_id, s.version, s.maturity.value) for s in default_case_skill_registry(reviewable_office_drafts_enabled=True).list_skills()]})
+def _policy_hash(registry: CaseSkillRegistry) -> str:
+    return _payload_hash({"registry": [(s.skill_id, s.version, s.maturity.value) for s in registry.list_skills()]})
