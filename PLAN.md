@@ -82,6 +82,8 @@
 
 实施记录：`2026-08-10 完成官方来源抓取 SYSTEM_WORKER 的单任务执行入口：只能以独立 SYSTEM_WORKER 身份、精确案件/运行标识、案件版本及受限 ASCII 幂等键领取已授权租约；入口不接收网页 URL、检索词、案卷正文或密钥，取得租约后才调用现有固定查询、credential-free HTTPS、加密归档和确定性解析协调器。桌面监督进程对该入口的系统 Worker 身份配置与自动领取策略仍待接入`
 
+实施记录：`2026-08-10 完成桌面 SYSTEM_WORKER 身份装配：Worker 用户 UUID 仅来自显式本机运行配置，律所范围必从当前重验成功的桌面登记 Actor 派生，忽略任何环境/网页指定的 firm_id；未登记、缺 Worker ID 或 UUID 异常时 fail closed。数据库领取任务时仍须逐案复核 SYSTEM_WORKER 角色，桌面登记不成为 Worker 授权旁路`
+
 实施记录：`2026-08-10 完成 WebView 持久 API 会话客户端：所有正式案件读写通过原生 grant 解析动态数字 loopback 并注入短时 Bearer，固定地址若存在必须完全匹配；派生 PDF/ZIP/PNG 继续使用独立一次性许可。Rust 在 grant 返回前清除过期会话，服务端 CORS 只允许 tauri://localhost 所需头；默认生产信任和数据库未配置时仍不返回令牌或开放案件路由`
 
 实施记录：`2026-08-10 完成律所登记续期与远程撤销原生链：服务 Origin/TLS SPKI 只来自门限签名目录，固定 HTTPS 路径无自动重试；sidecar 读取并重新验签当前 Keychain 材料后在内存 staging，Rust 按旧凭证哈希 CAS 保存续期或在已接受撤销回执后停止会话并删除。中文界面区分远程撤销与只停用本机；生产目录未配置时端点 404、按钮禁用且不联网`

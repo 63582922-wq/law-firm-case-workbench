@@ -20,6 +20,8 @@
 
 任一条件不满足即阻断。前六项全部满足时，sidecar 以 `PersistentApiDependencies` 直接启动持久 API：所有 PostgreSQL Store、加密对象库、一次性文件访问许可、案卷文件夹授权、原件单页预览、Agent 执行审计和外部调用预授权账本必须一次装配，不能只开其中一部分；向 Rust 桌面壳回报的状态固定为 `CONFIGURED`，不把内部运行模式名当作协议状态。合成模式出现任何持久化配置也会阻断，避免配置残留让测试页面误连数据库。配置对象的文本表示不包含 DSN，日志和错误信息不得输出密码或完整连接串。
 
+需要执行抓取、转换或导出的独立 Worker 时，`CASE_WORKBENCH_SYSTEM_WORKER_ID` 只能指定 Worker 用户 UUID；律所范围必须由当前已重新验签的桌面登记派生，忽略任何环境或网页给出的 `firm_id`。Worker 仍需由 PostgreSQL 在每个任务领取时复核本案 `SYSTEM_WORKER` 角色，桌面登记不能替代该检查。
+
 ## 尚未开放
 
 - 现有 `case_api.app` 仍是合成 Alpha，不能因存在 `RuntimeServices` 就切换为 PostgreSQL；

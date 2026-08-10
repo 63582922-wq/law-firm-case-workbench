@@ -30,6 +30,7 @@ class DesktopIdentityRuntime:
     phase: str
     message: str
     enrollment_id: str | None = None
+    firm_id: str | None = None
     expires_at: str | None = None
     session_authority: DesktopSessionAuthority | None = field(default=None, repr=False)
 
@@ -91,6 +92,7 @@ def load_desktop_identity(
         phase="ENROLLED",
         message="本机登记已按当前信任目录重新验签；尚未核验本案数据库权限。",
         enrollment_id=enrollment.enrollment_id,
+        firm_id=enrollment.actor.firm_id,
         expires_at=enrollment.expires_at.isoformat().replace("+00:00", "Z"),
         session_authority=authority,
     )
