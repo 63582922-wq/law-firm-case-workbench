@@ -7,6 +7,7 @@ import unittest
 import zipfile
 
 from reportlab.pdfgen import canvas
+from PIL import Image
 
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt
 from case_kernel.evidence_intake_coordinator import coordinate_claimed_evidence_intake_item
@@ -14,6 +15,7 @@ from case_kernel.evidence_intake_postgres import EvidenceIntakeItemLease
 from case_kernel.evidence_intake_worker import FileSafetyScanReceipt
 from case_kernel.local_access_grants import LocalFolderGrantRegistry, LocalSessionProof
 from case_kernel.local_case_folder import root_fingerprint
+from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.models import Actor, Role
 
 
@@ -33,6 +35,10 @@ class FakePersistence:
     def register_original_file(self, **kwargs):
         self.calls.append(("register", kwargs))
         return self.receipt("REGISTER", kwargs["expected_version"] + 1, "EVIDENCE_ORIGINAL")
+
+    def register_normalized_original_file(self, **kwargs):
+        self.calls.append(("register_normalized", kwargs))
+        return self.receipt("REGISTER_NORMALIZED", kwargs["expected_version"] + 1, "EVIDENCE_ORIGINAL")
 
     def complete_evidence_intake_item(self, **kwargs):
         self.calls.append(("complete", kwargs))
@@ -54,7 +60,7 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
             str(uuid4()), "OS_BOUND_LOCAL_SESSION", self.now - timedelta(minutes=1), self.now + timedelta(minutes=15)
         )
 
-    def coordinate(self, root: Path, source: Path, detected_kind: str):
+    def coordinate(self, root: Path, source: Path, detected_kind: str, *, artifact_store=None):
         registry = LocalFolderGrantRegistry()
         grant = registry.issue_read_grant(
             selected_root=root,
@@ -89,6 +95,7 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
             scanner=CleanScanner(),
             persistence=persistence,
             system_actor=self.worker,
+            artifact_store=artifact_store,
         )
         return result, persistence
 
@@ -122,6 +129,28 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
         self.assertEqual(result.reason_code, "SPREADSHEET_CONVERSION_REQUIRED")
         self.assertEqual([name for name, _ in persistence.calls], ["finalize"])
         self.assertEqual(persistence.calls[0][1]["outcome_code"], "SPREADSHEET_CONVERSION_REQUIRED")
+
+    def test_clean_image_is_normalized_into_encrypted_pdf_then_registered(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "案卷"
+            root.mkdir()
+            source = root / "微信转账记录" / "付款截图.png"
+            source.parent.mkdir()
+            Image.new("RGB", (120, 80), color="white").save(source)
+            store = LocalEncryptedArtifactStore(
+                Path(temporary) / "managed-artifacts",
+                key_id="test-key-v1",
+                encryption_key=b"x" * 32,
+            )
+            result, persistence = self.coordinate(root, source, "IMAGE", artifact_store=store)
+            artifact_key = persistence.calls[0][1]["normalized_pdf_object_key"]
+            artifact_sha = persistence.calls[0][1]["normalized_pdf_sha256"]
+            self.assertTrue(store.read_bytes(artifact_key, expected_sha256=artifact_sha).startswith(b"%PDF-"))
+        self.assertEqual(result.outcome, "REGISTERABLE")
+        self.assertIsNone(result.reason_code)
+        self.assertEqual([name for name, _ in persistence.calls], ["register_normalized", "complete"])
+        self.assertEqual(persistence.calls[0][1]["source_media_type"], "image/png")
+        self.assertEqual(persistence.calls[0][1]["page_count"], 1)
 
 
 if __name__ == "__main__":

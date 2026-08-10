@@ -271,6 +271,179 @@ class PostgresEvidenceManifestStore:
                 stale_submission=True,
             )
 
+    def register_normalized_original_file(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        original_label: str,
+        original_file_sha256: str,
+        byte_size: int,
+        source_media_type: str,
+        page_count: int,
+        source_scan_fingerprint: str,
+        normalizer_id: str,
+        normalizer_version: str,
+        transform_hash: str,
+        normalized_pdf_sha256: str,
+        normalized_pdf_bytes: int,
+        normalized_pdf_object_key: str,
+    ) -> CaseLedgerCommandReceipt:
+        """Atomically register a non-PDF original and its encrypted PDF view."""
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        _require_positive_version(expected_version)
+        for label, value in (
+            ("original_label", original_label),
+            ("source_media_type", source_media_type),
+            ("normalizer_id", normalizer_id),
+            ("normalizer_version", normalizer_version),
+        ):
+            _require_text(value, label)
+        for label, value in (
+            ("original_file_sha256", original_file_sha256),
+            ("source_scan_fingerprint", source_scan_fingerprint),
+            ("transform_hash", transform_hash),
+            ("normalized_pdf_sha256", normalized_pdf_sha256),
+        ):
+            _validate_sha256(label, value)
+        _validate_normalized_object_key(normalized_pdf_object_key, normalized_pdf_sha256)
+        if source_media_type.strip() == "application/pdf":
+            raise CaseLedgerPersistenceBlocked("normalized registration is only for a non-PDF original")
+        if (
+            byte_size < 1
+            or normalized_pdf_bytes < 1
+            or normalized_pdf_bytes > 100 * 1024 * 1024
+            or page_count < 1
+            or page_count > 10_000
+        ):
+            raise CaseLedgerPersistenceBlocked("normalized original sizes or page count are outside the supported boundary")
+        command_name = "REGISTER_NORMALIZED_EVIDENCE_ORIGINAL"
+        payload = {
+            "matter_id": matter_id,
+            "expected_version": expected_version,
+            "original_label": original_label.strip(),
+            "original_file_sha256": original_file_sha256,
+            "byte_size": byte_size,
+            "source_media_type": source_media_type.strip(),
+            "page_count": page_count,
+            "source_scan_fingerprint": source_scan_fingerprint,
+            "normalizer_id": normalizer_id.strip(),
+            "normalizer_version": normalizer_version.strip(),
+            "transform_hash": transform_hash,
+            "normalized_pdf_sha256": normalized_pdf_sha256,
+            "normalized_pdf_bytes": normalized_pdf_bytes,
+            "normalized_pdf_object_key": normalized_pdf_object_key,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=self._CANDIDATE_ROLES,
+            )
+            if prior is not None:
+                return prior
+            duplicate = connection.execute(
+                """
+                SELECT 1 FROM evidence_original_files
+                WHERE matter_id = %s AND firm_id = %s
+                  AND original_file_sha256 = %s AND original_label = %s
+                """,
+                (matter_id, actor.firm_id, original_file_sha256, original_label.strip()),
+            ).fetchone()
+            if duplicate is not None:
+                raise CaseLedgerPersistenceBlocked("the immutable original is already registered")
+            evidence_file_id = str(uuid4())
+            representation_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO evidence_original_files (
+                    evidence_file_id, firm_id, matter_id, original_label,
+                    original_file_sha256, byte_size, media_type, page_count,
+                    source_scan_fingerprint, supersedes_file_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL)
+                """,
+                (
+                    evidence_file_id,
+                    actor.firm_id,
+                    matter_id,
+                    original_label.strip(),
+                    original_file_sha256,
+                    byte_size,
+                    source_media_type.strip(),
+                    page_count,
+                    source_scan_fingerprint,
+                ),
+            )
+            for page_number in range(1, page_count + 1):
+                connection.execute(
+                    """
+                    INSERT INTO evidence_pages (
+                        evidence_page_id, firm_id, matter_id, evidence_file_id, page_number
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (str(uuid4()), actor.firm_id, matter_id, evidence_file_id, page_number),
+                )
+            connection.execute(
+                """
+                INSERT INTO evidence_normalized_representations (
+                    representation_id, firm_id, matter_id, evidence_file_id,
+                    source_media_type, normalized_media_type, normalizer_id,
+                    normalizer_version, transform_hash, artifact_sha256,
+                    storage_object_key, pdf_bytes, page_count
+                ) VALUES (%s, %s, %s, %s, %s, 'application/pdf', %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    representation_id,
+                    actor.firm_id,
+                    matter_id,
+                    evidence_file_id,
+                    source_media_type.strip(),
+                    normalizer_id.strip(),
+                    normalizer_version.strip(),
+                    transform_hash,
+                    normalized_pdf_sha256,
+                    normalized_pdf_object_key,
+                    normalized_pdf_bytes,
+                    page_count,
+                ),
+            )
+            _invalidate_current_evidence_outputs(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+                reason="新增规范化证据原件后，旧证据清单已失效。",
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="NORMALIZED_EVIDENCE_ORIGINAL_REGISTERED",
+                object_type="EVIDENCE_ORIGINAL",
+                object_id=evidence_file_id,
+                audit_payload={
+                    "evidence_file_id": evidence_file_id,
+                    "representation_id": representation_id,
+                    "original_file_sha256": original_file_sha256,
+                    "normalized_pdf_sha256": normalized_pdf_sha256,
+                    "transform_hash": transform_hash,
+                    "page_count": page_count,
+                },
+                stale_submission=True,
+            )
+
     def create_page_decision_candidate(
         self,
         *,
@@ -2784,11 +2957,16 @@ class PostgresEvidenceManifestStore:
                 """
                 SELECT page.evidence_page_id, page.evidence_file_id, page.page_number,
                        source.original_label, source.original_file_sha256,
-                       source.byte_size, source.media_type, source.page_count
+                       source.byte_size, source.media_type, source.page_count,
+                       representation.storage_object_key AS normalized_pdf_object_key,
+                       representation.artifact_sha256 AS normalized_pdf_sha256
                 FROM evidence_pages page
                 JOIN evidence_original_files source
                   ON source.evidence_file_id = page.evidence_file_id
                  AND source.firm_id = page.firm_id AND source.matter_id = page.matter_id
+                LEFT JOIN evidence_normalized_representations representation
+                  ON representation.evidence_file_id = source.evidence_file_id
+                 AND representation.firm_id = source.firm_id AND representation.matter_id = source.matter_id
                 WHERE page.evidence_page_id = %s
                   AND page.matter_id = %s AND page.firm_id = %s
                 """,
@@ -2807,6 +2985,8 @@ class PostgresEvidenceManifestStore:
             media_type=row["media_type"],
             page_count=row["page_count"],
             page_number=row["page_number"],
+            normalized_pdf_object_key=row.get("normalized_pdf_object_key"),
+            normalized_pdf_sha256=row.get("normalized_pdf_sha256"),
         )
 
     def _begin_or_replay(
@@ -2881,6 +3061,12 @@ def _validate_uuid_set(label: str, values: tuple[str, ...], *, minimum: int) -> 
     for value in normalized:
         _validate_uuid(label, value)
     return normalized
+
+
+def _validate_normalized_object_key(object_key: str, expected_sha256: str) -> None:
+    expected = f"{expected_sha256[:2]}/{expected_sha256[2:4]}/{expected_sha256}.lca"
+    if object_key != expected:
+        raise CaseLedgerPersistenceBlocked("normalized PDF object key does not match its verified SHA-256")
 
 
 def _require_page(

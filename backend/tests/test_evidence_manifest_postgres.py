@@ -62,6 +62,7 @@ class FakeEvidenceConnection:
         local_folder_candidate: dict | None = None,
         local_folder_file_rows: list[dict] | None = None,
         local_folder_file_total: int = 0,
+        normalized_original_duplicate: bool = False,
     ) -> None:
         self.permitted = permitted
         self.prior_receipt = prior_receipt
@@ -93,6 +94,7 @@ class FakeEvidenceConnection:
         self.local_folder_candidate = local_folder_candidate
         self.local_folder_file_rows = local_folder_file_rows or []
         self.local_folder_file_total = local_folder_file_total
+        self.normalized_original_duplicate = normalized_original_duplicate
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -140,6 +142,8 @@ class FakeEvidenceConnection:
             return FakeResult(row={"total_count": self.local_folder_file_total})
         if normalized.startswith("SELECT relative_path, previous_relative_path, byte_size, file_sha256"):
             return FakeResult(rows=self.local_folder_file_rows)
+        if "original_file_sha256 = %s AND original_label = %s" in normalized:
+            return FakeResult(row={"exists": 1} if self.normalized_original_duplicate else None)
         if normalized.startswith("SELECT 1 FROM evidence_original_files"):
             return FakeResult(row={"exists": 1})
         if normalized.startswith("SELECT 1 FROM evidence_pages"):
@@ -285,6 +289,65 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.assertIn("INSERT INTO outbox_events", sql)
         self.assertIn("INSERT INTO command_idempotency", sql)
         self.assertNotIn("DELETE FROM evidence_", sql)
+
+    def test_normalized_original_registers_raw_source_pages_and_encrypted_pdf_lineage_atomically(self) -> None:
+        connection = FakeEvidenceConnection()
+        pdf_hash = "d" * 64
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_normalized_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="normalized-evidence-original-001",
+                original_label="微信转账记录/付款截图.png",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                source_media_type="image/png",
+                page_count=1,
+                source_scan_fingerprint="b" * 64,
+                normalizer_id="lawcase-local-normalizer",
+                normalizer_version="1",
+                transform_hash="c" * 64,
+                normalized_pdf_sha256=pdf_hash,
+                normalized_pdf_bytes=1024,
+                normalized_pdf_object_key=f"{pdf_hash[:2]}/{pdf_hash[2:4]}/{pdf_hash}.lca",
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_original_files", sql)
+        self.assertIn("INSERT INTO evidence_normalized_representations", sql)
+        self.assertEqual(sql.count("INSERT INTO evidence_pages"), 1)
+        self.assertTrue(
+            any(
+                params is not None and "NORMALIZED_EVIDENCE_ORIGINAL_REGISTERED" in params
+                for _, params in connection.executed
+            )
+        )
+        self.assertNotIn("absolute_path", sql)
+
+    def test_normalized_original_rejects_artifact_key_not_bound_to_pdf_hash(self) -> None:
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "object key"):
+            self.store.register_normalized_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="normalized-evidence-original-key-001",
+                original_label="付款截图.png",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                source_media_type="image/png",
+                page_count=1,
+                source_scan_fingerprint="b" * 64,
+                normalizer_id="lawcase-local-normalizer",
+                normalizer_version="1",
+                transform_hash="c" * 64,
+                normalized_pdf_sha256="d" * 64,
+                normalized_pdf_bytes=1024,
+                normalized_pdf_object_key="bad/key.lca",
+            )
 
     def test_local_folder_scan_candidate_persists_only_relative_inventory_and_audit_counts(self) -> None:
         manifest = self.folder_manifest()

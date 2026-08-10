@@ -235,6 +235,8 @@ class PersistentEvidenceManifestPort(Protocol):
 
     def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
+    def register_normalized_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
     def create_page_decision_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def approve_page_decision(self, **kwargs) -> CaseLedgerCommandReceipt: ...
@@ -400,7 +402,9 @@ class PersistentApiDependencies:
         ) and self.artifact_store is None:
             raise ValueError("artifact access brokers require the encrypted artifact store")
         if self.artifact_store is not None and (
-            self.artifact_access_broker is None and self.submission_access_broker is None
+            self.artifact_access_broker is None
+            and self.submission_access_broker is None
+            and self.original_page_access_broker is None
         ):
             raise ValueError("encrypted artifact store requires at least one guarded access broker")
         if self.artifact_access_broker is not None and self.evidence_manifest_store is None:
@@ -414,6 +418,11 @@ class PersistentApiDependencies:
                 raise ValueError("original-page access requires the guarded evidence Manifest store")
             if self.original_page_access_broker.folder_grants is not self.local_folder_grants:
                 raise ValueError("original-page access broker must use the configured folder grant registry")
+            if (
+                self.original_page_access_broker.artifact_store is not None
+                and self.original_page_access_broker.artifact_store is not self.artifact_store
+            ):
+                raise ValueError("normalized original-page access must use the configured encrypted artifact store")
 
 
 def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:

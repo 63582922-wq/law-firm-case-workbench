@@ -8,12 +8,16 @@ import unittest
 from uuid import uuid4
 
 from reportlab.pdfgen import canvas
+from PIL import Image
 
 from case_kernel.local_access_grants import (
     LocalFolderGrantRegistry,
     LocalSessionProof,
 )
 from case_kernel.local_case_folder import root_fingerprint
+from case_kernel.evidence_normalization_worker import normalize_authorized_material
+from case_kernel.local_access_grants import AuthorizedOriginalFile
+from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.models import Actor, Role
 from case_kernel.original_page_access import (
     OriginalPageAccessBlocked,
@@ -146,6 +150,85 @@ class OriginalPageAccessTests(unittest.TestCase):
                 evidence_page_id=self.page_id,
                 session=self.session,
                 client_ip="127.0.0.1",
+                now=self.now,
+            )
+
+    def test_non_pdf_original_page_uses_hash_bound_encrypted_normalized_representation(self) -> None:
+        image_path = self.root / "微信付款截图.png"
+        Image.new("RGB", (100, 70), color="white").save(image_path)
+        image_source = AuthorizedOriginalFile(
+            relative_path=image_path.name,
+            path=image_path,
+            byte_size=image_path.stat().st_size,
+            sha256=sha256(image_path.read_bytes()).hexdigest(),
+        )
+        normalized = normalize_authorized_material(image_source, detected_kind="IMAGE")
+        artifact_store = LocalEncryptedArtifactStore(
+            Path(self.temporary.name) / "managed-artifacts",
+            key_id="test-key-v1",
+            encryption_key=b"k" * 32,
+        )
+        stored = artifact_store.put_bytes(
+            normalized.pdf_content,
+            expected_sha256=normalized.pdf_sha256,
+            case_root=self.root,
+        )
+        image_locator = OriginalPageLocator(
+            firm_id=self.actor.firm_id,
+            matter_id=self.matter_id,
+            evidence_page_id=str(uuid4()),
+            evidence_file_id=str(uuid4()),
+            original_label=image_path.name,
+            original_file_sha256=image_source.sha256,
+            byte_size=image_source.byte_size,
+            media_type="image/png",
+            page_count=normalized.page_count,
+            page_number=1,
+            normalized_pdf_object_key=stored.object_key,
+            normalized_pdf_sha256=stored.plaintext_sha256,
+        )
+        broker = OriginalPageAccessBroker(
+            folder_grants=self.folder_grants,
+            artifact_store=artifact_store,
+        )
+        issued = broker.issue(
+            locator=image_locator,
+            folder_grant_id=self.folder_grant.grant_id,
+            actor=self.actor,
+            session=self.session,
+            now=self.now,
+        )
+        delivery = broker.deliver(
+            access_token=issued.access_token,
+            actor=self.actor,
+            matter_id=self.matter_id,
+            evidence_page_id=image_locator.evidence_page_id,
+            session=self.session,
+            client_ip="127.0.0.1",
+            now=self.now + timedelta(seconds=1),
+        )
+        self.assertTrue(delivery.content.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(image_path.read_bytes(), image_source.path.read_bytes())
+
+    def test_non_pdf_locator_without_representation_is_blocked_before_grant(self) -> None:
+        non_pdf = OriginalPageLocator(
+            firm_id=self.actor.firm_id,
+            matter_id=self.matter_id,
+            evidence_page_id=str(uuid4()),
+            evidence_file_id=str(uuid4()),
+            original_label=self.source.name,
+            original_file_sha256=sha256(self.source.read_bytes()).hexdigest(),
+            byte_size=self.source.stat().st_size,
+            media_type="image/png",
+            page_count=1,
+            page_number=1,
+        )
+        with self.assertRaisesRegex(OriginalPageAccessBlocked, "normalized representation"):
+            self.broker.issue(
+                locator=non_pdf,
+                folder_grant_id=self.folder_grant.grant_id,
+                actor=self.actor,
+                session=self.session,
                 now=self.now,
             )
 

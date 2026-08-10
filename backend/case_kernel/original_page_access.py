@@ -24,6 +24,7 @@ from uuid import UUID, uuid4
 from pypdf import PdfReader, PdfWriter
 
 from .local_access_grants import LocalFolderGrantRegistry, LocalSessionProof
+from .managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
 from .models import Actor, Role
 
 
@@ -43,6 +44,8 @@ class OriginalPageLocator:
     media_type: str
     page_count: int
     page_number: int
+    normalized_pdf_object_key: str | None = None
+    normalized_pdf_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,7 @@ class OriginalPageAccessBroker:
         max_source_bytes: int = 512 * 1024 * 1024,
         max_rendered_bytes: int = 30 * 1024 * 1024,
         max_outstanding: int = 1_000,
+        artifact_store: LocalEncryptedArtifactStore | None = None,
     ) -> None:
         if preview_ttl <= timedelta(0) or preview_ttl > timedelta(minutes=2):
             raise ValueError("preview_ttl must be between 1 second and 2 minutes")
@@ -108,12 +112,17 @@ class OriginalPageAccessBroker:
         self._max_source_bytes = max_source_bytes
         self._max_rendered_bytes = max_rendered_bytes
         self._max_outstanding = max_outstanding
+        self._artifact_store = artifact_store
         self._records: dict[str, _AccessRecord] = {}
         self._lock = Lock()
 
     @property
     def folder_grants(self) -> LocalFolderGrantRegistry:
         return self._folder_grants
+
+    @property
+    def artifact_store(self) -> LocalEncryptedArtifactStore | None:
+        return self._artifact_store
 
     def issue(
         self,
@@ -209,14 +218,19 @@ class OriginalPageAccessBroker:
         )
         if source.relative_path != record.source_relative_path:
             raise OriginalPageAccessBlocked("the original file binding changed after preview authorization")
-        content, width, height = _render_pdf_page(
-            source.path,
-            page_number=record.locator.page_number,
-            expected_page_count=record.locator.page_count,
-            expected_sha256=record.locator.original_file_sha256,
-            rendered_dpi=self._rendered_dpi,
-            max_rendered_bytes=self._max_rendered_bytes,
-        )
+        if record.locator.normalized_pdf_object_key is None:
+            content, width, height = _render_pdf_page(
+                source.path,
+                page_number=record.locator.page_number,
+                expected_page_count=record.locator.page_count,
+                expected_sha256=record.locator.original_file_sha256,
+                rendered_dpi=self._rendered_dpi,
+                max_rendered_bytes=self._max_rendered_bytes,
+            )
+        else:
+            content, width, height = self._render_normalized_page(record.locator)
+        if _file_sha256(source.path) != record.locator.original_file_sha256:
+            raise OriginalPageAccessBlocked("the original source changed while its page was rendered")
         content_hash = sha256(content).hexdigest()
         return OriginalPageDelivery(
             evidence_page_id=evidence_page_id,
@@ -227,6 +241,31 @@ class OriginalPageAccessBroker:
             height=height,
             content=content,
         )
+
+    def _render_normalized_page(self, locator: OriginalPageLocator) -> tuple[bytes, int, int]:
+        if self._artifact_store is None or locator.normalized_pdf_sha256 is None:
+            raise OriginalPageAccessBlocked("normalized evidence preview requires the encrypted artifact store")
+        try:
+            normalized_content = self._artifact_store.read_bytes(
+                locator.normalized_pdf_object_key,
+                expected_sha256=locator.normalized_pdf_sha256,
+            )
+        except ManagedArtifactBlocked as error:
+            raise OriginalPageAccessBlocked("normalized evidence representation is unavailable or invalid") from error
+        with TemporaryDirectory(prefix="normalized-evidence-preview-") as temporary:
+            normalized_pdf = Path(temporary) / "normalized.pdf"
+            with normalized_pdf.open("xb") as output:
+                output.write(normalized_content)
+                output.flush()
+            normalized_pdf.chmod(0o600)
+            return _render_pdf_page(
+                normalized_pdf,
+                page_number=locator.page_number,
+                expected_page_count=locator.page_count,
+                expected_sha256=locator.normalized_pdf_sha256,
+                rendered_dpi=self._rendered_dpi,
+                max_rendered_bytes=self._max_rendered_bytes,
+            )
 
     def revoke_session(self, session_id: str) -> int:
         with self._lock:
@@ -331,13 +370,29 @@ def _validate_locator(locator: OriginalPageLocator, *, actor: Actor, max_source_
             raise OriginalPageAccessBlocked(f"original-page preview requires UUID {label}") from error
     if locator.firm_id != actor.firm_id:
         raise OriginalPageAccessBlocked("the original page is outside the authenticated firm")
-    if locator.media_type != "application/pdf":
-        raise OriginalPageAccessBlocked("only registered PDF originals can be previewed by page")
+    has_representation = locator.normalized_pdf_object_key is not None or locator.normalized_pdf_sha256 is not None
+    if locator.media_type == "application/pdf":
+        if has_representation:
+            raise OriginalPageAccessBlocked("a PDF original must not use a normalized representation")
+    elif locator.normalized_pdf_object_key is None or locator.normalized_pdf_sha256 is None:
+        raise OriginalPageAccessBlocked("non-PDF evidence preview requires a verified normalized representation")
     if (
         len(locator.original_file_sha256) != 64
         or any(character not in "0123456789abcdef" for character in locator.original_file_sha256)
     ):
         raise OriginalPageAccessBlocked("the registered original SHA-256 is invalid")
+    if locator.normalized_pdf_sha256 is not None and (
+        len(locator.normalized_pdf_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in locator.normalized_pdf_sha256)
+    ):
+        raise OriginalPageAccessBlocked("the normalized PDF SHA-256 is invalid")
+    if locator.normalized_pdf_object_key is not None:
+        expected_object_key = (
+            f"{locator.normalized_pdf_sha256[:2]}/{locator.normalized_pdf_sha256[2:4]}/"
+            f"{locator.normalized_pdf_sha256}.lca"
+        )
+        if locator.normalized_pdf_object_key != expected_object_key:
+            raise OriginalPageAccessBlocked("the normalized PDF object key is invalid")
     if locator.byte_size < 1 or locator.byte_size > max_source_bytes:
         raise OriginalPageAccessBlocked("the registered original exceeds the preview source limit")
     if locator.page_count < 1 or locator.page_number < 1 or locator.page_number > locator.page_count:
