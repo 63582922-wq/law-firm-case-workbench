@@ -25,6 +25,7 @@ from case_kernel.submission_access import SubmissionExportAccessBroker
 
 from .desktop_identity_runtime import DesktopIdentityRuntime
 from .persistent_app import PersistentApiDependencies
+from .desktop_system_worker import DesktopSystemWorkerBlocked, load_desktop_system_worker
 
 
 MACOS_KEYCHAIN_ARTIFACT_SERVICE = "cn.lawcase.workbench.managed-artifacts"
@@ -108,6 +109,12 @@ def build_desktop_persistent_runtime(
 
     folder_grants = LocalFolderGrantRegistry()
     intake_authorizations = LocalEvidenceIntakeAuthorizationRegistry()
+    try:
+        native_model_worker = load_desktop_system_worker(identity=identity, environ=environ)
+    except DesktopSystemWorkerBlocked:
+        # A missing dedicated worker does not stop read-only case work.  The
+        # native OCR bridge remains closed until the deployment installs it.
+        native_model_worker = None
     dependencies = PersistentApiDependencies(
         settings=settings,
         matter_store=services.matter_store,
@@ -133,6 +140,7 @@ def build_desktop_persistent_runtime(
             folder_grants=folder_grants,
             artifact_store=services.artifact_store,
         ),
+        native_model_worker=native_model_worker,
     )
     try:
         dependencies.validate()

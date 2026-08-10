@@ -52,7 +52,7 @@ from case_kernel.official_source_capture_postgres import (
     PersistentOfficialSourceCaptureSnapshot,
     PostgresOfficialSourceCaptureStore,
 )
-from case_kernel.models import Actor
+from case_kernel.models import Actor, Role
 from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.workflow import MatterWorkflow
 from case_kernel.local_access_grants import (
@@ -396,6 +396,8 @@ class PersistentExternalRequestPort(Protocol):
 
     def record_external_attempt(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
+    def validate_single_page_ocr_execution(self, **kwargs) -> None: ...
+
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot: ...
 
 
@@ -468,6 +470,7 @@ class PersistentApiDependencies:
     local_folder_grants: LocalFolderGrantRegistry | None = None
     local_evidence_intake_authorizations: LocalEvidenceIntakeAuthorizationRegistry | None = None
     original_page_access_broker: OriginalPageAccessBroker | None = None
+    native_model_worker: Actor | None = None
 
     def validate(self) -> None:
         if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
@@ -561,6 +564,9 @@ class PersistentApiDependencies:
         if self.local_evidence_intake_authorizations is not None:
             if self.local_folder_grants is None or self.evidence_manifest_store is None:
                 raise ValueError("local intake authorization requires folder grants and evidence persistence")
+        if self.native_model_worker is not None:
+            if self.native_model_worker.roles != frozenset({Role.SYSTEM_WORKER}):
+                raise ValueError("native model bridge requires the dedicated system worker role")
 
 
 def create_persistent_app(
@@ -3125,7 +3131,11 @@ def create_persistent_app(
         request: Request,
         folder_grant_id: UUID,
         desktop_session_id: UUID,
+        external_request_id: UUID,
+        expected_version: int,
+        processor_region: str,
         evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
     ) -> Response:
         """Return exactly one verified page to the trusted native parent.
 
@@ -3155,6 +3165,19 @@ def create_persistent_app(
         )
         if len(delivery.content) > 20 * 1024 * 1024:
             raise OriginalPageAccessBlocked("the verified evidence page exceeds the native OCR upload limit")
+        worker = dependencies.native_model_worker
+        if worker is None or worker.firm_id != identity.actor.firm_id:
+            raise PersistentAuthenticationBlocked("native OCR worker identity is not configured")
+        external_store.validate_single_page_ocr_execution(
+            matter_id=str(matter_id),
+            actor=worker,
+            expected_version=expected_version,
+            request_id=str(external_request_id),
+            provider_id="qwen",
+            processor_region=processor_region,
+            evidence_page_id=str(evidence_page_id),
+            rendered_page_sha256=delivery.content_sha256,
+        )
         return Response(
             content=delivery.content,
             media_type=delivery.media_type,

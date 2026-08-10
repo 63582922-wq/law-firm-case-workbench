@@ -30,6 +30,15 @@ class _Connection:
         if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"): return _Result({"authorized": 1})
         if "SELECT request_hash, response_json" in normalized: return _Result()
         if normalized.startswith("SELECT m.version,"): return _Result({"version": 3, "permitted": True})
+        if "FROM external_request_authorizations" in normalized and "SELECT request_kind" in normalized:
+            return _Result({
+                "request_kind": "OCR",
+                "provider_id": "qwen",
+                "processor_region": "cn-beijing",
+                "selected_field_ids": [],
+                "input_hash": "a" * 64,
+                "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+            })
         if "FROM external_request_authorizations" in normalized and "FOR KEY SHARE" in normalized:
             return _Result({"request_id": self.request_id, "call_cap": 3, "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)})
         if "FROM external_request_attempts" in normalized and "FOR UPDATE" in normalized: return _Result(rows=self.attempts)
@@ -96,6 +105,40 @@ class ExternalRequestPostgresTests(TestCase):
                 matter_id=self.matter_id, actor=self.worker, expected_version=3,
                 idempotency_key="external-outcome-001", request_id=connection.request_id,
                 status="SUCCEEDED", output_hash="d" * 64,
+            ))
+
+    def test_native_ocr_requires_exactly_one_authorized_page_and_render_hash(self) -> None:
+        page_id = str(uuid4())
+        connection = _Connection()
+        original_execute = connection.execute
+
+        def execute(sql, params=None):
+            result = original_execute(sql, params)
+            if "FROM external_request_authorizations" in " ".join(sql.split()) and "SELECT request_kind" in " ".join(sql.split()):
+                result.row["selected_field_ids"] = [f"evidence-page:{page_id}"]
+            return result
+
+        connection.execute = execute
+        self._run(connection, lambda: self.store.validate_single_page_ocr_execution(
+            matter_id=self.matter_id,
+            actor=self.worker,
+            expected_version=3,
+            request_id=connection.request_id,
+            provider_id="qwen",
+            processor_region="cn-beijing",
+            evidence_page_id=page_id,
+            rendered_page_sha256="a" * 64,
+        ))
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "does not match"):
+            self._run(connection, lambda: self.store.validate_single_page_ocr_execution(
+                matter_id=self.matter_id,
+                actor=self.worker,
+                expected_version=3,
+                request_id=connection.request_id,
+                provider_id="qwen",
+                processor_region="cn-beijing",
+                evidence_page_id=str(uuid4()),
+                rendered_page_sha256="a" * 64,
             ))
 
 

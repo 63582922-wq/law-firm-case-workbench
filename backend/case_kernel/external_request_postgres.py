@@ -192,6 +192,84 @@ class PostgresExternalRequestStore:
                 stale_submission=False, stale_calculations=False,
             )
 
+    def validate_single_page_ocr_execution(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        expected_version: int,
+        request_id: str,
+        provider_id: str,
+        processor_region: str,
+        evidence_page_id: str,
+        rendered_page_sha256: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Check the exact lawyer preflight before exposing one page to native OCR.
+
+        This deliberately does not create an attempt receipt.  The native
+        transport records ``SUBMISSION_STARTED`` immediately before its HTTPS
+        request, so a page render or local transport failure cannot masquerade
+        as a provider submission.
+        """
+        _validate_command_identity(
+            matter_id=matter_id,
+            actor=actor,
+            idempotency_key="native-ocr-preflight-check",
+        )
+        _require_roles(actor, self._EXECUTE_ROLES)
+        _require_positive_version(expected_version)
+        _validate_uuid("request_id", request_id)
+        _validate_uuid("evidence_page_id", evidence_page_id)
+        _validate_sha256("rendered_page_sha256", rendered_page_sha256)
+        if provider_id != "qwen" or processor_region not in {"cn-beijing", "ap-southeast-1"}:
+            raise CaseLedgerPersistenceBlocked("native OCR provider or region is not allowlisted")
+        current = _now(now)
+        with self._transaction(actor.firm_id) as connection:
+            _advisory_lock(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                command_name="VALIDATE_NATIVE_OCR_PREFLIGHT",
+                idempotency_key=f"native-ocr-preflight:{request_id}:{evidence_page_id}",
+            )
+            _authorize_and_lock_matter(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                allowed_roles=self._EXECUTE_ROLES,
+            )
+            authorization = connection.execute(
+                """
+                SELECT request_kind, provider_id, processor_region, selected_field_ids,
+                       input_hash, expires_at
+                FROM external_request_authorizations
+                WHERE request_id = %s AND matter_id = %s AND firm_id = %s
+                FOR KEY SHARE
+                """,
+                (request_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if authorization is None:
+                raise KeyError(request_id)
+            expected_field = f"evidence-page:{evidence_page_id}"
+            selected = authorization["selected_field_ids"]
+            if isinstance(selected, str):
+                try:
+                    selected = json.loads(selected)
+                except ValueError as error:
+                    raise CaseLedgerPersistenceBlocked("native OCR preflight fields are invalid") from error
+            if (
+                authorization["request_kind"] != "OCR"
+                or authorization["provider_id"] != provider_id
+                or authorization["processor_region"] != processor_region
+                or selected != [expected_field]
+                or authorization["input_hash"] != rendered_page_sha256
+            ):
+                raise CaseLedgerPersistenceBlocked("native OCR page does not match the lawyer-authorized preflight")
+            if authorization["expires_at"] <= current:
+                raise CaseLedgerPersistenceBlocked("native OCR preflight expired before page delivery")
+
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)
         _require_roles(actor, self._READ_ROLES)
