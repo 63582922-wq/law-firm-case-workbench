@@ -53,6 +53,7 @@ class FakeCaptureConnection:
             "parsed_output_hash": "d" * 64 if status == "REVIEW_REQUIRED" else None,
         }
         self.executed: list[tuple[str, tuple | None]] = []
+        self.next_claimable_row: dict | None = None
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
         normalized = " ".join(sql.split())
@@ -61,6 +62,8 @@ class FakeCaptureConnection:
             return FakeResult()
         if "SELECT request_hash, response_json" in normalized:
             return FakeResult(row=None)
+        if normalized.startswith("SELECT r.run_id, r.matter_id, m.version"):
+            return FakeResult(row=self.next_claimable_row)
         if "SELECT m.version," in normalized:
             return FakeResult(row={"version": 1, "permitted": True})
         if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"):
@@ -174,6 +177,40 @@ class OfficialSourceCaptureStoreTests(unittest.TestCase):
         self.assertEqual(lease.source_id, connection.source_id)
         self.assertEqual(lease.matter_version, 2)
         self.assertEqual(connection.run_row["attempt_count"], 1)
+
+    def test_worker_discovers_only_one_same_firm_authorized_queued_run(self) -> None:
+        connection = FakeCaptureConnection(status="QUEUED")
+        connection.next_claimable_row = {
+            "run_id": connection.run_id,
+            "matter_id": connection.matter_id,
+            "version": 7,
+        }
+        candidate = self.run_with(
+            connection,
+            lambda: self.store.find_next_claimable_capture(actor=self.system),
+        )
+        self.assertEqual(candidate, (connection.matter_id, connection.run_id, 7))
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("r.firm_id = %s", sql)
+        self.assertIn("u.status = 'ACTIVE'", sql)
+        self.assertIn("mar.role = 'SYSTEM_WORKER'", sql)
+        self.assertIn("mar.revoked_at IS NULL", sql)
+        self.assertIn("r.status = 'QUEUED'", sql)
+        self.assertIn("r.attempt_count = 0", sql)
+        self.assertIn("r.authorization_expires_at > now()", sql)
+        self.assertIn("LIMIT 1", sql)
+        self.assertNotIn("FOR UPDATE", sql)
+        query_params = next(
+            params for statement, params in connection.executed
+            if statement.startswith("SELECT r.run_id, r.matter_id, m.version")
+        )
+        self.assertEqual(query_params, (self.system.actor_id, self.system.actor_id, self.firm_id))
+
+    def test_next_capture_discovery_rejects_non_worker_without_database_read(self) -> None:
+        connection = FakeCaptureConnection(status="QUEUED")
+        with self.assertRaisesRegex(PermissionError, "permitted role"):
+            self.store.find_next_claimable_capture(actor=self.lead)
+        self.assertEqual(connection.executed, [])
 
     def test_completion_authenticates_encrypted_object_and_enters_review_required_only(self) -> None:
         connection = FakeCaptureConnection(status="RUNNING")

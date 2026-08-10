@@ -22,6 +22,8 @@
 
 需要执行抓取、转换或导出的独立 Worker 时，`CASE_WORKBENCH_SYSTEM_WORKER_ID` 只能指定 Worker 用户 UUID；律所范围必须由当前已重新验签的桌面登记派生，忽略任何环境或网页给出的 `firm_id`。Worker 仍需由 PostgreSQL 在每个任务领取时复核本案 `SYSTEM_WORKER` 角色，桌面登记不能替代该检查。
 
+官方法源抓取 Worker 默认不启动。只有持久化预览门已全部通过，并同时设置 `CASE_WORKBENCH_ENABLE_OFFICIAL_CAPTURE_WORKER=YES`、有效的 `CASE_WORKBENCH_SYSTEM_WORKER_ID`、以及预创建的 `CASE_WORKBENCH_OFFICIAL_CAPTURE_WORK_ROOT` 后，sidecar 才会装配它。工作目录必须是绝对、非符号链接、非根目录、0700 私有目录，并且必须与加密对象目录完全分离；它只作为不落入案卷原件目录的 Worker 安全锚点，不读取律师所选案件文件夹。`CASE_WORKBENCH_OFFICIAL_CAPTURE_INTERVAL_SECONDS` 可设为 1—300 秒，缺省 5 秒。每轮至多查找、领取和执行一项同律所、未过期、未尝试的授权任务；租约与逐案 `SYSTEM_WORKER` 角色在数据库内再次核验。sidecar 退出时向该循环发出停止信号。任一显式配置错误都会在案件路由监听前阻断启动；未设置启用项则维持默认关闭。
+
 ## 尚未开放
 
 - 现有 `case_api.app` 仍是合成 Alpha，不能因存在 `RuntimeServices` 就切换为 PostgreSQL；

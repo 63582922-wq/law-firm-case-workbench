@@ -55,6 +55,10 @@ from case_api.desktop_persistent_runtime import (
     DesktopPersistentRuntimeBlocked,
     build_desktop_persistent_runtime,
 )
+from case_api.desktop_official_capture_runtime import (
+    DesktopOfficialCaptureRuntimeBlocked,
+    build_desktop_official_capture_runtime,
+)
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeSettings
 
@@ -621,7 +625,20 @@ def run() -> int:
             if runtime_settings.mode is RuntimeMode.POSTGRES_INTERNAL_PREVIEW
             else None
         )
-    except (RuntimeConfigurationBlocked, DesktopPersistentRuntimeBlocked):
+        capture_runtime = (
+            build_desktop_official_capture_runtime(
+                identity=identity,
+                environ=os.environ,
+                persistent_runtime=persistent_runtime,
+            )
+            if persistent_runtime is not None
+            else None
+        )
+    except (
+        RuntimeConfigurationBlocked,
+        DesktopPersistentRuntimeBlocked,
+        DesktopOfficialCaptureRuntimeBlocked,
+    ):
         server_socket.close()
         print("本机受控服务的持久化前置条件未通过。", file=sys.stderr, flush=True)
         return 78
@@ -688,9 +705,17 @@ def run() -> int:
         daemon=True,
         name="lawcase-parent-watch",
     ).start()
+    if capture_runtime is not None:
+        Thread(
+            target=capture_runtime.supervisor.run,
+            daemon=True,
+            name="lawcase-official-capture-worker",
+        ).start()
     try:
         server.run(sockets=[server_socket])
     finally:
+        if capture_runtime is not None:
+            capture_runtime.stop.set()
         server_socket.close()
     return 0
 
