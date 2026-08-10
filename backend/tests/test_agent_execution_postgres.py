@@ -8,6 +8,7 @@ from uuid import uuid4
 from case_kernel.agent_execution_postgres import AgentToolProposal, PostgresAgentExecutionStore
 from case_kernel.case_ledger_postgres import CaseLedgerPersistenceBlocked
 from case_kernel.models import Actor, Role
+from case_kernel.skill_registry import default_case_skill_registry
 
 
 @dataclass
@@ -69,6 +70,7 @@ class AgentExecutionPostgresTests(TestCase):
         self.matter_id = str(uuid4())
         self.firm_id = str(uuid4())
         self.lawyer = Actor(str(uuid4()), self.firm_id, frozenset({Role.LEAD_LAWYER}))
+        self.assistant = Actor(str(uuid4()), self.firm_id, frozenset({Role.ASSISTANT}))
         self.worker = Actor(str(uuid4()), self.firm_id, frozenset({Role.SYSTEM_WORKER}))
         self.store = PostgresAgentExecutionStore("postgresql://not-used.invalid/lawcase_test")
 
@@ -111,6 +113,19 @@ class AgentExecutionPostgresTests(TestCase):
                 matter_id=self.matter_id, actor=self.worker, expected_version=4,
                 idempotency_key="agent-receipt-002", proposal_id=str(uuid4()),
                 status="BLOCKED", output_hash="e" * 64,
+            )
+
+    def test_assistant_cannot_plan_office_drafting_even_when_the_runtime_enables_the_tool(self) -> None:
+        enabled = PostgresAgentExecutionStore(
+            "postgresql://not-used.invalid/lawcase_test",
+            registry=default_case_skill_registry(reviewable_office_drafts_enabled=True),
+        )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "lead lawyer or reviewer"):
+            enabled.plan_agent_run(
+                matter_id=self.matter_id, actor=self.assistant, expected_version=4,
+                idempotency_key="agent-plan-draft-001", agent_id="case-manager", agent_version="1.0.0",
+                policy_manifest_hash="a" * 64, input_hash="b" * 64,
+                proposals=(AgentToolProposal(1, "document_drafting", "create_reviewable_docx_draft", "c" * 64, "d" * 64),),
             )
 
     def test_system_worker_reads_only_an_unfinished_minimal_execution_proposal(self) -> None:

@@ -96,6 +96,7 @@ class PostgresAgentExecutionStore:
         _validate_sha256("policy_manifest_hash", policy_manifest_hash)
         _validate_sha256("input_hash", input_hash)
         validated = self._validate_proposals(proposals)
+        self._require_lawyer_for_draft_proposals(actor, validated)
         command_name = "PLAN_AGENT_RUN"
         payload = {
             "matter_id": matter_id, "expected_version": expected_version,
@@ -334,6 +335,23 @@ class PostgresAgentExecutionStore:
 
     def _proposal_skills(self, proposals: tuple[AgentToolProposal, ...]):
         return tuple(self._registry.get_skill(item.skill_id) for item in proposals)
+
+    @staticmethod
+    def _require_lawyer_for_draft_proposals(actor: Actor, proposals: tuple[AgentToolProposal, ...]) -> None:
+        """A model/assistant can plan analysis, never authorize Office drafting.
+
+        This check intentionally sits before any write.  A later candidate
+        approval path supplies the same proposals only after the lawyer has
+        confirmed the exact structured-content review hash.
+        """
+
+        drafting = {"document_drafting", "spreadsheet_ledger"}
+        if any(proposal.skill_id in drafting for proposal in proposals) and not actor.roles.intersection(
+            {Role.LEAD_LAWYER, Role.REVIEWER}
+        ):
+            raise CaseLedgerPersistenceBlocked(
+                "reviewable Office drafting proposals require a lead lawyer or reviewer"
+            )
 
     def _begin(self, connection, *, actor: Actor, matter_id: str, expected_version: int, idempotency_key: str, command_name: str, payload_hash: str, allowed_roles: frozenset[Role]) -> CaseLedgerCommandReceipt | None:
         _advisory_lock(connection, actor=actor, matter_id=matter_id, command_name=command_name, idempotency_key=idempotency_key)
