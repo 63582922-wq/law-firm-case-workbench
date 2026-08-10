@@ -4,7 +4,9 @@ import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
   fetchSubmissionExport,
+  loadDocumentConsistencyReview,
   loadSubmissionReview,
+  type DocumentConsistencyReviewView,
   type SubmissionReviewView,
 } from "@/lib/case-data-source";
 import { ReviewableOfficeDrafts } from "@/components/reviewable-office-drafts";
@@ -20,6 +22,8 @@ const requiredFlow = [
 export function SubmissionWorkbench() {
   const [review, setReview] = useState<SubmissionReviewView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [consistency, setConsistency] = useState<DocumentConsistencyReviewView | null>(null);
+  const [consistencyError, setConsistencyError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
 
@@ -31,6 +35,13 @@ export function SubmissionWorkbench() {
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : "提交材料快照读取失败");
+      });
+    loadDocumentConsistencyReview()
+      .then((result) => {
+        if (active) setConsistency(result);
+      })
+      .catch((reason: unknown) => {
+        if (active) setConsistencyError(reason instanceof Error ? reason.message : "文书一致性审查快照读取失败");
       });
     return () => {
       active = false;
@@ -153,6 +164,8 @@ export function SubmissionWorkbench() {
 
       <ReviewableOfficeDrafts />
 
+      <DocumentConsistencyPanel review={consistency} error={consistencyError} />
+
       <section className={styles.submissionPanel} aria-labelledby="submission-lineage-title">
         <div className={styles.submissionPanelHeading}>
           <div><p className={styles.eyebrow}>锁定依据</p><h3 id="submission-lineage-title">四项不可缺少的上游依赖</h3></div>
@@ -186,6 +199,42 @@ export function SubmissionWorkbench() {
           </div>
         ) : <span className={styles.submissionGate}>等待：文件审批 → QA 清单 → 唯一锁定 → 本机编译</span>}
       </section>
+    </section>
+  );
+}
+
+function DocumentConsistencyPanel({
+  review,
+  error,
+}: {
+  review: DocumentConsistencyReviewView | null;
+  error: string | null;
+}) {
+  const latestFindings = review?.latest
+    ? review.findings.filter((item) => item.reviewId === review.latest?.reviewId)
+    : [];
+  const state = review?.latest?.status === "PASS" ? "已通过" : review?.latest?.status === "BLOCKED" ? "存在阻断项" : "尚未形成审查";
+  return (
+    <section className={styles.submissionPanel} aria-labelledby="document-consistency-title">
+      <div className={styles.submissionPanelHeading}>
+        <div><p className={styles.eyebrow}>文书一致性</p><h3 id="document-consistency-title">提交前交叉核对</h3></div>
+        <span>{state}</span>
+      </div>
+      {error ? (
+        <div className={styles.submissionBlockedNotice} role="alert">
+          <strong>审查快照未连接</strong><span>{error}</span>
+        </div>
+      ) : !review?.latest ? (
+        <div className={styles.submissionReviewNotice}>
+          <strong>尚未形成当前审查</strong>
+          <span>提交 QA 会要求覆盖本次全部已批准 PDF 的当前无阻断审查；系统不会把旧报告当作有效结果。</span>
+        </div>
+      ) : (
+        <div className={styles.submissionChecklist}>
+          <article><span>01</span><div><strong>审查结果：{state}</strong><small>阻断 {review.latest.blockingCount} 项，提示 {review.latest.warningCount} 项；覆盖案件版本 {review.latest.reviewedMatterVersion}</small></div><em>{shortHash(review.latest.outputHash)}</em></article>
+          <article><span>02</span><div><strong>当前发现代码</strong><small>只展示安全代码与哈希，不在提交页重复展示当事人资料、文书正文或确认值。</small></div><em>{latestFindings.length ? latestFindings.map((item) => item.code).join(" · ") : "无"}</em></article>
+        </div>
+      )}
     </section>
   );
 }

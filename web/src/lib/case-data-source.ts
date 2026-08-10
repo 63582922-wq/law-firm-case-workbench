@@ -387,6 +387,30 @@ export type SubmissionExportDelivery = {
   artifactSha256: string;
 };
 
+export type DocumentConsistencyReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  latest: {
+    reviewId: string;
+    reviewedMatterVersion: number;
+    inputHash: string;
+    outputHash: string;
+    blockingCount: number;
+    warningCount: number;
+    status: "PASS" | "BLOCKED";
+    recordedAt: string;
+  } | null;
+  findings: {
+    reviewId: string;
+    findingId: string;
+    severity: "BLOCKING" | "WARNING";
+    code: string;
+  }[];
+};
+
 export type ReviewableOfficeDraftReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -859,6 +883,28 @@ type PersistentSubmissionSnapshot = {
     verification_hash: string;
     verified_at: string;
   } | null;
+};
+
+type PersistentDocumentConsistencySnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  reviews: {
+    review_id: string;
+    reviewed_matter_version: number;
+    input_hash: string;
+    output_hash: string;
+    blocking_count: number;
+    warning_count: number;
+    status: "PASS" | "BLOCKED";
+    recorded_at: string;
+  }[];
+  findings: {
+    review_id: string;
+    finding_id: string;
+    severity: "BLOCKING" | "WARNING";
+    code: string;
+  }[];
 };
 
 type PersistentReviewableOfficeDraftSnapshot = {
@@ -1429,6 +1475,59 @@ export async function loadSubmissionReview(
     throw new Error(errorMessage(payload as ErrorEnvelope, "提交材料快照不可用"));
   }
   return mapPersistentSubmission(payload, response.headers.get("X-Request-ID"));
+}
+
+export async function loadDocumentConsistencyReview(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<DocumentConsistencyReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") {
+    return {
+      sourceKind: "synthetic-alpha",
+      sourceLabel: "合成模式未运行正式文书审查",
+      matterVersion: null,
+      snapshotHash: null,
+      requestId: null,
+      latest: null,
+      findings: [],
+    };
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/document-consistency-reviews`,
+    { headers: { Accept: "application/json" } },
+  );
+  const payload = (await response.json()) as PersistentDocumentConsistencySnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "文书一致性审查快照不可用"));
+  }
+  const reviews = [...payload.reviews].sort((left, right) => (
+    right.recorded_at.localeCompare(left.recorded_at) || right.review_id.localeCompare(left.review_id)
+  ));
+  const latest = reviews[0] ?? null;
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "文书一致性审查快照",
+    matterVersion: payload.matter_version,
+    snapshotHash: payload.snapshot_hash,
+    requestId: response.headers.get("X-Request-ID"),
+    latest: latest ? {
+      reviewId: latest.review_id,
+      reviewedMatterVersion: latest.reviewed_matter_version,
+      inputHash: latest.input_hash,
+      outputHash: latest.output_hash,
+      blockingCount: latest.blocking_count,
+      warningCount: latest.warning_count,
+      status: latest.status,
+      recordedAt: latest.recorded_at,
+    } : null,
+    findings: payload.findings.map((item) => ({
+      reviewId: item.review_id,
+      findingId: item.finding_id,
+      severity: item.severity,
+      code: item.code,
+    })),
+  };
 }
 
 export async function fetchSubmissionExport(
