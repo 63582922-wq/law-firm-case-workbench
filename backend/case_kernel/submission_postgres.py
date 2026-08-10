@@ -253,7 +253,8 @@ class PostgresSubmissionStore:
                 return prior
             product = connection.execute(
                 """
-                SELECT document_kind, audience, artifact_sha256, review_input_hash, status
+                SELECT document_kind, audience, artifact_sha256, semantic_text_sha256,
+                       review_input_hash, status
                 FROM submission_work_products
                 WHERE work_product_id = %s AND matter_id = %s AND firm_id = %s
                 FOR UPDATE
@@ -281,6 +282,26 @@ class PostgresSubmissionStore:
                 """,
                 (actor.actor_id, approval_hash, work_product_id, matter_id, actor.firm_id),
             )
+            if product["semantic_text_sha256"] is not None:
+                connection.execute(
+                    """
+                    UPDATE submission_work_products
+                    SET status = 'STALE', stale_at = now(),
+                        stale_reason = '同一文书类型已有内容不同的新版本获律师批准，旧版本不得再用于法院提交。'
+                    WHERE matter_id = %s AND firm_id = %s
+                      AND document_kind = %s AND audience = %s
+                      AND work_product_id <> %s AND status = 'APPROVED'
+                      AND semantic_text_sha256 IS DISTINCT FROM %s
+                    """,
+                    (
+                        matter_id,
+                        actor.firm_id,
+                        product["document_kind"],
+                        product["audience"],
+                        work_product_id,
+                        product["semantic_text_sha256"],
+                    ),
+                )
             return _finish_command(
                 connection,
                 actor=actor,

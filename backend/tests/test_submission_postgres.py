@@ -161,6 +161,7 @@ class FakeSubmissionConnection:
                     "document_kind": "DEFENCE_STATEMENT",
                     "audience": "COURT_SUBMISSION",
                     "artifact_sha256": "a" * 64,
+                    "semantic_text_sha256": "d" * 64,
                     "review_input_hash": "f" * 64,
                     "status": "CANDIDATE",
                 }
@@ -401,6 +402,8 @@ class SubmissionStoreTests(unittest.TestCase):
         self.assertEqual(receipt.matter_version, 2)
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("UPDATE submission_work_products", sql)
+        self.assertIn("同一文书类型已有内容不同的新版本获律师批准", sql)
+        self.assertIn("semantic_text_sha256 IS DISTINCT FROM", sql)
         self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
         self.assertNotIn("UPDATE calculation_runs", sql)
 
