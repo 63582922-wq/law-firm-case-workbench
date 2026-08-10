@@ -832,6 +832,63 @@ class PersistentLocalFolderGrantResponse(BaseModel):
     expires_at: datetime
 
 
+class PersistentLocalFolderScanRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    folder_grant_id: UUID
+
+
+class PersistentLocalFolderScanApprovalRequest(PersistentApprovalRequest):
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentLocalFolderScanSummary(BaseModel):
+    scan_id: UUID
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base_scan_id: UUID | None
+    status: Literal["CANDIDATE", "APPROVED"]
+    total_files: int = Field(ge=0, le=10_000)
+    total_bytes: int = Field(ge=0, le=10 * 1024 * 1024 * 1024)
+    skipped_symlinks: int = Field(ge=0)
+    new_count: int = Field(ge=0)
+    modified_count: int = Field(ge=0)
+    moved_count: int = Field(ge=0)
+    missing_count: int = Field(ge=0)
+    unchanged_count: int = Field(ge=0)
+    duplicate_content_count: int = Field(ge=0)
+    scanned_at: datetime
+    approved_at: datetime | None
+
+
+class PersistentLocalFolderIntakeSummaryResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    summary_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    approved_scan: PersistentLocalFolderScanSummary | None
+    candidate_scan: PersistentLocalFolderScanSummary | None
+
+
+class PersistentLocalFolderScanFileItem(BaseModel):
+    relative_path: str = Field(min_length=1, max_length=4096)
+    previous_relative_path: str | None = Field(default=None, min_length=1, max_length=4096)
+    byte_size: int = Field(ge=0)
+    file_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    detected_kind: Literal[
+        "PDF", "IMAGE", "WORD_DOCUMENT", "SPREADSHEET", "TEXT", "EMAIL", "ARCHIVE", "OTHER"
+    ]
+    change_kind: Literal["NEW", "MODIFIED", "MOVED", "MISSING", "UNCHANGED"]
+    present: bool
+
+
+class PersistentLocalFolderScanFilePageResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    scan_id: UUID
+    total_count: int = Field(ge=0)
+    items: tuple[PersistentLocalFolderScanFileItem, ...]
+    next_cursor: str | None = Field(default=None, min_length=20, max_length=512)
+    has_more: bool
+
+
 class PersistentOriginalPageAccessRequest(BaseModel):
     folder_grant_id: UUID
 

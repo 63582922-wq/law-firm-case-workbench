@@ -29,6 +29,8 @@ from case_kernel.evidence_manifest_postgres import (
     PersistentEvidencePageListPage,
     PersistentEvidenceReviewSummary,
     PersistentEvidenceSnapshot,
+    PersistentLocalFolderFileListPage,
+    PersistentLocalFolderIntakeSummary,
 )
 from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
@@ -197,6 +199,7 @@ class FakePersistentEvidenceStore:
         self.calls: list[tuple[str, dict]] = []
         self.locator = locator
         self.original_page_locator = original_page_locator
+        self.folder_scan_id = str(uuid4())
 
     def get_evidence_snapshot(self, *, matter_id: str, actor: Actor):
         self.calls.append(("snapshot", {"matter_id": matter_id, "actor": actor}))
@@ -249,6 +252,76 @@ class FakePersistentEvidenceStore:
             ),
             next_cursor=None,
             has_more=False,
+        )
+
+    def get_local_folder_intake_summary(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("folder_intake", {"matter_id": matter_id, "actor": actor}))
+        return PersistentLocalFolderIntakeSummary(
+            matter_id=matter_id,
+            matter_version=5,
+            summary_hash="1" * 64,
+            approved_scan=None,
+            candidate_scan={
+                "scan_id": self.folder_scan_id,
+                "manifest_hash": "2" * 64,
+                "base_scan_id": None,
+                "status": "CANDIDATE",
+                "total_files": 1,
+                "total_bytes": 128,
+                "skipped_symlinks": 0,
+                "new_count": 1,
+                "modified_count": 0,
+                "moved_count": 0,
+                "missing_count": 0,
+                "unchanged_count": 0,
+                "duplicate_content_count": 0,
+                "scanned_at": datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc).isoformat(),
+                "approved_at": None,
+            },
+        )
+
+    def list_local_folder_scan_file_page(self, **kwargs):
+        self.calls.append(("folder_files", kwargs))
+        return PersistentLocalFolderFileListPage(
+            matter_id=kwargs["matter_id"],
+            matter_version=5,
+            scan_id=kwargs["scan_id"],
+            total_count=1,
+            items=({
+                "relative_path": "法院送达资料/起诉状.pdf",
+                "previous_relative_path": None,
+                "byte_size": 128,
+                "file_sha256": "3" * 64,
+                "detected_kind": "PDF",
+                "change_kind": "NEW",
+                "present": True,
+            },),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def create_local_folder_scan_candidate(self, **kwargs):
+        self.calls.append(("create_folder_scan", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="CREATE_LOCAL_FOLDER_SCAN_CANDIDATE",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="LOCAL_FOLDER_SCAN",
+            object_id=kwargs["manifest"].scan_id,
+        )
+
+    def approve_local_folder_scan(self, **kwargs):
+        self.calls.append(("approve_folder_scan", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="APPROVE_LOCAL_FOLDER_SCAN",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="LOCAL_FOLDER_SCAN",
+            object_id=kwargs["scan_id"],
         )
 
     def lock_manifest(self, **kwargs):
@@ -1012,6 +1085,32 @@ class PersistentApiTests(unittest.TestCase):
             )
             self.assertEqual(granted.status_code, 200, granted.text)
             self.assertNotIn(str(root), granted.text)
+            intake = client.get(f"/v1/matters/{self.matter_id}/local-folder-intake")
+            self.assertEqual(intake.status_code, 200, intake.text)
+            self.assertEqual(intake.json()["candidate_scan"]["scan_id"], evidence_store.folder_scan_id)
+            files = client.get(
+                f"/v1/matters/{self.matter_id}/local-folder-scans/{evidence_store.folder_scan_id}/files"
+                "?limit=100&expected_version=5"
+            )
+            self.assertEqual(files.status_code, 200, files.text)
+            self.assertEqual(files.json()["items"][0]["relative_path"], "法院送达资料/起诉状.pdf")
+            scanned = client.post(
+                f"/v1/matters/{self.matter_id}/local-folder-scans",
+                headers={"Idempotency-Key": "local-folder-scan-api-001"},
+                json={"expected_version": 5, "folder_grant_id": granted.json()["grant_id"]},
+            )
+            self.assertEqual(scanned.status_code, 201, scanned.text)
+            scan_call = next(kwargs for name, kwargs in evidence_store.calls if name == "create_folder_scan")
+            self.assertEqual(scan_call["manifest"].total_files, 1)
+            self.assertNotIn(str(root), repr(scan_call["manifest"]))
+            approved = client.post(
+                f"/v1/matters/{self.matter_id}/local-folder-scans/{evidence_store.folder_scan_id}/approve",
+                headers={"Idempotency-Key": "local-folder-approve-api-001"},
+                json={"expected_version": 5, "manifest_hash": "2" * 64, "approval_hash": "4" * 64},
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            approve_call = next(kwargs for name, kwargs in evidence_store.calls if name == "approve_folder_scan")
+            self.assertEqual(approve_call["manifest_hash"], "2" * 64)
             issued = client.post(
                 f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/original-preview/access",
                 json={"folder_grant_id": granted.json()["grant_id"]},

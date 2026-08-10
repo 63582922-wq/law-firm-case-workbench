@@ -3,7 +3,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from case_kernel.local_case_folder import FolderScanBlocked, FolderScanLimits, root_fingerprint, scan_case_folder
+from case_kernel.local_case_folder import (
+    FolderScanBlocked,
+    FolderScanLimits,
+    compare_folder_manifests,
+    root_fingerprint,
+    scan_case_folder,
+)
 
 
 class LocalCaseFolderTests(unittest.TestCase):
@@ -50,6 +56,29 @@ class LocalCaseFolderTests(unittest.TestCase):
         self.assertEqual(manifest.total_files, 2)
         self.assertEqual(manifest.skipped_symlinks, 1)
         self.assertNotIn("outside-link.pdf", {item.relative_path for item in manifest.originals})
+
+    def test_incremental_comparison_distinguishes_move_modify_missing_and_duplicate(self) -> None:
+        previous = scan_case_folder(self.root, confirmed_root_fingerprint=root_fingerprint(self.root))
+        moved = self.root / "evidence" / "renamed-proof.pdf"
+        self.pdf.rename(moved)
+        self.note.write_text("changed timeline", encoding="utf-8")
+        (self.root / "new.docx").write_bytes(b"synthetic word")
+
+        current = scan_case_folder(self.root, confirmed_root_fingerprint=root_fingerprint(self.root))
+        comparison = compare_folder_manifests(current, previous)
+        by_path = {item.relative_path: item for item in comparison.files}
+
+        self.assertEqual(by_path["evidence/renamed-proof.pdf"].change_kind, "MOVED")
+        self.assertEqual(by_path["evidence/renamed-proof.pdf"].previous_relative_path, "evidence/payment-proof.pdf")
+        self.assertEqual(by_path["timeline.txt"].change_kind, "MODIFIED")
+        self.assertEqual(by_path["new.docx"].change_kind, "NEW")
+        self.assertEqual(comparison.missing_count, 0)
+        self.assertEqual(comparison.duplicate_content_count, 0)
+        self.assertEqual(len(current.manifest_hash), 64)
+
+        (self.root / "copy.pdf").write_bytes(moved.read_bytes())
+        with_duplicate = scan_case_folder(self.root, confirmed_root_fingerprint=root_fingerprint(self.root))
+        self.assertEqual(compare_folder_manifests(with_duplicate, current).duplicate_content_count, 1)
 
 
 if __name__ == "__main__":

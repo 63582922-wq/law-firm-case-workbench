@@ -308,6 +308,43 @@ class LocalFolderGrantRegistry:
             sha256=expected_sha256,
         )
 
+    def scan_granted_folder(
+        self,
+        *,
+        grant_id: str,
+        actor: Actor,
+        matter_id: str,
+        session: LocalSessionProof,
+        limits: FolderScanLimits = FolderScanLimits(),
+        now: datetime | None = None,
+    ) -> FolderManifest:
+        """Scan the in-memory authorized root without returning its absolute path to the caller."""
+
+        current = _aware_now(now)
+        _validate_actor_and_session(actor, matter_id=matter_id, session=session, now=current)
+        record = self._current_record(grant_id, current=current)
+        handle = record.handle
+        if (
+            handle.firm_id != actor.firm_id
+            or handle.matter_id != matter_id
+            or handle.actor_id != actor.actor_id
+            or handle.session_id != session.session_id
+        ):
+            raise LocalFolderAccessBlocked("local folder read grant is outside the authenticated scope")
+        try:
+            stat = record.resolved_root.stat()
+            if stat.st_dev != record.device or stat.st_ino != record.inode:
+                raise LocalFolderAccessBlocked("the selected case folder changed after authorization")
+            if root_fingerprint(record.resolved_root) != handle.root_fingerprint:
+                raise LocalFolderAccessBlocked("the selected case folder fingerprint changed")
+            return scan_case_folder(
+                record.resolved_root,
+                confirmed_root_fingerprint=handle.root_fingerprint,
+                limits=limits,
+            )
+        except (OSError, FolderScanBlocked) as error:
+            raise LocalFolderAccessBlocked("the selected case folder is unavailable or changed") from error
+
     def _current_record(self, grant_id: str, *, current: datetime) -> _FolderGrantRecord:
         try:
             UUID(grant_id)

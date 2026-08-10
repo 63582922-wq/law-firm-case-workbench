@@ -11,6 +11,7 @@ from case_kernel.case_ledger_postgres import CaseLedgerPersistenceBlocked
 from case_kernel.errors import VersionConflict
 from case_kernel.evidence_manifest import PageDisposition
 from case_kernel.evidence_manifest_postgres import PostgresEvidenceManifestStore, _manifest_readiness_hash
+from case_kernel.local_case_folder import FolderManifest, OriginalFileRecord, folder_manifest_hash
 from case_kernel.models import Actor, Role
 
 
@@ -55,6 +56,12 @@ class FakeEvidenceConnection:
         readiness_pages: list[dict] | None = None,
         summary_originals: list[dict] | None = None,
         summary_duplicate_members: list[dict] | None = None,
+        approved_folder_scan: dict | None = None,
+        approved_folder_files: list[dict] | None = None,
+        local_folder_scan_rows: list[dict] | None = None,
+        local_folder_candidate: dict | None = None,
+        local_folder_file_rows: list[dict] | None = None,
+        local_folder_file_total: int = 0,
     ) -> None:
         self.permitted = permitted
         self.prior_receipt = prior_receipt
@@ -80,6 +87,12 @@ class FakeEvidenceConnection:
         self.readiness_pages = readiness_pages or []
         self.summary_originals = summary_originals or []
         self.summary_duplicate_members = summary_duplicate_members or []
+        self.approved_folder_scan = approved_folder_scan
+        self.approved_folder_files = approved_folder_files or []
+        self.local_folder_scan_rows = local_folder_scan_rows or []
+        self.local_folder_candidate = local_folder_candidate
+        self.local_folder_file_rows = local_folder_file_rows or []
+        self.local_folder_file_total = local_folder_file_total
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -113,6 +126,20 @@ class FakeEvidenceConnection:
             return FakeResult(rows=self.annotations)
         if normalized.startswith("SELECT member.duplicate_group_id, member.evidence_page_id"):
             return FakeResult(rows=self.summary_duplicate_members)
+        if normalized.startswith("SELECT scan_id, root_fingerprint, manifest_hash"):
+            return FakeResult(row=self.approved_folder_scan)
+        if normalized.startswith("SELECT relative_path, byte_size, file_sha256, detected_kind"):
+            return FakeResult(rows=self.approved_folder_files)
+        if normalized.startswith("SELECT scan_id, manifest_hash, status"):
+            return FakeResult(row=self.local_folder_candidate)
+        if normalized.startswith("SELECT scan_id, manifest_hash, base_scan_id"):
+            return FakeResult(rows=self.local_folder_scan_rows)
+        if normalized.startswith("SELECT scan_id FROM local_folder_scans"):
+            return FakeResult(row={"scan_id": self.local_folder_candidate["scan_id"]} if self.local_folder_candidate else None)
+        if normalized.startswith("SELECT COUNT(*) AS total_count FROM local_folder_scan_files"):
+            return FakeResult(row={"total_count": self.local_folder_file_total})
+        if normalized.startswith("SELECT relative_path, previous_relative_path, byte_size, file_sha256"):
+            return FakeResult(rows=self.local_folder_file_rows)
         if normalized.startswith("SELECT 1 FROM evidence_original_files"):
             return FakeResult(row={"exists": 1})
         if normalized.startswith("SELECT 1 FROM evidence_pages"):
@@ -183,6 +210,33 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.actor = Actor(self.actor_id, self.firm_id, frozenset({Role.LEAD_LAWYER}))
         self.store = PostgresEvidenceManifestStore("postgresql://not-used.invalid/lawcase_workbench_test")
 
+    def folder_manifest(self) -> FolderManifest:
+        originals = tuple(sorted((
+            OriginalFileRecord(
+                relative_path="法院送达资料/起诉状.pdf",
+                byte_size=1024,
+                sha256="a" * 64,
+                detected_kind="PDF",
+            ),
+            OriginalFileRecord(
+                relative_path="微信转账记录/2022.xlsx",
+                byte_size=2048,
+                sha256="b" * 64,
+                detected_kind="SPREADSHEET",
+            ),
+        ), key=lambda item: item.relative_path))
+        root_hash = "c" * 64
+        return FolderManifest(
+            scan_id=str(uuid4()),
+            root_fingerprint=root_hash,
+            manifest_hash=folder_manifest_hash(root_hash, originals),
+            scanned_at=datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc),
+            total_files=2,
+            total_bytes=3072,
+            skipped_symlinks=1,
+            originals=originals,
+        )
+
     def test_alpha_identity_is_rejected_before_database_connection(self) -> None:
         actor = Actor("alpha-lead", "alpha-firm", frozenset({Role.LEAD_LAWYER}))
         with patch("case_kernel.evidence_manifest_postgres.psycopg.connect") as connect:
@@ -231,6 +285,137 @@ class PostgresEvidenceManifestStoreTests(unittest.TestCase):
         self.assertIn("INSERT INTO outbox_events", sql)
         self.assertIn("INSERT INTO command_idempotency", sql)
         self.assertNotIn("DELETE FROM evidence_", sql)
+
+    def test_local_folder_scan_candidate_persists_only_relative_inventory_and_audit_counts(self) -> None:
+        manifest = self.folder_manifest()
+        connection = FakeEvidenceConnection()
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.create_local_folder_scan_candidate(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="local-folder-scan-001",
+                manifest=manifest,
+            )
+        self.assertEqual(receipt.object_id, manifest.scan_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO local_folder_scans", sql)
+        self.assertEqual(sql.count("INSERT INTO local_folder_scan_files"), 2)
+        self.assertNotIn("selected_root", sql)
+        self.assertNotIn("absolute_path", sql)
+        file_params = [
+            params for statement, params in connection.executed
+            if "INSERT INTO local_folder_scan_files" in statement
+        ]
+        self.assertEqual(
+            {params[3] for params in file_params},
+            {"法院送达资料/起诉状.pdf", "微信转账记录/2022.xlsx"},
+        )
+
+        tampered = FolderManifest(**{**manifest.__dict__, "manifest_hash": "d" * 64})
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect") as connect:
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "hash does not match"):
+                self.store.create_local_folder_scan_candidate(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="local-folder-scan-tampered",
+                    manifest=tampered,
+                )
+        connect.assert_not_called()
+
+    def test_local_folder_scan_approval_is_hash_bound_and_stales_old_outputs(self) -> None:
+        scan_id = str(uuid4())
+        manifest_hash = "e" * 64
+        mismatch = FakeEvidenceConnection(
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": "f" * 64, "status": "CANDIDATE"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(mismatch),
+        ):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "changed before approval"):
+                self.store.approve_local_folder_scan(
+                    matter_id=self.matter_id,
+                    scan_id=scan_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="local-folder-approve-mismatch",
+                    manifest_hash=manifest_hash,
+                    approval_hash="a" * 64,
+                )
+
+        connection = FakeEvidenceConnection(
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": manifest_hash, "status": "CANDIDATE"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.approve_local_folder_scan(
+                matter_id=self.matter_id,
+                scan_id=scan_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="local-folder-approve",
+                manifest_hash=manifest_hash,
+                approval_hash="a" * 64,
+            )
+        self.assertEqual(receipt.object_id, scan_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'APPROVED'", sql)
+        self.assertIn("UPDATE evidence_manifests", sql)
+        self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+    def test_local_folder_file_page_is_version_and_scan_bound(self) -> None:
+        scan_id = str(uuid4())
+        rows = [
+            {
+                "relative_path": f"材料/{index}.pdf",
+                "previous_relative_path": None,
+                "byte_size": index * 100,
+                "file_sha256": f"{index:x}" * 64,
+                "detected_kind": "PDF",
+                "change_kind": "NEW",
+                "present": True,
+                "sort_sequence": index,
+            }
+            for index in range(1, 4)
+        ]
+        connection = FakeEvidenceConnection(
+            projection_version=7,
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": "a" * 64, "status": "CANDIDATE"},
+            local_folder_file_rows=rows,
+            local_folder_file_total=3,
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            first = self.store.list_local_folder_scan_file_page(
+                matter_id=self.matter_id,
+                scan_id=scan_id,
+                actor=self.actor,
+                limit=2,
+                cursor=None,
+                expected_version=7,
+            )
+        self.assertEqual(len(first.items), 2)
+        self.assertTrue(first.has_more)
+        self.assertIsNotNone(first.next_cursor)
+        other_scan_id = str(uuid4())
+        with self.assertRaisesRegex(Exception, "scope"):
+            self.store.list_local_folder_scan_file_page(
+                matter_id=self.matter_id,
+                scan_id=other_scan_id,
+                actor=self.actor,
+                limit=2,
+                cursor=first.next_cursor,
+                expected_version=7,
+            )
 
     def test_idempotent_replay_is_resolved_before_stale_expected_version_check(self) -> None:
         original_payload = {

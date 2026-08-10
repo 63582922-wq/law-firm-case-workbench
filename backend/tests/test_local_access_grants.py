@@ -193,6 +193,19 @@ class LocalFolderGrantTests(unittest.TestCase):
         self.assertEqual(resolved.relative_path, "synthetic.pdf")
         self.assertNotIn(str(self.root), repr(resolved))
 
+    def test_granted_scan_uses_process_local_root_without_returning_absolute_path(self) -> None:
+        handle = self.issue()
+        manifest = self.registry.scan_granted_folder(
+            grant_id=handle.grant_id,
+            actor=self.actor,
+            matter_id=self.matter_id,
+            session=self.session,
+            now=self.now + timedelta(minutes=1),
+        )
+        self.assertEqual(manifest.total_files, 1)
+        self.assertEqual(manifest.originals[0].relative_path, "synthetic.pdf")
+        self.assertNotIn(str(self.root), repr(manifest))
+
     def test_duplicate_hash_requires_unique_label_and_changed_original_fails_closed(self) -> None:
         duplicate = self.root / "duplicate.pdf"
         duplicate.write_bytes((self.root / "synthetic.pdf").read_bytes())

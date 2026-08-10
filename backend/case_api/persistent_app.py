@@ -94,6 +94,10 @@ from .schemas import (
     PersistentArtifactAccessResponse,
     PersistentLocalFolderGrantRequest,
     PersistentLocalFolderGrantResponse,
+    PersistentLocalFolderIntakeSummaryResponse,
+    PersistentLocalFolderScanApprovalRequest,
+    PersistentLocalFolderScanFilePageResponse,
+    PersistentLocalFolderScanRequest,
     PersistentLocalFolderSelectionRequest,
     PersistentLocalFolderSelectionResponse,
     PersistentOriginalPageAccessRequest,
@@ -194,6 +198,14 @@ class PersistentEvidenceManifestPort(Protocol):
     def get_evidence_review_summary(self, *, matter_id: str, actor: Actor): ...
 
     def list_evidence_page(self, **kwargs): ...
+
+    def create_local_folder_scan_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def approve_local_folder_scan(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_local_folder_intake_summary(self, *, matter_id: str, actor: Actor): ...
+
+    def list_local_folder_scan_file_page(self, **kwargs): ...
 
     def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -2103,6 +2115,103 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             display_name=inspection.display_name,
             root_fingerprint=handle.root_fingerprint,
             expires_at=handle.expires_at,
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/local-folder-intake",
+        response_model=PersistentLocalFolderIntakeSummaryResponse,
+        tags=["evidence-access"],
+    )
+    async def get_local_folder_intake(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentLocalFolderIntakeSummaryResponse:
+        summary = evidence_store.get_local_folder_intake_summary(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentLocalFolderIntakeSummaryResponse.model_validate(summary.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/local-folder-scans",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence-access"],
+    )
+    async def create_local_folder_scan(
+        matter_id: UUID,
+        request: Request,
+        body: PersistentLocalFolderScanRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        _require_loopback(request)
+        folder_grants, _ = require_original_page_services()
+        manifest = folder_grants.scan_granted_folder(
+            grant_id=str(body.folder_grant_id),
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            session=_local_session(identity),
+        )
+        return _receipt(
+            evidence_store.create_local_folder_scan_candidate(
+                matter_id=str(matter_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                manifest=manifest,
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/local-folder-scans/{scan_id}/files",
+        response_model=PersistentLocalFolderScanFilePageResponse,
+        tags=["evidence-access"],
+    )
+    async def list_local_folder_scan_files(
+        matter_id: UUID,
+        scan_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+        limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(min_length=20, max_length=512)] = None,
+        expected_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> PersistentLocalFolderScanFilePageResponse:
+        page = evidence_store.list_local_folder_scan_file_page(
+            matter_id=str(matter_id),
+            scan_id=str(scan_id),
+            actor=identity.actor,
+            limit=limit,
+            cursor=cursor,
+            expected_version=expected_version,
+        )
+        return PersistentLocalFolderScanFilePageResponse.model_validate(page.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/local-folder-scans/{scan_id}/approve",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-access"],
+    )
+    async def approve_local_folder_scan(
+        matter_id: UUID,
+        scan_id: UUID,
+        body: PersistentLocalFolderScanApprovalRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.approve_local_folder_scan(
+                matter_id=str(matter_id),
+                scan_id=str(scan_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                manifest_hash=body.manifest_hash,
+                approval_hash=body.approval_hash,
+            )
         )
 
     @app.post(

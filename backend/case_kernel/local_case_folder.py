@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
@@ -37,11 +38,35 @@ class OriginalFileRecord:
 class FolderManifest:
     scan_id: str
     root_fingerprint: str
+    manifest_hash: str
     scanned_at: datetime
     total_files: int
     total_bytes: int
     skipped_symlinks: int
     originals: tuple[OriginalFileRecord, ...]
+
+
+@dataclass(frozen=True)
+class FolderFileChange:
+    relative_path: str
+    previous_relative_path: str | None
+    byte_size: int
+    sha256: str
+    detected_kind: str
+    change_kind: str
+    present: bool
+
+
+@dataclass(frozen=True)
+class FolderManifestComparison:
+    base_scan_id: str | None
+    new_count: int
+    modified_count: int
+    moved_count: int
+    missing_count: int
+    unchanged_count: int
+    duplicate_content_count: int
+    files: tuple[FolderFileChange, ...]
 
 
 KNOWN_FILE_KINDS = {
@@ -109,14 +134,97 @@ def scan_case_folder(
         )
         total_bytes += size
 
+    ordered_originals = tuple(sorted(originals, key=lambda item: item.relative_path))
     return FolderManifest(
-        scan_id=f"scan_{uuid4().hex}",
+        scan_id=str(uuid4()),
         root_fingerprint=actual_fingerprint,
+        manifest_hash=folder_manifest_hash(actual_fingerprint, ordered_originals),
         scanned_at=datetime.now(timezone.utc),
         total_files=len(originals),
         total_bytes=total_bytes,
         skipped_symlinks=skipped_symlinks,
-        originals=tuple(sorted(originals, key=lambda item: item.relative_path)),
+        originals=ordered_originals,
+    )
+
+
+def compare_folder_manifests(
+    current: FolderManifest,
+    previous: FolderManifest | None,
+) -> FolderManifestComparison:
+    """Classify a new immutable inventory without treating moved content as deletion."""
+
+    previous_by_path = {item.relative_path: item for item in previous.originals} if previous else {}
+    unused_previous_paths = set(previous_by_path)
+    previous_by_content: dict[tuple[str, int], list[OriginalFileRecord]] = {}
+    for item in previous.originals if previous else ():
+        previous_by_content.setdefault((item.sha256, item.byte_size), []).append(item)
+
+    changes: list[FolderFileChange] = []
+    for item in current.originals:
+        prior = previous_by_path.get(item.relative_path)
+        previous_relative_path: str | None = None
+        if prior is not None:
+            unused_previous_paths.discard(prior.relative_path)
+            change_kind = (
+                "UNCHANGED"
+                if (prior.sha256, prior.byte_size, prior.detected_kind)
+                == (item.sha256, item.byte_size, item.detected_kind)
+                else "MODIFIED"
+            )
+        else:
+            content_matches = [
+                candidate
+                for candidate in previous_by_content.get((item.sha256, item.byte_size), ())
+                if candidate.relative_path in unused_previous_paths
+            ]
+            if len(content_matches) == 1:
+                moved = content_matches[0]
+                unused_previous_paths.discard(moved.relative_path)
+                previous_relative_path = moved.relative_path
+                change_kind = "MOVED"
+            else:
+                change_kind = "NEW"
+        changes.append(
+            FolderFileChange(
+                relative_path=item.relative_path,
+                previous_relative_path=previous_relative_path,
+                byte_size=item.byte_size,
+                sha256=item.sha256,
+                detected_kind=item.detected_kind,
+                change_kind=change_kind,
+                present=True,
+            )
+        )
+
+    for relative_path in sorted(unused_previous_paths):
+        item = previous_by_path[relative_path]
+        changes.append(
+            FolderFileChange(
+                relative_path=item.relative_path,
+                previous_relative_path=item.relative_path,
+                byte_size=item.byte_size,
+                sha256=item.sha256,
+                detected_kind=item.detected_kind,
+                change_kind="MISSING",
+                present=False,
+            )
+        )
+
+    change_order = {"NEW": 0, "MODIFIED": 1, "MOVED": 2, "MISSING": 3, "UNCHANGED": 4}
+    ordered = tuple(sorted(changes, key=lambda item: (change_order[item.change_kind], item.relative_path)))
+    content_counts: dict[tuple[str, int], int] = {}
+    for item in current.originals:
+        key = (item.sha256, item.byte_size)
+        content_counts[key] = content_counts.get(key, 0) + 1
+    return FolderManifestComparison(
+        base_scan_id=previous.scan_id if previous else None,
+        new_count=sum(item.change_kind == "NEW" for item in ordered),
+        modified_count=sum(item.change_kind == "MODIFIED" for item in ordered),
+        moved_count=sum(item.change_kind == "MOVED" for item in ordered),
+        missing_count=sum(item.change_kind == "MISSING" for item in ordered),
+        unchanged_count=sum(item.change_kind == "UNCHANGED" for item in ordered),
+        duplicate_content_count=sum(count - 1 for count in content_counts.values() if count > 1),
+        files=ordered,
     )
 
 
@@ -135,3 +243,30 @@ def _hash_file(path: Path) -> str:
         while block := source.read(1024 * 1024):
             digest.update(block)
     return digest.hexdigest()
+
+
+def folder_manifest_hash(
+    root_fingerprint_value: str,
+    originals: tuple[OriginalFileRecord, ...],
+) -> str:
+    payload = {
+        "root_fingerprint": root_fingerprint_value,
+        "originals": [
+            {
+                "relative_path": item.relative_path,
+                "byte_size": item.byte_size,
+                "sha256": item.sha256,
+                "detected_kind": item.detected_kind,
+            }
+            for item in originals
+        ],
+    }
+    return sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()

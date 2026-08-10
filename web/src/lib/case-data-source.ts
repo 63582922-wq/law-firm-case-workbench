@@ -105,6 +105,42 @@ export type LocalFolderGrant = {
   expiresAt: string;
 };
 
+export type LocalFolderScanSummary = {
+  scanId: string;
+  manifestHash: string;
+  baseScanId: string | null;
+  status: "CANDIDATE" | "APPROVED";
+  totalFiles: number;
+  totalBytes: number;
+  skippedSymlinks: number;
+  newCount: number;
+  modifiedCount: number;
+  movedCount: number;
+  missingCount: number;
+  unchangedCount: number;
+  duplicateContentCount: number;
+  scannedAt: string;
+  approvedAt: string | null;
+};
+
+export type LocalFolderIntakeView = {
+  matterVersion: number;
+  summaryHash: string;
+  approvedScan: LocalFolderScanSummary | null;
+  candidateScan: LocalFolderScanSummary | null;
+  displayedScanId: string | null;
+  files: {
+    relativePath: string;
+    previousRelativePath: string | null;
+    byteSize: number;
+    fileSha256: string;
+    detectedKind: string;
+    changeKind: "NEW" | "MODIFIED" | "MOVED" | "MISSING" | "UNCHANGED";
+    present: boolean;
+  }[];
+  filePage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
+};
+
 export type OriginalPagePreviewDelivery = {
   pageId: string;
   blob: Blob;
@@ -406,6 +442,50 @@ type PersistentEvidenceReviewSummary = {
   locked_manifest: { manifest_id: string; content_hash: string; total_pages: number; included_pages: number; excluded_pages: number } | null;
   derivatives: { derivative_id: string; artifact_type: string; artifact_sha256: string; page_count: number; status: string }[];
   derivative_runs: { run_id: string; manifest_id: string; status: string; attempt_count: number; failure_code: string | null }[];
+};
+
+type PersistentLocalFolderScanSummary = {
+  scan_id: string;
+  manifest_hash: string;
+  base_scan_id: string | null;
+  status: "CANDIDATE" | "APPROVED";
+  total_files: number;
+  total_bytes: number;
+  skipped_symlinks: number;
+  new_count: number;
+  modified_count: number;
+  moved_count: number;
+  missing_count: number;
+  unchanged_count: number;
+  duplicate_content_count: number;
+  scanned_at: string;
+  approved_at: string | null;
+};
+
+type PersistentLocalFolderIntakeSummary = {
+  matter_id: string;
+  matter_version: number;
+  summary_hash: string;
+  approved_scan: PersistentLocalFolderScanSummary | null;
+  candidate_scan: PersistentLocalFolderScanSummary | null;
+};
+
+type PersistentLocalFolderFilePage = {
+  matter_id: string;
+  matter_version: number;
+  scan_id: string;
+  total_count: number;
+  items: {
+    relative_path: string;
+    previous_relative_path: string | null;
+    byte_size: number;
+    file_sha256: string;
+    detected_kind: string;
+    change_kind: "NEW" | "MODIFIED" | "MOVED" | "MISSING" | "UNCHANGED";
+    present: boolean;
+  }[];
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 type PersistentFormalCalculationSnapshot = {
@@ -1264,6 +1344,127 @@ export async function issueLocalFolderGrant(
   };
 }
 
+export async function loadLocalFolderIntake(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LocalFolderIntakeView> {
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以读取案卷盘点。");
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/local-folder-intake`, {
+    headers: { Accept: "application/json" },
+  });
+  const summary = (await response.json()) as PersistentLocalFolderIntakeSummary | ErrorEnvelope;
+  if (!response.ok || !("summary_hash" in summary)) throw new Error(errorMessage(summary as ErrorEnvelope, "案卷盘点摘要不可用"));
+  const displayed = summary.candidate_scan ?? summary.approved_scan;
+  if (!displayed) {
+    return {
+      matterVersion: summary.matter_version,
+      summaryHash: summary.summary_hash,
+      approvedScan: null,
+      candidateScan: null,
+      displayedScanId: null,
+      files: [],
+      filePage: { loadedCount: 0, totalCount: 0, nextCursor: null, hasMore: false },
+    };
+  }
+  const page = await loadPersistentLocalFolderFilePage(config, displayed.scan_id, summary.matter_version, null);
+  return mapLocalFolderIntake(summary, page);
+}
+
+export async function loadMoreLocalFolderFiles(
+  intake: LocalFolderIntakeView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LocalFolderIntakeView> {
+  if (!intake.displayedScanId || !intake.filePage.hasMore || !intake.filePage.nextCursor) return intake;
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以继续读取案卷盘点。");
+  const page = await loadPersistentLocalFolderFilePage(
+    config,
+    intake.displayedScanId,
+    intake.matterVersion,
+    intake.filePage.nextCursor,
+  );
+  return {
+    ...intake,
+    files: mergeById(intake.files, mapLocalFolderFiles(page.items), (item) => `${item.changeKind}:${item.relativePath}`),
+    filePage: {
+      loadedCount: Math.min(page.total_count, intake.filePage.loadedCount + page.items.length),
+      totalCount: page.total_count,
+      nextCursor: page.next_cursor,
+      hasMore: page.has_more,
+    },
+  };
+}
+
+export async function createLocalFolderScan(
+  intake: LocalFolderIntakeView,
+  folderGrantId: string,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以建立案卷盘点候选。");
+  return postEvidenceMutation({
+    config,
+    path: "local-folder-scans",
+    body: { expected_version: intake.matterVersion, folder_grant_id: folderGrantId },
+    expectedObjectType: "LOCAL_FOLDER_SCAN",
+    fallback: "案卷文件盘点候选未建立",
+    interrupted: "连接在案卷盘点回执前中断。请刷新盘点状态；系统不会盲目重复扫描写入。",
+  });
+}
+
+export async function approveLocalFolderScan(
+  intake: LocalFolderIntakeView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  if (config.kind !== "persistent-preview" || !intake.candidateScan) {
+    throw new Error("当前没有可批准的案卷盘点候选。");
+  }
+  const scan = intake.candidateScan;
+  const approvalHash = await sha256Text([
+    "local-folder-scan-approval-v1",
+    config.matterId,
+    String(intake.matterVersion),
+    intake.summaryHash,
+    scan.scanId,
+    scan.manifestHash,
+    String(scan.totalFiles),
+    String(scan.totalBytes),
+    String(scan.newCount),
+    String(scan.modifiedCount),
+    String(scan.movedCount),
+    String(scan.missingCount),
+    String(scan.duplicateContentCount),
+  ].join("|"));
+  return postEvidenceMutation({
+    config,
+    path: `local-folder-scans/${scan.scanId}/approve`,
+    body: { expected_version: intake.matterVersion, manifest_hash: scan.manifestHash, approval_hash: approvalHash },
+    expectedObjectType: "LOCAL_FOLDER_SCAN",
+    fallback: "案卷盘点范围未获批准",
+    interrupted: "连接在案卷范围批准确认前中断。请刷新盘点状态；系统不会重复提交律师批准。",
+  });
+}
+
+async function loadPersistentLocalFolderFilePage(
+  config: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>,
+  scanId: string,
+  matterVersion: number,
+  cursor: string | null,
+): Promise<PersistentLocalFolderFilePage> {
+  const query: Record<string, string> = { limit: "100", expected_version: String(matterVersion) };
+  if (cursor) query.cursor = cursor;
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/local-folder-scans/${scanId}/files`,
+    { headers: { Accept: "application/json" } },
+    "desktop-session",
+    query,
+  );
+  const payload = (await response.json()) as PersistentLocalFolderFilePage | ErrorEnvelope;
+  if (!response.ok || !("items" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "案卷文件清单不可用"));
+  if (payload.matter_version !== matterVersion || payload.scan_id !== scanId) {
+    throw new Error("案卷盘点在载入文件期间已变化，请重新载入。");
+  }
+  return payload;
+}
+
 export async function fetchOriginalPagePreview(
   pageId: string,
   folderGrantId: string,
@@ -1769,6 +1970,59 @@ function mapPersistentEvidencePage(item: PersistentEvidencePageItem): EvidenceRe
     annotations: item.annotations.map((annotation) => ({ annotationId: annotation.annotation_id, x0: Number(annotation.x0), y0: Number(annotation.y0), x1: Number(annotation.x1), y1: Number(annotation.y1), label: annotation.label, status: annotation.status })),
     syntheticPreview: null,
   };
+}
+
+function mapLocalFolderIntake(
+  summary: PersistentLocalFolderIntakeSummary,
+  page: PersistentLocalFolderFilePage,
+): LocalFolderIntakeView {
+  const displayed = summary.candidate_scan ?? summary.approved_scan;
+  return {
+    matterVersion: summary.matter_version,
+    summaryHash: summary.summary_hash,
+    approvedScan: summary.approved_scan ? mapLocalFolderScanSummary(summary.approved_scan) : null,
+    candidateScan: summary.candidate_scan ? mapLocalFolderScanSummary(summary.candidate_scan) : null,
+    displayedScanId: displayed?.scan_id ?? null,
+    files: mapLocalFolderFiles(page.items),
+    filePage: {
+      loadedCount: page.items.length,
+      totalCount: page.total_count,
+      nextCursor: page.next_cursor,
+      hasMore: page.has_more,
+    },
+  };
+}
+
+function mapLocalFolderScanSummary(item: PersistentLocalFolderScanSummary): LocalFolderScanSummary {
+  return {
+    scanId: item.scan_id,
+    manifestHash: item.manifest_hash,
+    baseScanId: item.base_scan_id,
+    status: item.status,
+    totalFiles: item.total_files,
+    totalBytes: item.total_bytes,
+    skippedSymlinks: item.skipped_symlinks,
+    newCount: item.new_count,
+    modifiedCount: item.modified_count,
+    movedCount: item.moved_count,
+    missingCount: item.missing_count,
+    unchangedCount: item.unchanged_count,
+    duplicateContentCount: item.duplicate_content_count,
+    scannedAt: item.scanned_at,
+    approvedAt: item.approved_at,
+  };
+}
+
+function mapLocalFolderFiles(items: PersistentLocalFolderFilePage["items"]): LocalFolderIntakeView["files"] {
+  return items.map((item) => ({
+    relativePath: item.relative_path,
+    previousRelativePath: item.previous_relative_path,
+    byteSize: item.byte_size,
+    fileSha256: item.file_sha256,
+    detectedKind: item.detected_kind,
+    changeKind: item.change_kind,
+    present: item.present,
+  }));
 }
 
 function mapSyntheticCalculation(payload: CalculationPreview, requestId: string | null): CalculationReviewView {

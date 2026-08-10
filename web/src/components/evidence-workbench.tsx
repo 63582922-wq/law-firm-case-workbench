@@ -5,14 +5,18 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import {
   approveEvidenceAnnotation,
   approveEvidencePageDecision,
+  approveLocalFolderScan,
   caseDataSourceConfig,
   enqueueEvidenceDerivativeRun,
   fetchEvidenceDerivative,
   fetchOriginalPagePreview,
+  createLocalFolderScan,
   inspectLocalFolderSelection,
   issueLocalFolderGrant,
   loadEvidenceReview,
+  loadLocalFolderIntake,
   loadMoreEvidencePages,
+  loadMoreLocalFolderFiles,
   lockEvidenceManifest,
   proposeEvidenceAnnotation,
   proposeEvidencePageDecision,
@@ -21,6 +25,7 @@ import {
   type EvidenceReviewPage,
   type EvidenceReviewView,
   type LocalFolderGrant,
+  type LocalFolderIntakeView,
   type LocalFolderSelection,
 } from "@/lib/case-data-source";
 import styles from "./case-workbench.module.css";
@@ -64,6 +69,10 @@ export function EvidenceWorkbench() {
   const [folderGrant, setFolderGrant] = useState<LocalFolderGrant | null>(null);
   const [folderBusy, setFolderBusy] = useState<"select" | "grant" | null>(null);
   const [folderNotice, setFolderNotice] = useState<string | null>(null);
+  const [folderIntake, setFolderIntake] = useState<LocalFolderIntakeView | null>(null);
+  const [intakeBusy, setIntakeBusy] = useState<"scan" | "approve" | "more" | null>(null);
+  const [intakeConfirmed, setIntakeConfirmed] = useState(false);
+  const [intakeNotice, setIntakeNotice] = useState<string | null>(null);
   const [originalPreview, setOriginalPreview] = useState<{
     pageId: string;
     url: string;
@@ -92,7 +101,7 @@ export function EvidenceWorkbench() {
   useEffect(() => {
     let active = true;
     loadEvidenceReview()
-      .then((result) => {
+      .then(async (result) => {
         if (!active) return;
         setReview(result);
         const firstPage = result.pages[0] ?? null;
@@ -102,6 +111,14 @@ export function EvidenceWorkbench() {
         const firstGroup = result.duplicateGroups.find((item) => firstPage && item.pageIds.includes(firstPage.pageId));
         setCanonicalPageId(firstGroup?.canonicalPageId ?? firstGroup?.pageIds[0] ?? null);
         setError(null);
+        if (result.sourceKind === "persistent-preview") {
+          try {
+            const intake = await loadLocalFolderIntake();
+            if (active) setFolderIntake(intake);
+          } catch (reason: unknown) {
+            if (active) setIntakeNotice(reason instanceof Error ? reason.message : "案卷盘点摘要读取失败");
+          }
+        }
       })
       .catch((reason: unknown) => {
         if (!active) return;
@@ -157,6 +174,7 @@ export function EvidenceWorkbench() {
   const duplicatePagesLoaded = duplicateGroup
     ? duplicateGroup.pageIds.every((pageId) => review.pages.some((page) => page.pageId === pageId))
     : true;
+  const activeFolderScan = folderIntake?.candidateScan ?? folderIntake?.approvedScan ?? null;
 
   function recordSyntheticDecision() {
     if (duplicateDecision === "pending") {
@@ -207,6 +225,7 @@ export function EvidenceWorkbench() {
       const receipt = await enqueueEvidenceDerivativeRun(review);
       const refreshed = await loadEvidenceReview();
       setReview(refreshed);
+      setFolderIntake(await loadLocalFolderIntake());
       setArtifactNotice(`证据派生任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。`);
     } catch (reason: unknown) {
       setArtifactNotice(reason instanceof Error ? reason.message : "证据派生任务未建立");
@@ -268,6 +287,67 @@ export function EvidenceWorkbench() {
       setFolderNotice(reason instanceof Error ? reason.message : "案卷文件夹授权失败");
     } finally {
       setFolderBusy(null);
+    }
+  }
+
+  async function scanCaseFolder() {
+    if (!folderGrant || !folderIntake) {
+      setIntakeNotice("请先选择并确认本案案卷文件夹。");
+      return;
+    }
+    setIntakeBusy("scan");
+    setIntakeNotice(null);
+    try {
+      const receipt = await createLocalFolderScan(folderIntake, folderGrant.grantId);
+      const [refreshedReview, refreshedIntake] = await Promise.all([
+        loadEvidenceReview(),
+        loadLocalFolderIntake(),
+      ]);
+      setReview(refreshedReview);
+      setFolderIntake(refreshedIntake);
+      setIntakeConfirmed(false);
+      setIntakeNotice(`已完成只读盘点并建立待确认清单；案件版本更新为 ${receipt.matterVersion}。尚未改变正式案卷范围。`);
+    } catch (reason: unknown) {
+      setIntakeNotice(reason instanceof Error ? reason.message : "案卷盘点未完成");
+    } finally {
+      setIntakeBusy(null);
+    }
+  }
+
+  async function approveCaseFolderScan() {
+    if (!folderIntake?.candidateScan || !intakeConfirmed) return;
+    setIntakeBusy("approve");
+    setIntakeNotice(null);
+    try {
+      const receipt = await approveLocalFolderScan(folderIntake);
+      const [refreshedReview, refreshedIntake] = await Promise.all([
+        loadEvidenceReview(),
+        loadLocalFolderIntake(),
+      ]);
+      setReview(refreshedReview);
+      setFolderIntake(refreshedIntake);
+      setIntakeConfirmed(false);
+      setManifestConfirmed(false);
+      setIntakeNotice(`案卷文件范围已由主办律师批准；案件版本更新为 ${receipt.matterVersion}。依赖旧范围的证据清单和提交件已按规则失效。`);
+    } catch (reason: unknown) {
+      setIntakeNotice(reason instanceof Error ? reason.message : "案卷范围未获批准");
+    } finally {
+      setIntakeBusy(null);
+    }
+  }
+
+  async function loadNextFolderFiles() {
+    if (!folderIntake || intakeBusy !== null) return;
+    setIntakeBusy("more");
+    setIntakeNotice(null);
+    try {
+      const refreshed = await loadMoreLocalFolderFiles(folderIntake);
+      setFolderIntake(refreshed);
+      setIntakeNotice(`已载入 ${refreshed.filePage.loadedCount} / ${refreshed.filePage.totalCount} 个文件记录。`);
+    } catch (reason: unknown) {
+      setIntakeNotice(reason instanceof Error ? `${reason.message} 已载入记录仍保留。` : "后续文件记录载入失败；已载入记录仍保留。");
+    } finally {
+      setIntakeBusy(null);
     }
   }
 
@@ -349,6 +429,7 @@ export function EvidenceWorkbench() {
       const receipt = await action();
       const refreshed = await loadEvidenceReview();
       setReview(refreshed);
+      setFolderIntake(await loadLocalFolderIntake());
       const current = refreshed.pages.find((page) => page.pageId === selectedPageId) ?? refreshed.pages[0] ?? null;
       setPageDisposition(current?.pendingDecision?.disposition ?? current?.disposition ?? "INCLUDE");
       setPageReason(current?.pendingDecision?.reason ?? current?.reason ?? "");
@@ -408,9 +489,81 @@ export function EvidenceWorkbench() {
                 {folderBusy === "grant" ? "正在授权…" : "确认短时只读授权"}
               </button>
             )}
+            {folderGrant && folderIntake && (
+              <button disabled={folderBusy !== null || intakeBusy !== null} onClick={() => void scanCaseFolder()} type="button">
+                {intakeBusy === "scan" ? "正在只读盘点…" : activeFolderScan ? "重新盘点文件夹" : "盘点全部文件"}
+              </button>
+            )}
           </div>
           {folderNotice && <p role="status">{folderNotice}</p>}
         </div>
+      )}
+
+      {review.sourceKind === "persistent-preview" && folderIntake && activeFolderScan && (
+        <section className={styles.intakePanel} aria-label="案卷文件盘点">
+          <div className={styles.intakeHeading}>
+            <div>
+              <p className={styles.eyebrow}>案卷收件</p>
+              <h3>{activeFolderScan.status === "CANDIDATE" ? "待律师确认的文件范围" : "当前已批准文件范围"}</h3>
+            </div>
+            <div>
+              <strong>{activeFolderScan.totalFiles} 个文件 · {formatBytes(activeFolderScan.totalBytes)}</strong>
+              <small>盘点哈希 {activeFolderScan.manifestHash.slice(0, 16)}…</small>
+            </div>
+          </div>
+          <div className={styles.intakeCounts}>
+            <span><strong>{activeFolderScan.newCount}</strong>新增</span>
+            <span><strong>{activeFolderScan.modifiedCount}</strong>内容修改</span>
+            <span><strong>{activeFolderScan.movedCount}</strong>移动</span>
+            <span><strong>{activeFolderScan.missingCount}</strong>缺失</span>
+            <span><strong>{activeFolderScan.unchangedCount}</strong>未变化</span>
+            <span><strong>{activeFolderScan.duplicateContentCount}</strong>同内容副本</span>
+          </div>
+          {(activeFolderScan.skippedSymlinks > 0 || activeFolderScan.duplicateContentCount > 0) && (
+            <p className={styles.intakeWarning}>
+              {activeFolderScan.skippedSymlinks > 0 ? `已安全跳过 ${activeFolderScan.skippedSymlinks} 个符号链接；` : ""}
+              {activeFolderScan.duplicateContentCount > 0 ? `发现 ${activeFolderScan.duplicateContentCount} 个同内容副本，系统不会自动删除。` : ""}
+            </p>
+          )}
+          <div className={styles.intakeFileList}>
+            {folderIntake.files.map((file) => (
+              <div className={styles.intakeFile} key={`${file.changeKind}:${file.relativePath}`}>
+                <span className={styles.intakeChange}>{folderChangeLabel(file.changeKind)}</span>
+                <div>
+                  <strong title={file.relativePath}>{file.relativePath}</strong>
+                  <small>
+                    {folderKindLabel(file.detectedKind)} · {formatBytes(file.byteSize)} · {file.fileSha256.slice(0, 12)}…
+                    {file.previousRelativePath && file.previousRelativePath !== file.relativePath ? ` · 原位置 ${file.previousRelativePath}` : ""}
+                  </small>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className={styles.intakeActions}>
+            <small>已载入 {folderIntake.filePage.loadedCount} / {folderIntake.filePage.totalCount} 项；这里只建立只读范围，不上传、删除、改名或覆盖原件。</small>
+            {folderIntake.filePage.hasMore && (
+              <button disabled={intakeBusy !== null} onClick={() => void loadNextFolderFiles()} type="button">
+                {intakeBusy === "more" ? "正在载入…" : "继续载入 100 项"}
+              </button>
+            )}
+          </div>
+          {folderIntake.candidateScan && (
+            <div className={styles.intakeApproval}>
+              <label className={styles.confirmLine}>
+                <input checked={intakeConfirmed} onChange={(event) => setIntakeConfirmed(event.target.checked)} type="checkbox" />
+                我已核对本次文件范围及新增、修改、移动、缺失和重复提示，确认以此作为后续案卷整理范围
+              </label>
+              <button disabled={!intakeConfirmed || intakeBusy !== null} onClick={() => void approveCaseFolderScan()} type="button">
+                {intakeBusy === "approve" ? "正在记录批准…" : "主办律师批准案卷范围"}
+              </button>
+            </div>
+          )}
+          {intakeNotice && <div className={styles.auditNotice} role="status">{intakeNotice}</div>}
+        </section>
+      )}
+
+      {review.sourceKind === "persistent-preview" && intakeNotice && !activeFolderScan && (
+        <div className={styles.auditNotice} role="status">{intakeNotice}</div>
       )}
 
       <div className={styles.evidenceColumns}>
@@ -765,4 +918,33 @@ function runStatusLabel(status: string): string {
   if (status === "SUCCEEDED") return "生成完成";
   if (status === "FAILED") return "生成失败";
   return status;
+}
+
+function folderChangeLabel(kind: LocalFolderIntakeView["files"][number]["changeKind"]): string {
+  if (kind === "NEW") return "新增";
+  if (kind === "MODIFIED") return "已修改";
+  if (kind === "MOVED") return "已移动";
+  if (kind === "MISSING") return "已缺失";
+  return "未变化";
+}
+
+function folderKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    PDF: "PDF",
+    IMAGE: "图片",
+    WORD_DOCUMENT: "Word 文档",
+    SPREADSHEET: "表格",
+    TEXT: "文本",
+    EMAIL: "邮件",
+    ARCHIVE: "压缩包",
+    OTHER: "其他文件",
+  };
+  return labels[kind] ?? "其他文件";
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }

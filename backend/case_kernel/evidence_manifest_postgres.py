@@ -45,6 +45,13 @@ from .artifact_access import VerifiedDerivativeLocator
 from .evidence_manifest import DuplicateResolution, PageDisposition, ReviewStatus
 from .models import Actor, Role
 from .original_page_access import OriginalPageLocator
+from .local_case_folder import (
+    FolderManifest,
+    KNOWN_FILE_KINDS,
+    OriginalFileRecord,
+    compare_folder_manifests,
+    folder_manifest_hash,
+)
 from .stable_pagination import (
     StablePageCursor,
     StablePaginationBlocked,
@@ -88,6 +95,26 @@ class PersistentEvidenceReviewSummary:
 class PersistentEvidencePageListPage:
     matter_id: str
     matter_version: int
+    total_count: int
+    items: tuple[dict[str, Any], ...]
+    next_cursor: str | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class PersistentLocalFolderIntakeSummary:
+    matter_id: str
+    matter_version: int
+    summary_hash: str
+    approved_scan: dict[str, Any] | None
+    candidate_scan: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class PersistentLocalFolderFileListPage:
+    matter_id: str
+    matter_version: int
+    scan_id: str
     total_count: int
     items: tuple[dict[str, Any], ...]
     next_cursor: str | None
@@ -1683,6 +1710,396 @@ class PostgresEvidenceManifestStore:
                 stale_submission=False,
             )
 
+    def create_local_folder_scan_candidate(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        manifest: FolderManifest,
+    ) -> CaseLedgerCommandReceipt:
+        """Persist an authorized local inventory without persisting its absolute root."""
+
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _require_roles(actor, self._HUMAN_CANDIDATE_ROLES)
+        _require_positive_version(expected_version)
+        _validate_folder_manifest(manifest)
+        command_name = "CREATE_LOCAL_FOLDER_SCAN_CANDIDATE"
+        payload = {
+            "matter_id": matter_id,
+            "expected_version": expected_version,
+            "scan_id": manifest.scan_id,
+            "root_fingerprint": manifest.root_fingerprint,
+            "manifest_hash": manifest.manifest_hash,
+            "total_files": manifest.total_files,
+            "total_bytes": manifest.total_bytes,
+            "skipped_symlinks": manifest.skipped_symlinks,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=self._HUMAN_CANDIDATE_ROLES,
+            )
+            if prior is not None:
+                return prior
+            approved = connection.execute(
+                """
+                SELECT scan_id, root_fingerprint, manifest_hash, total_files, total_bytes,
+                       skipped_symlinks, scanned_at
+                FROM local_folder_scans
+                WHERE matter_id = %s AND firm_id = %s AND status = 'APPROVED'
+                FOR SHARE
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            previous_manifest = None
+            if approved is not None:
+                approved_files = connection.execute(
+                    """
+                    SELECT relative_path, byte_size, file_sha256, detected_kind
+                    FROM local_folder_scan_files
+                    WHERE scan_id = %s AND matter_id = %s AND firm_id = %s AND present = true
+                    ORDER BY sort_sequence ASC
+                    """,
+                    (approved["scan_id"], matter_id, actor.firm_id),
+                ).fetchall()
+                previous_manifest = FolderManifest(
+                    scan_id=str(approved["scan_id"]),
+                    root_fingerprint=approved["root_fingerprint"],
+                    manifest_hash=approved["manifest_hash"],
+                    scanned_at=approved["scanned_at"],
+                    total_files=approved["total_files"],
+                    total_bytes=approved["total_bytes"],
+                    skipped_symlinks=approved["skipped_symlinks"],
+                    originals=tuple(
+                        OriginalFileRecord(
+                            relative_path=row["relative_path"],
+                            byte_size=row["byte_size"],
+                            sha256=row["file_sha256"],
+                            detected_kind=row["detected_kind"],
+                        )
+                        for row in approved_files
+                    ),
+                )
+            comparison = compare_folder_manifests(manifest, previous_manifest)
+            connection.execute(
+                """
+                UPDATE local_folder_scans
+                SET status = 'INVALIDATED', invalidated_at = now()
+                WHERE matter_id = %s AND firm_id = %s AND status = 'CANDIDATE'
+                """,
+                (matter_id, actor.firm_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO local_folder_scans (
+                    scan_id, firm_id, matter_id, root_fingerprint, manifest_hash,
+                    base_scan_id, status, total_files, total_bytes, skipped_symlinks,
+                    new_count, modified_count, moved_count, missing_count,
+                    unchanged_count, duplicate_content_count, created_by, scanned_at
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, 'CANDIDATE', %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                (
+                    manifest.scan_id,
+                    actor.firm_id,
+                    matter_id,
+                    manifest.root_fingerprint,
+                    manifest.manifest_hash,
+                    comparison.base_scan_id,
+                    manifest.total_files,
+                    manifest.total_bytes,
+                    manifest.skipped_symlinks,
+                    comparison.new_count,
+                    comparison.modified_count,
+                    comparison.moved_count,
+                    comparison.missing_count,
+                    comparison.unchanged_count,
+                    comparison.duplicate_content_count,
+                    actor.actor_id,
+                    manifest.scanned_at,
+                ),
+            )
+            for sequence, item in enumerate(comparison.files, start=1):
+                connection.execute(
+                    """
+                    INSERT INTO local_folder_scan_files (
+                        scan_id, firm_id, matter_id, relative_path, previous_relative_path,
+                        byte_size, file_sha256, detected_kind, change_kind, present,
+                        sort_sequence
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        manifest.scan_id,
+                        actor.firm_id,
+                        matter_id,
+                        item.relative_path,
+                        item.previous_relative_path,
+                        item.byte_size,
+                        item.sha256,
+                        item.detected_kind,
+                        item.change_kind,
+                        item.present,
+                        sequence,
+                    ),
+                )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="LOCAL_FOLDER_SCAN_CANDIDATE_CREATED",
+                object_type="LOCAL_FOLDER_SCAN",
+                object_id=manifest.scan_id,
+                audit_payload={
+                    "scan_id": manifest.scan_id,
+                    "manifest_hash": manifest.manifest_hash,
+                    "total_files": manifest.total_files,
+                    "new_count": comparison.new_count,
+                    "modified_count": comparison.modified_count,
+                    "moved_count": comparison.moved_count,
+                    "missing_count": comparison.missing_count,
+                    "duplicate_content_count": comparison.duplicate_content_count,
+                },
+                stale_submission=False,
+            )
+
+    def approve_local_folder_scan(
+        self,
+        *,
+        matter_id: str,
+        scan_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        manifest_hash: str,
+        approval_hash: str,
+    ) -> CaseLedgerCommandReceipt:
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        _validate_uuid("scan_id", scan_id)
+        _require_roles(actor, self._DECISION_ROLES)
+        _require_positive_version(expected_version)
+        _validate_sha256("local folder manifest_hash", manifest_hash)
+        _validate_sha256("local folder approval_hash", approval_hash)
+        command_name = "APPROVE_LOCAL_FOLDER_SCAN"
+        payload = {
+            "matter_id": matter_id,
+            "scan_id": scan_id,
+            "expected_version": expected_version,
+            "manifest_hash": manifest_hash,
+            "approval_hash": approval_hash,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            prior = self._begin_or_replay(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                allowed_roles=self._DECISION_ROLES,
+            )
+            if prior is not None:
+                return prior
+            candidate = connection.execute(
+                """
+                SELECT scan_id, manifest_hash, status
+                FROM local_folder_scans
+                WHERE scan_id = %s AND matter_id = %s AND firm_id = %s
+                FOR UPDATE
+                """,
+                (scan_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if candidate is None:
+                raise KeyError(scan_id)
+            if candidate["status"] != "CANDIDATE" or candidate["manifest_hash"] != manifest_hash:
+                raise CaseLedgerPersistenceBlocked("local folder scan changed before approval")
+            connection.execute(
+                """
+                UPDATE local_folder_scans
+                SET status = 'INVALIDATED', invalidated_at = now()
+                WHERE matter_id = %s AND firm_id = %s AND status = 'APPROVED'
+                """,
+                (matter_id, actor.firm_id),
+            )
+            updated = connection.execute(
+                """
+                UPDATE local_folder_scans
+                SET status = 'APPROVED', approved_by = %s, approval_hash = %s,
+                    approved_at = now()
+                WHERE scan_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status = 'CANDIDATE' AND manifest_hash = %s
+                """,
+                (actor.actor_id, approval_hash, scan_id, matter_id, actor.firm_id, manifest_hash),
+            )
+            if updated.rowcount != 1:
+                raise CaseLedgerPersistenceBlocked("local folder scan changed before approval")
+            _invalidate_current_evidence_outputs(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+                reason="律师批准了新的案卷文件范围，旧证据清单及派生件已失效。",
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="LOCAL_FOLDER_SCAN_APPROVED",
+                object_type="LOCAL_FOLDER_SCAN",
+                object_id=scan_id,
+                audit_payload={
+                    "scan_id": scan_id,
+                    "manifest_hash": manifest_hash,
+                    "approval_hash": approval_hash,
+                },
+                stale_submission=True,
+            )
+
+    def get_local_folder_intake_summary(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+    ) -> PersistentLocalFolderIntakeSummary:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._READ_ROLES)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._READ_ROLES,
+            )
+            matter_version = _read_projection_version(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+            )
+            rows = connection.execute(
+                """
+                SELECT scan_id, manifest_hash, base_scan_id, status, total_files,
+                       total_bytes, skipped_symlinks, new_count, modified_count,
+                       moved_count, missing_count, unchanged_count,
+                       duplicate_content_count, scanned_at, approved_at
+                FROM local_folder_scans
+                WHERE matter_id = %s AND firm_id = %s
+                  AND status IN ('CANDIDATE', 'APPROVED')
+                ORDER BY created_at DESC, scan_id DESC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+        approved = next((row for row in rows if row["status"] == "APPROVED"), None)
+        candidate = next((row for row in rows if row["status"] == "CANDIDATE"), None)
+        payload = {
+            "matter_id": matter_id,
+            "matter_version": matter_version,
+            "approved_scan": _local_folder_scan_summary_payload(approved),
+            "candidate_scan": _local_folder_scan_summary_payload(candidate),
+        }
+        return PersistentLocalFolderIntakeSummary(summary_hash=_payload_hash(payload), **payload)
+
+    def list_local_folder_scan_file_page(
+        self,
+        *,
+        matter_id: str,
+        scan_id: str,
+        actor: Actor,
+        limit: int,
+        cursor: str | None,
+        expected_version: int | None = None,
+    ) -> PersistentLocalFolderFileListPage:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("scan_id", scan_id)
+        _require_roles(actor, self._READ_ROLES)
+        page_limit = validate_page_limit(limit)
+        decoded = (
+            decode_page_cursor(cursor, expected_kind="LOCAL_FOLDER_FILES", expected_matter_id=matter_id)
+            if cursor is not None
+            else None
+        )
+        after_sequence = _local_folder_file_cursor_value(decoded, scan_id=scan_id)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._READ_ROLES,
+            )
+            matter_version = _read_projection_version(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+            )
+            _require_expected_projection_version(expected_version, matter_version)
+            _require_cursor_version(decoded, matter_version)
+            scan = connection.execute(
+                """
+                SELECT scan_id FROM local_folder_scans
+                WHERE scan_id = %s AND matter_id = %s AND firm_id = %s
+                  AND status IN ('CANDIDATE', 'APPROVED')
+                """,
+                (scan_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if scan is None:
+                raise KeyError(scan_id)
+            count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total_count FROM local_folder_scan_files
+                WHERE scan_id = %s AND matter_id = %s AND firm_id = %s
+                """,
+                (scan_id, matter_id, actor.firm_id),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT relative_path, previous_relative_path, byte_size, file_sha256,
+                       detected_kind, change_kind, present, sort_sequence
+                FROM local_folder_scan_files
+                WHERE scan_id = %s AND matter_id = %s AND firm_id = %s
+                  AND sort_sequence > %s
+                ORDER BY sort_sequence ASC
+                LIMIT %s
+                """,
+                (scan_id, matter_id, actor.firm_id, after_sequence, page_limit + 1),
+            ).fetchall()
+        visible = rows[:page_limit]
+        has_more = len(rows) > page_limit
+        next_cursor = None
+        if has_more and visible:
+            next_cursor = encode_page_cursor(
+                kind="LOCAL_FOLDER_FILES",
+                matter_id=matter_id,
+                matter_version=matter_version,
+                sort_values=(scan_id, str(visible[-1]["sort_sequence"])),
+            )
+        return PersistentLocalFolderFileListPage(
+            matter_id=matter_id,
+            matter_version=matter_version,
+            scan_id=scan_id,
+            total_count=int(count_row["total_count"] if count_row else 0),
+            items=tuple(_local_folder_file_payload(row) for row in visible),
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
     def list_evidence_page(
         self,
         *,
@@ -2530,6 +2947,84 @@ def _group_member_details(rows: list[dict[str, Any]]) -> dict[str, tuple[dict[st
             }
         )
     return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _validate_folder_manifest(manifest: FolderManifest) -> None:
+    _validate_uuid("folder manifest scan_id", manifest.scan_id)
+    _validate_sha256("folder manifest root_fingerprint", manifest.root_fingerprint)
+    _validate_sha256("folder manifest manifest_hash", manifest.manifest_hash)
+    if manifest.scanned_at.tzinfo is None:
+        raise CaseLedgerPersistenceBlocked("folder manifest scanned_at must be timezone-aware")
+    if manifest.total_files != len(manifest.originals) or manifest.total_files > 10_000:
+        raise CaseLedgerPersistenceBlocked("folder manifest file count is invalid")
+    if manifest.total_bytes != sum(item.byte_size for item in manifest.originals):
+        raise CaseLedgerPersistenceBlocked("folder manifest byte total is invalid")
+    if manifest.total_bytes > 10 * 1024 * 1024 * 1024 or manifest.skipped_symlinks < 0:
+        raise CaseLedgerPersistenceBlocked("folder manifest safety totals are invalid")
+    paths = [item.relative_path for item in manifest.originals]
+    if paths != sorted(paths) or len(paths) != len(set(paths)):
+        raise CaseLedgerPersistenceBlocked("folder manifest paths must be unique and sorted")
+    for item in manifest.originals:
+        if (
+            not item.relative_path
+            or item.relative_path.startswith("/")
+            or ".." in item.relative_path.split("/")
+            or item.byte_size < 0
+            or item.detected_kind not in set(KNOWN_FILE_KINDS.values()).union({"OTHER"})
+        ):
+            raise CaseLedgerPersistenceBlocked("folder manifest contains an invalid file entry")
+        _validate_sha256("folder manifest file sha256", item.sha256)
+    if folder_manifest_hash(manifest.root_fingerprint, manifest.originals) != manifest.manifest_hash:
+        raise CaseLedgerPersistenceBlocked("folder manifest hash does not match its file inventory")
+
+
+def _local_folder_scan_summary_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "scan_id": str(row["scan_id"]),
+        "manifest_hash": row["manifest_hash"],
+        "base_scan_id": str(row["base_scan_id"]) if row["base_scan_id"] else None,
+        "status": row["status"],
+        "total_files": row["total_files"],
+        "total_bytes": row["total_bytes"],
+        "skipped_symlinks": row["skipped_symlinks"],
+        "new_count": row["new_count"],
+        "modified_count": row["modified_count"],
+        "moved_count": row["moved_count"],
+        "missing_count": row["missing_count"],
+        "unchanged_count": row["unchanged_count"],
+        "duplicate_content_count": row["duplicate_content_count"],
+        "scanned_at": row["scanned_at"].isoformat(),
+        "approved_at": row["approved_at"].isoformat() if row["approved_at"] else None,
+    }
+
+
+def _local_folder_file_cursor_value(
+    cursor: StablePageCursor | None,
+    *,
+    scan_id: str,
+) -> int:
+    if cursor is None:
+        return 0
+    if len(cursor.sort_values) != 2 or cursor.sort_values[0] != scan_id:
+        raise StablePaginationBlocked("local folder file cursor scope is invalid")
+    sequence_text = cursor.sort_values[1]
+    if not sequence_text.isdigit() or sequence_text.startswith("0"):
+        raise StablePaginationBlocked("local folder file cursor sequence is invalid")
+    return int(sequence_text)
+
+
+def _local_folder_file_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "relative_path": row["relative_path"],
+        "previous_relative_path": row["previous_relative_path"],
+        "byte_size": row["byte_size"],
+        "file_sha256": row["file_sha256"],
+        "detected_kind": row["detected_kind"],
+        "change_kind": row["change_kind"],
+        "present": row["present"],
+    }
 
 
 def _group_annotations(rows: list[dict[str, Any]]) -> dict[str, tuple[dict[str, Any], ...]]:
