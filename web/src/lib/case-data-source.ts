@@ -387,6 +387,36 @@ export type SubmissionExportDelivery = {
   artifactSha256: string;
 };
 
+export type ReviewableOfficeDraftReviewView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  pairs: {
+    pairId: string;
+    documentKind: string;
+    editableMediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    editableSha256: string;
+    editableBytes: number;
+    reviewPdfSha256: string;
+    reviewPdfBytes: number;
+    reviewPdfPageCount: number;
+    approvalInputHash: string;
+    renderVerificationHash: string;
+    reviewInputHash: string;
+    status: "CANDIDATE" | "APPROVED";
+    createdAt: string;
+  }[];
+};
+
+export type ReviewableOfficeDraftDelivery = {
+  blob: Blob;
+  fileName: string;
+  artifactSha256: string;
+  purpose: "REVIEW_PDF" | "DOWNLOAD_EDITABLE";
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -755,6 +785,27 @@ type PersistentSubmissionSnapshot = {
     verification_hash: string;
     verified_at: string;
   } | null;
+};
+
+type PersistentReviewableOfficeDraftSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  pairs: {
+    pair_id: string;
+    document_kind: string;
+    editable_media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    editable_sha256: string;
+    editable_bytes: number;
+    review_pdf_sha256: string;
+    review_pdf_bytes: number;
+    review_pdf_page_count: number;
+    approval_input_hash: string;
+    render_verification_hash: string;
+    review_input_hash: string;
+    status: "CANDIDATE" | "APPROVED";
+    created_at: string;
+  }[];
 };
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
@@ -1289,6 +1340,150 @@ export async function fetchSubmissionExport(
     throw new Error("法院提交包为空或超过本机下载大小上限。");
   }
   return { blob, fileName: "法院提交材料.zip", artifactSha256: returnedHash };
+}
+
+export async function loadReviewableOfficeDrafts(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<ReviewableOfficeDraftReviewView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") {
+    return {
+      sourceKind: "synthetic-alpha",
+      sourceLabel: "合成模式不提供可编辑文书",
+      matterVersion: null,
+      snapshotHash: null,
+      requestId: null,
+      pairs: [],
+    };
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/reviewable-office-drafts`,
+    { headers: { Accept: "application/json" } },
+  );
+  const payload = (await response.json()) as PersistentReviewableOfficeDraftSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "文书审阅快照不可用"));
+  }
+  return {
+    sourceKind: "persistent-preview",
+    sourceLabel: "可审阅文书候选件",
+    matterVersion: payload.matter_version,
+    snapshotHash: payload.snapshot_hash,
+    requestId: response.headers.get("X-Request-ID"),
+    pairs: payload.pairs.map((item) => ({
+      pairId: item.pair_id,
+      documentKind: item.document_kind,
+      editableMediaType: item.editable_media_type,
+      editableSha256: item.editable_sha256,
+      editableBytes: item.editable_bytes,
+      reviewPdfSha256: item.review_pdf_sha256,
+      reviewPdfBytes: item.review_pdf_bytes,
+      reviewPdfPageCount: item.review_pdf_page_count,
+      approvalInputHash: item.approval_input_hash,
+      renderVerificationHash: item.render_verification_hash,
+      reviewInputHash: item.review_input_hash,
+      status: item.status,
+      createdAt: item.created_at,
+    })),
+  };
+}
+
+export async function fetchReviewableOfficeDraft(
+  pair: ReviewableOfficeDraftReviewView["pairs"][number],
+  purpose: "REVIEW_PDF" | "DOWNLOAD_EDITABLE",
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<ReviewableOfficeDraftDelivery> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以读取可审阅文书。");
+  }
+  const accessResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/reviewable-office-drafts/${pair.pairId}/access`,
+    {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ purpose }),
+    },
+  );
+  const accessPayload = (await accessResponse.json()) as
+    | { access_token: string; pair_id: string; purpose: "REVIEW_PDF" | "DOWNLOAD_EDITABLE" }
+    | ErrorEnvelope;
+  if (!accessResponse.ok || !("access_token" in accessPayload)) {
+    throw new Error(errorMessage(accessPayload as ErrorEnvelope, "无法取得文书的短时读取许可"));
+  }
+  if (accessPayload.pair_id !== pair.pairId || accessPayload.purpose !== purpose) {
+    throw new Error("文书读取许可与当前审阅对象不一致，已停止读取。");
+  }
+  const contentResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/reviewable-office-drafts/${pair.pairId}/content`,
+    {
+      headers: {
+        Accept: purpose === "REVIEW_PDF" ? "application/pdf" : pair.editableMediaType,
+        Authorization: `Bearer ${accessPayload.access_token}`,
+      },
+    },
+    "provided-bearer",
+  );
+  if (!contentResponse.ok) {
+    const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new Error(errorMessage(payload, "文书读取失败"));
+  }
+  const expectedMediaType = purpose === "REVIEW_PDF" ? "application/pdf" : pair.editableMediaType;
+  if (contentResponse.headers.get("Content-Type")?.split(";", 1)[0] !== expectedMediaType) {
+    throw new Error("文书返回了非预期的文件类型，已停止读取。");
+  }
+  const expectedHash = purpose === "REVIEW_PDF" ? pair.reviewPdfSha256 : pair.editableSha256;
+  const expectedBytes = purpose === "REVIEW_PDF" ? pair.reviewPdfBytes : pair.editableBytes;
+  if (contentResponse.headers.get("X-Artifact-SHA256") !== expectedHash) {
+    throw new Error("文书服务端哈希与当前审阅快照不一致，已停止读取。");
+  }
+  const blob = await contentResponse.blob();
+  if (blob.size !== expectedBytes || blob.size < 1 || blob.size > 128 * 1024 * 1024) {
+    throw new Error("文书长度与当前审阅快照不一致，已停止读取。");
+  }
+  return {
+    blob,
+    fileName: purpose === "REVIEW_PDF" ? "文书审阅稿.pdf" : pair.editableMediaType.endsWith("document") ? "文书草稿.docx" : "核算草稿.xlsx",
+    artifactSha256: expectedHash,
+    purpose,
+  };
+}
+
+export async function approveReviewableOfficeDraft(
+  review: ReviewableOfficeDraftReviewView,
+  pair: ReviewableOfficeDraftReviewView["pairs"][number],
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  if (config.kind !== "persistent-preview" || review.matterVersion === null) {
+    throw new Error("只有已启用的本机持久化工作台可以确认文书候选件。");
+  }
+  if (pair.status !== "CANDIDATE") throw new Error("该文书候选件已不是待确认状态，请刷新快照。");
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/reviewable-office-drafts/${pair.pairId}/approve`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({ expected_version: review.matterVersion, approval_hash: pair.reviewInputHash }),
+    },
+  );
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload) || payload.object_type !== "REVIEWABLE_OFFICE_DRAFT_PAIR") {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "文书候选件未被确认"));
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
 }
 
 export async function fetchEvidenceDerivative(

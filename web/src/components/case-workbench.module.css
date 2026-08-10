@@ -335,6 +335,27 @@
 .submissionDownloadBlock button { padding: 10px 12px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: inherit; font-size: 11px; cursor: pointer; }
 .submissionDownloadBlock button:disabled { opacity: .58; cursor: wait; }
 .submissionDownloadBlock small { color: var(--red); font-size: 10px; line-height: 1.5; }
+.officeDraftArea { margin-top: 18px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.officeDraftHeading { min-height: 94px; padding: 16px 18px; display: flex; justify-content: space-between; gap: 22px; align-items: end; border-bottom: 1px solid var(--line); }
+.officeDraftHeading h3 { margin: 5px 0 6px; font: 600 18px var(--font-serif); }
+.officeDraftHeading p:not(.eyebrow) { max-width: 720px; color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.officeDraftHeading > button, .officeDraftActions button { padding: 8px 10px; border: 1px solid var(--line-strong); color: var(--ink); background: #fffef9; font: 10px var(--font-sans); cursor: pointer; white-space: nowrap; }
+.officeDraftHeading > button:hover, .officeDraftActions button:hover { border-color: var(--ink); }
+.officeDraftActions button:disabled, .officeDraftHeading > button:disabled { opacity: .55; cursor: wait; }
+.officeDraftError, .officeDraftNotice { margin: 12px 18px 0; padding: 9px 10px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.officeDraftNotice { border-color: #c7d6cc; background: var(--green-soft); }
+.officeDraftEmpty { min-height: 86px; padding: 20px 18px; display: grid; gap: 6px; color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.officeDraftEmpty strong { color: var(--ink); font-size: 11px; }
+.officeDraftList { display: grid; }
+.officeDraftList article { min-height: 72px; padding: 12px 18px; display: grid; grid-template-columns: minmax(0, 1fr) 65px auto; gap: 14px; align-items: center; border-top: 1px solid var(--line); }
+.officeDraftMeta { min-width: 0; display: grid; gap: 3px; }
+.officeDraftMeta strong { font-size: 11px; }
+.officeDraftMeta span, .officeDraftMeta code { overflow: hidden; color: var(--ink-faint); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.officeDraftMeta code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.officeDraftCandidate, .officeDraftApproved { padding: 4px 5px; border: 1px solid #d5b079; color: #825a15; background: #fff8df; font-size: 9px; text-align: center; }
+.officeDraftApproved { border-color: #a8c4b1; color: var(--green); background: var(--green-soft); }
+.officeDraftActions { display: flex; gap: 7px; justify-content: end; }
+.officeDraftActions .officeDraftApprove { border-color: var(--ink); color: var(--sheet); background: var(--ink); }
 
 .securityArea { min-width: 0; padding: 29px 28px 52px; }
 .securityHeading { padding-bottom: 18px; display: flex; justify-content: space-between; align-items: end; gap: 24px; border-bottom: 1px solid var(--line-strong); }

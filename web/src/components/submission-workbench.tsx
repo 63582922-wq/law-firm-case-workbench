@@ -7,6 +7,7 @@ import {
   loadSubmissionReview,
   type SubmissionReviewView,
 } from "@/lib/case-data-source";
+import { ReviewableOfficeDrafts } from "@/components/reviewable-office-drafts";
 import styles from "./case-workbench.module.css";
 
 const requiredFlow = [
@@ -149,6 +150,8 @@ export function SubmissionWorkbench() {
           <p>委托手续、律所函和身份材料是否必需，应由具体法院要求与本案代理关系决定，并纳入同一 QA 清单。</p>
         </aside>
       </div>
+
+      <ReviewableOfficeDrafts />
 
       <section className={styles.submissionPanel} aria-labelledby="submission-lineage-title">
         <div className={styles.submissionPanelHeading}>
