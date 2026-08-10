@@ -1415,6 +1415,48 @@ export async function decidePersistentFact(
   };
 }
 
+/**
+ * Stage one lawyer-edited factual statement with an immutable original-page
+ * reference.  This is intentionally a candidate: OCR text or a model output
+ * can never enter the confirmed fact ledger by itself.
+ */
+export async function createPersistentFactCandidate(input: {
+  expectedVersion: number;
+  originalText: string;
+  origin: "PLAINTIFF_PLEADING" | "DEFENDANT_STATEMENT" | "AGENT_CANDIDATE" | "ASSISTANT_ENTRY";
+  evidenceLink: { evidenceId: string; originalFileSha256: string; pageNumber: number; originalLabel: string };
+  config?: CaseDataSourceConfig;
+}): Promise<FactDecisionReceipt> {
+  const config = input.config ?? caseDataSourceConfig;
+  if (config.kind !== "persistent-preview" || !Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new Error("只有已启用的本机持久化工作台可以建立事实候选。 ");
+  }
+  if (!input.originalText.trim() || input.originalText.length > 10_000 || !/^[0-9a-f]{64}$/i.test(input.evidenceLink.originalFileSha256)) {
+    throw new Error("事实候选文字或原始页定位无效。 ");
+  }
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/facts`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({
+      expected_version: input.expectedVersion,
+      original_text: input.originalText.trim(),
+      origin: input.origin,
+      evidence_links: [{
+        evidence_id: input.evidenceLink.evidenceId,
+        original_file_sha256: input.evidenceLink.originalFileSha256.toLowerCase(),
+        page_number: input.evidenceLink.pageNumber,
+        original_label: input.evidenceLink.originalLabel,
+      }],
+    }),
+  });
+  const payload = (await response.json()) as { object_id?: string; object_type?: string; matter_version?: number } | ErrorEnvelope;
+  const receipt = payload as { object_id?: string; object_type?: string; matter_version?: number };
+  if (!response.ok || receipt.object_type !== "FACT" || !MATTER_ID_PATTERN.test(receipt.object_id ?? "") || !Number.isInteger(receipt.matter_version)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "事实候选未写入案件台账。"));
+  }
+  return { objectId: receipt.object_id!, matterVersion: receipt.matter_version!, requestId: response.headers.get("X-Request-ID") };
+}
+
 export async function createPaymentClassificationCandidate(
   input: {
     expectedVersion: number;

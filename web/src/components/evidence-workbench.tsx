@@ -12,6 +12,7 @@ import {
   fetchEvidenceDerivative,
   fetchOriginalPagePreview,
   createLocalFolderScan,
+  createPersistentFactCandidate,
   enqueueEvidenceIntakeRun,
   inspectLocalFolderSelection,
   issueLocalFolderGrant,
@@ -105,6 +106,7 @@ export function EvidenceWorkbench() {
   const [ocrCandidates, setOcrCandidates] = useState<OcrReviewCandidateSnapshot | null>(null);
   const [ocrText, setOcrText] = useState<string | null>(null);
   const [ocrReviewReason, setOcrReviewReason] = useState("");
+  const [ocrFactText, setOcrFactText] = useState("");
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -577,6 +579,8 @@ export function EvidenceWorkbench() {
       setOriginalCompared(false);
       setDraftBox(null);
       setDraftLabel("");
+      setOcrText(null);
+      setOcrFactText("");
       setFolderNotice(`已在内存中打开第 ${currentPage.pageNumber} 页单页预览；未传出整份原件。`);
     } catch (reason: unknown) {
       setFolderNotice(reason instanceof Error ? reason.message : "原始证据页预览失败");
@@ -644,12 +648,43 @@ export function EvidenceWorkbench() {
     setOcrBusy(true);
     try {
       await reviewOcrReviewCandidate({ snapshot: ocrCandidates, candidate, decision, reason: ocrReviewReason });
-      const candidates = await loadOcrReviewCandidates();
+      const [candidates, refreshedReview] = await Promise.all([loadOcrReviewCandidates(), loadEvidenceReview()]);
       setOcrCandidates(candidates);
+      setReview(refreshedReview);
       setOcrReviewReason("");
       setOcrNotice(decision === "ACCEPTED" ? "OCR 文本已作为已复核候选保留；仍需另行建立事实与证据关联。" : "OCR 文本已驳回并保留审计记录。 ");
     } catch (reason: unknown) {
       setOcrNotice(reason instanceof Error ? reason.message : "OCR 候选复核未完成。 ");
+    } finally {
+      setOcrBusy(false);
+    }
+  }
+
+  async function createFactFromAcceptedOcr() {
+    if (!review || review.sourceKind !== "persistent-preview" || !selected || !currentOcrCandidate || currentOcrCandidate.status !== "ACCEPTED") return;
+    const source = review.originals.find((item) => item.fileId === selected.fileId);
+    if (!source || !ocrFactText.trim()) {
+      setOcrNotice("请先把 OCR 文本整理为一项明确事实，并保留当前原始页定位。 ");
+      return;
+    }
+    setOcrBusy(true);
+    try {
+      const receipt = await createPersistentFactCandidate({
+        expectedVersion: review.matterVersion ?? 0,
+        originalText: ocrFactText,
+        origin: "AGENT_CANDIDATE",
+        evidenceLink: {
+          evidenceId: selected.pageId,
+          originalFileSha256: source.originalFileSha256,
+          pageNumber: selected.pageNumber,
+          originalLabel: selected.originalLabel,
+        },
+      });
+      setReview(await loadEvidenceReview());
+      setOcrFactText("");
+      setOcrNotice(`已建立一项待律师确认的事实候选（案件版本 ${receipt.matterVersion}）；请在“事实与争点”中确认、争议或否认。`);
+    } catch (reason: unknown) {
+      setOcrNotice(reason instanceof Error ? reason.message : "事实候选未建立。 ");
     } finally {
       setOcrBusy(false);
     }
@@ -1047,6 +1082,14 @@ export function EvidenceWorkbench() {
                         <button disabled={ocrBusy || !ocrReviewReason.trim()} onClick={() => void decideOcrCandidate("ACCEPTED")} type="button">律师复核保留</button>
                         <button className={styles.dangerAction} disabled={ocrBusy || !ocrReviewReason.trim()} onClick={() => void decideOcrCandidate("REJECTED")} type="button">律师复核驳回</button>
                       </div>
+                    </>
+                  )}
+                  {currentOcrCandidate.status === "ACCEPTED" && (
+                    <>
+                      <label htmlFor="ocr-fact-text">从本页整理一项事实候选</label>
+                      <textarea id="ocr-fact-text" disabled={ocrBusy} maxLength={10_000} onChange={(event) => setOcrFactText(event.target.value)} placeholder="请改写为一项可核对的事实陈述；不会自动把整页 OCR 当作事实。" value={ocrFactText} />
+                      <button disabled={ocrBusy || !ocrFactText.trim()} onClick={() => void createFactFromAcceptedOcr()} type="button">建立待确认事实候选</button>
+                      <small>该操作会固定当前原始文件哈希与页码；仍须到“事实与争点”中作出确认、争议或否认决定。</small>
                     </>
                   )}
                 </>
