@@ -1145,6 +1145,7 @@ pub fn run() {
             let runtime = LocalApiRuntime::default();
             app.manage(runtime.clone());
             app.manage(EnrollmentVault::default());
+            app.manage(ModelProviderVault::default());
             if let Err(message) = start_local_api(app.handle(), runtime.clone()) {
                 mark_runtime_blocked(&runtime, &message);
             }
