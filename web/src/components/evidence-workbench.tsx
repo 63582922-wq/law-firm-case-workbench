@@ -6,6 +6,7 @@ import {
   approveEvidenceAnnotation,
   approveEvidencePageDecision,
   approveLocalFolderScan,
+  authorizeSinglePageQwenOcr,
   caseDataSourceConfig,
   enqueueEvidenceDerivativeRun,
   fetchEvidenceDerivative,
@@ -19,9 +20,12 @@ import {
   loadMoreEvidenceIntakeItems,
   loadMoreEvidencePages,
   loadMoreLocalFolderFiles,
+  loadOcrReviewCandidates,
   lockEvidenceManifest,
   proposeEvidenceAnnotation,
   proposeEvidencePageDecision,
+  readOcrReviewCandidateText,
+  reviewOcrReviewCandidate,
   resolveEvidenceDuplicateGroup,
   type EvidenceDerivative,
   type EvidenceReviewPage,
@@ -29,8 +33,9 @@ import {
   type LocalFolderGrant,
   type LocalFolderIntakeView,
   type LocalFolderSelection,
+  type OcrReviewCandidateSnapshot,
 } from "@/lib/case-data-source";
-import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
+import { executeAuthorizedQwenOcr, readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import styles from "./case-workbench.module.css";
 
@@ -90,6 +95,16 @@ export function EvidenceWorkbench() {
   const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const [draftBox, setDraftBox] = useState<DraftBox | null>(null);
   const [draftLabel, setDraftLabel] = useState("");
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrNotice, setOcrNotice] = useState<string | null>(null);
+  const [ocrRetentionPolicy, setOcrRetentionPolicy] = useState("");
+  const [ocrTrainingPolicy, setOcrTrainingPolicy] = useState("");
+  const [ocrCostCap, setOcrCostCap] = useState("100");
+  const [ocrRegion, setOcrRegion] = useState<"cn-beijing" | "ap-southeast-1">("cn-beijing");
+  const [ocrConfirmed, setOcrConfirmed] = useState(false);
+  const [ocrCandidates, setOcrCandidates] = useState<OcrReviewCandidateSnapshot | null>(null);
+  const [ocrText, setOcrText] = useState<string | null>(null);
+  const [ocrReviewReason, setOcrReviewReason] = useState("");
   const dragStart = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -119,8 +134,11 @@ export function EvidenceWorkbench() {
         setError(null);
         if (result.sourceKind === "persistent-preview") {
           try {
-            const intake = await loadLocalFolderIntake();
-            if (active) setFolderIntake(intake);
+            const [intake, candidates] = await Promise.all([loadLocalFolderIntake(), loadOcrReviewCandidates()]);
+            if (active) {
+              setFolderIntake(intake);
+              setOcrCandidates(candidates);
+            }
           } catch (reason: unknown) {
             if (active) setIntakeNotice(reason instanceof Error ? reason.message : "案卷盘点摘要读取失败");
           }
@@ -155,6 +173,7 @@ export function EvidenceWorkbench() {
   );
   const activeFolderScan = folderIntake?.candidateScan ?? folderIntake?.approvedScan ?? null;
   const activeIntakeRun = folderIntake?.intakeRun ?? null;
+  const currentOcrCandidate = ocrCandidates?.candidates.find((item) => item.evidencePageId === selected?.pageId) ?? null;
 
   useEffect(() => {
     if (
@@ -566,6 +585,76 @@ export function EvidenceWorkbench() {
     }
   }
 
+  async function executePageOcr() {
+    if (!review || review.sourceKind !== "persistent-preview" || !folderGrant || !selected || !hasCurrentOriginalPreview || !originalPreview) {
+      setOcrNotice("请先在本机打开并核验当前原始页，再建立单页 OCR 授权。");
+      return;
+    }
+    const costCapMinor = Number(ocrCostCap);
+    if (!Number.isInteger(costCapMinor) || costCapMinor < 0) {
+      setOcrNotice("请填写本次 OCR 的人民币分级成本上限（整数）。");
+      return;
+    }
+    if (!ocrConfirmed) {
+      setOcrNotice("请先明确确认仅向已选服务发送当前这一页。 ");
+      return;
+    }
+    setOcrBusy(true);
+    setOcrNotice(null);
+    try {
+      const authorization = await authorizeSinglePageQwenOcr({
+        review,
+        evidencePageId: selected.pageId,
+        renderedPageSha256: originalPreview.sha256,
+        processorRegion: ocrRegion,
+        retentionPolicy: ocrRetentionPolicy,
+        trainingPolicy: ocrTrainingPolicy,
+        costCapMinor,
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        confirmation: "CONFIRM_SINGLE_PAGE_QWEN_OCR",
+      });
+      const result = await executeAuthorizedQwenOcr({
+        matterId: caseDataSourceConfig.kind === "persistent-preview" ? caseDataSourceConfig.matterId : "",
+        evidencePageId: selected.pageId,
+        folderGrantId: folderGrant.grantId,
+        externalRequestId: authorization.requestId,
+        expectedVersion: authorization.matterVersion,
+      });
+      const [refreshedReview, candidates] = await Promise.all([loadEvidenceReview(), loadOcrReviewCandidates()]);
+      setReview(refreshedReview);
+      setOcrCandidates(candidates);
+      const candidate = candidates.candidates.find((item) => item.candidateId === result.candidateId);
+      if (candidate) setOcrText(await readOcrReviewCandidateText({ candidateId: candidate.candidateId }));
+      setOcrConfirmed(false);
+      setOcrNotice(`当前页 OCR 已加密保存为律师复核候选；案件版本更新为 ${result.matterVersion}。识别文字尚未成为事实或提交材料。`);
+    } catch (reason: unknown) {
+      setOcrNotice(reason instanceof Error ? reason.message : "当前页 OCR 未完成；未自动重试。");
+    } finally {
+      setOcrBusy(false);
+    }
+  }
+
+  async function decideOcrCandidate(decision: "ACCEPTED" | "REJECTED") {
+    if (!selected) return;
+    const candidate = ocrCandidates?.candidates.find((item) => item.evidencePageId === selected.pageId && item.status === "CANDIDATE");
+    if (!ocrCandidates || !candidate || !ocrReviewReason.trim()) {
+      setOcrNotice("请填写对本页 OCR 候选的复核理由。 ");
+      return;
+    }
+    setOcrBusy(true);
+    try {
+      await reviewOcrReviewCandidate({ snapshot: ocrCandidates, candidate, decision, reason: ocrReviewReason });
+      const candidates = await loadOcrReviewCandidates();
+      setOcrCandidates(candidates);
+      setOcrReviewReason("");
+      setOcrNotice(decision === "ACCEPTED" ? "OCR 文本已作为已复核候选保留；仍需另行建立事实与证据关联。" : "OCR 文本已驳回并保留审计记录。 ");
+    } catch (reason: unknown) {
+      setOcrNotice(reason instanceof Error ? reason.message : "OCR 候选复核未完成。 ");
+    } finally {
+      setOcrBusy(false);
+    }
+  }
+
   function previewCoordinate(event: ReactPointerEvent<HTMLDivElement>): { x: number; y: number } {
     const bounds = event.currentTarget.getBoundingClientRect();
     return {
@@ -919,6 +1008,52 @@ export function EvidenceWorkbench() {
             </div>
           )}
           <p className={styles.sourceNote}>来源层：原始文件与来源页不可修改；相关页 PDF、红框 PDF 和提交件只能从锁定 Manifest 派生。</p>
+          {review.sourceKind === "persistent-preview" && !review.lockedManifest && (
+            <section className={styles.decisionPanel} aria-label="当前页受控 OCR">
+              <strong>当前页受控 OCR</strong>
+              <small>仅在律师明确确认后，把当前已核验的一页发往已配置的 Qwen 服务；密钥不进入浏览器，返回文本先加密保存为候选。</small>
+              {!currentOcrCandidate && (
+                <>
+                  <label htmlFor="ocr-region">服务地域</label>
+                  <select id="ocr-region" disabled={ocrBusy} value={ocrRegion} onChange={(event) => setOcrRegion(event.target.value as "cn-beijing" | "ap-southeast-1") }>
+                    <option value="cn-beijing">中国（北京）</option>
+                    <option value="ap-southeast-1">新加坡</option>
+                  </select>
+                  <label htmlFor="ocr-retention">本所确认的数据保留政策</label>
+                  <input id="ocr-retention" disabled={ocrBusy} maxLength={240} onChange={(event) => setOcrRetentionPolicy(event.target.value)} placeholder="例如：供应商仅按本所已确认期限保留本次输入" value={ocrRetentionPolicy} />
+                  <label htmlFor="ocr-training">本所确认的模型训练政策</label>
+                  <input id="ocr-training" disabled={ocrBusy} maxLength={240} onChange={(event) => setOcrTrainingPolicy(event.target.value)} placeholder="例如：供应商不得将本次材料用于模型训练" value={ocrTrainingPolicy} />
+                  <label htmlFor="ocr-cost">本次成本上限（人民币分）</label>
+                  <input id="ocr-cost" disabled={ocrBusy} inputMode="numeric" onChange={(event) => setOcrCostCap(event.target.value)} value={ocrCostCap} />
+                  <label className={styles.confirmLine}>
+                    <input checked={ocrConfirmed} disabled={!hasCurrentOriginalPreview || ocrBusy} onChange={(event) => setOcrConfirmed(event.target.checked)} type="checkbox" />
+                    我确认仅向上述已配置服务发送当前这一页，并将其结果作为待律师复核的候选，不自动写入事实或文书
+                  </label>
+                  <button disabled={!hasCurrentOriginalPreview || !ocrConfirmed || !ocrRetentionPolicy.trim() || !ocrTrainingPolicy.trim() || ocrBusy} onClick={() => void executePageOcr()} type="button">
+                    {ocrBusy ? "正在受控识别…" : "授权并识别当前页"}
+                  </button>
+                </>
+              )}
+              {currentOcrCandidate && (
+                <>
+                  <p>已存在本页 OCR 候选：{currentOcrCandidate.status === "CANDIDATE" ? "等待律师复核" : currentOcrCandidate.status === "ACCEPTED" ? "已复核保留" : "已复核驳回"} · {currentOcrCandidate.contentSha256.slice(0, 16)}…</p>
+                  <button disabled={ocrBusy} onClick={() => void readOcrReviewCandidateText({ candidateId: currentOcrCandidate.candidateId }).then(setOcrText).catch((reason: unknown) => setOcrNotice(reason instanceof Error ? reason.message : "OCR 文本读取失败"))} type="button">查看候选文字</button>
+                  {ocrText && <pre className={styles.ocrCandidateText}>{ocrText}</pre>}
+                  {currentOcrCandidate.status === "CANDIDATE" && (
+                    <>
+                      <label htmlFor="ocr-review-reason">复核理由</label>
+                      <textarea id="ocr-review-reason" disabled={ocrBusy} maxLength={480} onChange={(event) => setOcrReviewReason(event.target.value)} placeholder="说明与原始页核对后的保留或驳回理由" value={ocrReviewReason} />
+                      <div className={styles.inlineActions}>
+                        <button disabled={ocrBusy || !ocrReviewReason.trim()} onClick={() => void decideOcrCandidate("ACCEPTED")} type="button">律师复核保留</button>
+                        <button className={styles.dangerAction} disabled={ocrBusy || !ocrReviewReason.trim()} onClick={() => void decideOcrCandidate("REJECTED")} type="button">律师复核驳回</button>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              {ocrNotice && <p className={styles.inspectorNote} role="status">{ocrNotice}</p>}
+            </section>
+          )}
         </article>
 
         <aside className={styles.inspector}>

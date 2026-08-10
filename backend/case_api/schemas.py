@@ -1560,6 +1560,32 @@ class PersistentExternalRequestAttemptRequest(BaseModel):
         return self
 
 
+class PersistentNativeOcrCandidateStageRequest(BaseModel):
+    """Private loopback payload from the native OCR parent to the sidecar.
+
+    The browser never sends this shape.  It contains text only after the native
+    process has received the response for one already-authorised evidence page.
+    """
+
+    expected_version: int = Field(ge=1)
+    external_request_id: UUID
+    evidence_page_id: UUID
+    source_page_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    provider_request_ref_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    content: str = Field(min_length=1, max_length=131_072)
+
+    @model_validator(mode="after")
+    def content_hash_must_match(self):
+        encoded = self.content.encode("utf-8")
+        if len(encoded) > 524_288:
+            raise ValueError("OCR candidate content exceeds the encrypted review boundary")
+        import hashlib
+        if hashlib.sha256(encoded).hexdigest() != self.content_sha256:
+            raise ValueError("OCR candidate content hash does not match content")
+        return self
+
+
 class PersistentExternalRequestSnapshotResponse(BaseModel):
     matter_id: UUID
     matter_version: int = Field(ge=1)

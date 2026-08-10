@@ -63,6 +63,16 @@ declare global {
         connectionReady: boolean;
         connectionLabel: string;
       }>;
+      executeAuthorizedQwenOcr(input: {
+        matterId: string;
+        evidencePageId: string;
+        folderGrantId: string;
+        externalRequestId: string;
+        expectedVersion: number;
+      }): Promise<{
+        candidateId: string;
+        matterVersion: number;
+      }>;
       removeModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;

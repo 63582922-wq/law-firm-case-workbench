@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -177,6 +178,30 @@ struct DesktopSessionGrant {
     access_token: String,
     session_id: String,
     expires_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthorizedQwenOcrInput {
+    matter_id: String,
+    evidence_page_id: String,
+    folder_grant_id: String,
+    external_request_id: String,
+    expected_version: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizedQwenOcrResult {
+    candidate_id: String,
+    matter_version: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeCaseReceipt {
+    matter_version: u64,
+    object_id: String,
 }
 
 fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
@@ -509,6 +534,185 @@ fn configure_desktop_qwen_connection(
     vault: State<'_, ModelProviderVault>,
 ) -> Result<ModelProviderStatus, String> {
     vault.save_qwen_connection(region_id, workspace_id)
+}
+
+/// Execute the only supported model action: one lawyer-authorised Qwen OCR
+/// request for one hash-verified evidence page.  The WebView provides opaque
+/// identifiers only; the API key, original page bytes, provider endpoint and
+/// response text stay outside its JavaScript context.
+#[tauri::command]
+async fn execute_authorized_qwen_ocr(
+    input: AuthorizedQwenOcrInput,
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, ModelProviderVault>,
+) -> Result<AuthorizedQwenOcrResult, String> {
+    validate_native_ocr_input(&input)?;
+    let credentials = vault.load_qwen_ocr_credentials()?;
+    let (port, parent_token) = parent_api_channel(&runtime)?;
+    let grant = snapshot_desktop_session_grant(&runtime)?;
+    let page_url = format!(
+        "http://127.0.0.1:{port}/v1/native-model/matters/{}/evidence-pages/{}/content?folder_grant_id={}&desktop_session_id={}&external_request_id={}&expected_version={}&processor_region={}",
+        input.matter_id,
+        input.evidence_page_id,
+        input.folder_grant_id,
+        grant.session_id,
+        input.external_request_id,
+        input.expected_version,
+        credentials.region_id,
+    );
+    let local_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|_| "无法建立本机受控 OCR 通道。".to_string())?;
+    let page_response = local_client
+        .post(page_url)
+        .header(AUTHORIZATION, format!("Bearer {}", parent_token.as_str()))
+        .send()
+        .await
+        .map_err(|_| "无法读取已授权的证据页；未向模型服务发送任何内容。".to_string())?;
+    if !page_response.status().is_success() {
+        return Err("本机未批准当前证据页的 OCR 执行；未向模型服务发送任何内容。".to_string());
+    }
+    let source_page_sha256 = response_sha256_header(&page_response)?;
+    let page = page_response
+        .bytes()
+        .await
+        .map_err(|_| "证据页读取中断；未向模型服务发送任何内容。".to_string())?;
+    if sha256_hex(page.as_ref()) != source_page_sha256 {
+        return Err("证据页完整性校验不一致；未向模型服务发送任何内容。".to_string());
+    }
+    let prepared = qwen_ocr::prepare_single_page_ocr(&credentials, page.as_ref())?;
+    let submission_reference = format!(
+        "native-qwen-ocr:{}:{}",
+        input.external_request_id, prepared.request_hash
+    );
+    let submission_ref_hash = sha256_hex(submission_reference.as_bytes());
+    let started = native_model_json_post(
+        &local_client,
+        port,
+        parent_token.as_str(),
+        &format!(
+            "/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}",
+            input.matter_id, input.external_request_id, grant.session_id
+        ),
+        serde_json::json!({
+            "expected_version": input.expected_version,
+            "status": "SUBMISSION_STARTED",
+            "provider_request_ref_hash": submission_ref_hash,
+        }),
+        "无法记录 OCR 外发开始；未向模型服务发送任何内容。",
+    )
+    .await?;
+    let model_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|_| "无法建立 OCR 服务连接；本次不会自动重试。".to_string())?;
+    let model_response = model_client
+        .post(&prepared.endpoint)
+        .header(AUTHORIZATION, prepared.authorization)
+        .header(CONTENT_TYPE, "application/json")
+        .body(prepared.body)
+        .send()
+        .await;
+    let model_response = match model_response {
+        Ok(response) => response,
+        Err(_) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "UNKNOWN_SUBMISSION", "error_code": "QWEN_TRANSPORT_UNKNOWN"}),
+                "",
+            ).await;
+            return Err(
+                "OCR 请求已发起但未收到可确认回执；系统已标记为待核对，绝不会自动重试。"
+                    .to_string(),
+            );
+        }
+    };
+    if !model_response.status().is_success() {
+        let code = format!("QWEN_HTTP_{}", model_response.status().as_u16());
+        let _ = native_model_json_post(
+            &local_client, port, parent_token.as_str(),
+            &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+            serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": code}),
+            "",
+        ).await;
+        return Err("OCR 服务明确拒绝或未完成本次请求；系统已记录结果，未自动重试。".to_string());
+    }
+    let response_body = match model_response.bytes().await {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "UNKNOWN_SUBMISSION", "error_code": "QWEN_RESPONSE_UNKNOWN"}),
+                "",
+            ).await;
+            return Err("OCR 服务响应读取中断；系统已标记为待核对，绝不会自动重试。".to_string());
+        }
+    };
+    let output = match qwen_ocr::parse_single_page_ocr_response(
+        response_body.as_ref(),
+        &submission_reference,
+    ) {
+        Ok(value) => value,
+        Err(_) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": "QWEN_INVALID_RESPONSE"}),
+                "",
+            ).await;
+            return Err("OCR 服务未返回可复核文本；系统已记录结果，未自动重试。".to_string());
+        }
+    };
+    let output_hash = output.output_hash.clone();
+    let provider_request_ref_hash = output.provider_request_ref_hash.clone();
+    let output_text = output.text;
+    let staged = native_model_json_post(
+        &local_client,
+        port,
+        parent_token.as_str(),
+        &format!(
+            "/v1/native-model/matters/{}/ocr-review-candidates?desktop_session_id={}",
+            input.matter_id, grant.session_id
+        ),
+        serde_json::json!({
+            "expected_version": started.matter_version,
+            "external_request_id": input.external_request_id,
+            "evidence_page_id": input.evidence_page_id,
+            "source_page_sha256": source_page_sha256,
+            "provider_request_ref_hash": provider_request_ref_hash,
+            "content_sha256": output_hash.clone(),
+            "content": output_text,
+        }),
+        "OCR 文本无法安全写入律师复核库；本次不会自动重试。",
+    )
+    .await;
+    let staged = match staged {
+        Ok(receipt) => receipt,
+        Err(message) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": "OCR_CANDIDATE_STORAGE_FAILED"}),
+                "",
+            ).await;
+            return Err(message);
+        }
+    };
+    let completed = native_model_json_post(
+        &local_client, port, parent_token.as_str(),
+        &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+        serde_json::json!({"expected_version": staged.matter_version, "status": "SUCCEEDED", "output_hash": output_hash}),
+        "OCR 已返回文本，但无法完成审计记账；请在外部调用账本中核对后再处理。",
+    ).await?;
+    Ok(AuthorizedQwenOcrResult {
+        candidate_id: staged.object_id,
+        matter_version: completed.matter_version,
+    })
 }
 
 #[tauri::command]
@@ -1105,6 +1309,98 @@ fn parse_enrollment_verification_response(
     serde_json::from_slice(body).map_err(|_| "本机验签回执内容无效；未写入 Keychain。".to_string())
 }
 
+fn validate_native_ocr_input(input: &AuthorizedQwenOcrInput) -> Result<(), String> {
+    for (label, value) in [
+        ("案件", input.matter_id.as_str()),
+        ("证据页", input.evidence_page_id.as_str()),
+        ("文件夹授权", input.folder_grant_id.as_str()),
+        ("OCR 授权", input.external_request_id.as_str()),
+    ] {
+        if Uuid::parse_str(value).is_err() {
+            return Err(format!("{label}标识无效；未发送任何案卷内容。"));
+        }
+    }
+    if input.expected_version == 0 {
+        return Err("OCR 授权版本无效；未发送任何案卷内容。".to_string());
+    }
+    Ok(())
+}
+
+fn sha256_hex(value: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(value))
+}
+
+fn response_sha256_header(response: &reqwest::Response) -> Result<String, String> {
+    let value = response
+        .headers()
+        .get("x-artifact-sha256")
+        .and_then(|item| item.to_str().ok())
+        .ok_or_else(|| "本机证据页缺少完整性校验；未向模型服务发送任何内容。".to_string())?;
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("本机证据页完整性校验无效；未向模型服务发送任何内容。".to_string());
+    }
+    Ok(value.to_string())
+}
+
+async fn native_model_json_post(
+    client: &reqwest::Client,
+    port: u16,
+    parent_api_token: &str,
+    path: &str,
+    body: serde_json::Value,
+    failure: &str,
+) -> Result<NativeCaseReceipt, String> {
+    if port == 0 || !path.starts_with("/v1/native-model/") || path.len() > 1024 {
+        return Err("本机 OCR 审计通道无效。".to_string());
+    }
+    let response = client
+        .post(format!("http://127.0.0.1:{port}{path}"))
+        .header(AUTHORIZATION, format!("Bearer {parent_api_token}"))
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| {
+            if failure.is_empty() {
+                "本机 OCR 审计记录未完成。".to_string()
+            } else {
+                failure.to_string()
+            }
+        })?;
+    if !response.status().is_success() {
+        return Err(if failure.is_empty() {
+            "本机 OCR 审计记录未完成。".to_string()
+        } else {
+            failure.to_string()
+        });
+    }
+    let bytes = response.bytes().await.map_err(|_| {
+        if failure.is_empty() {
+            "本机 OCR 审计回执无效。".to_string()
+        } else {
+            failure.to_string()
+        }
+    })?;
+    if bytes.len() > 16_384 {
+        return Err("本机 OCR 审计回执超过受控上限。".to_string());
+    }
+    let receipt: NativeCaseReceipt = serde_json::from_slice(&bytes).map_err(|_| {
+        if failure.is_empty() {
+            "本机 OCR 审计回执无效。".to_string()
+        } else {
+            failure.to_string()
+        }
+    })?;
+    if receipt.matter_version == 0 || Uuid::parse_str(&receipt.object_id).is_err() {
+        return Err("本机 OCR 审计回执字段无效。".to_string());
+    }
+    Ok(receipt)
+}
+
 fn successful_http_body<'a>(response: &'a [u8], failure: &str) -> Result<&'a [u8], String> {
     let boundary = response
         .windows(4)
@@ -1199,6 +1495,7 @@ pub fn run() {
             desktop_model_provider_statuses,
             configure_desktop_model_provider_key,
             configure_desktop_qwen_connection,
+            execute_authorized_qwen_ocr,
             remove_desktop_model_provider_key,
             initialize_desktop_installation,
             import_signed_enrollment_package,
@@ -1602,9 +1899,9 @@ mod tests {
 }
 mod enrollment_vault;
 mod model_provider_vault;
-mod qwen_ocr;
 mod native_activation_prompt;
 mod native_model_api_key_prompt;
+mod qwen_ocr;
 
 use enrollment_vault::{EnrollmentVault, EnrollmentVaultStatus};
 use model_provider_vault::{ModelProvider, ModelProviderStatus, ModelProviderVault};

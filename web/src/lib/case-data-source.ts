@@ -122,6 +122,31 @@ export type EvidenceDerivativeRunReceipt = {
   requestId: string | null;
 };
 
+export type OcrReviewCandidate = {
+  candidateId: string;
+  externalRequestId: string;
+  evidencePageId: string;
+  providerId: "qwen";
+  sourcePageSha256: string;
+  contentSha256: string;
+  contentBytes: number;
+  providerRequestRefHash: string;
+  reviewHash: string;
+  status: "CANDIDATE" | "ACCEPTED" | "REJECTED";
+  reviewReason: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+};
+
+export type OcrReviewCandidateSnapshot = {
+  sourceKind: "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number;
+  snapshotHash: string;
+  requestId: string | null;
+  candidates: OcrReviewCandidate[];
+};
+
 export type EvidenceMutationReceipt = {
   objectId: string;
   matterVersion: number;
@@ -2615,6 +2640,96 @@ export async function authorizeSinglePageQwenOcr(input: {
     throw new Error(errorMessage(payload as ErrorEnvelope, "单页 OCR 授权未记录。"));
   }
   return { requestId: payload.object_id!, matterVersion: payload.matter_version!, requestIdHeader: response.headers.get("X-Request-ID") };
+}
+
+export async function loadOcrReviewCandidates(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<OcrReviewCandidateSnapshot> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("OCR 复核候选仅在受控持久化案件中可用。");
+  }
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/ocr-review-candidates`, {
+    headers: { Accept: "application/json" },
+  });
+  const payload = (await response.json()) as {
+    matter_id?: string;
+    matter_version?: number;
+    snapshot_hash?: string;
+    candidates?: Array<Record<string, unknown>>;
+  } | ErrorEnvelope;
+  if (!response.ok || !("candidates" in payload) || !Array.isArray(payload.candidates) || !Number.isInteger(payload.matter_version) || typeof payload.snapshot_hash !== "string") {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "OCR 复核候选读取失败。"));
+  }
+  const candidates = payload.candidates.map((item): OcrReviewCandidate => {
+    const candidateId = String(item.candidate_id ?? "");
+    const status = String(item.status ?? "");
+    if (!MATTER_ID_PATTERN.test(candidateId) || !["CANDIDATE", "ACCEPTED", "REJECTED"].includes(status)) {
+      throw new Error("OCR 复核候选回执字段无效。");
+    }
+    return {
+      candidateId,
+      externalRequestId: String(item.external_request_id ?? ""), evidencePageId: String(item.evidence_page_id ?? ""),
+      providerId: "qwen", sourcePageSha256: String(item.source_page_sha256 ?? ""),
+      contentSha256: String(item.content_sha256 ?? ""), contentBytes: Number(item.content_bytes ?? 0),
+      providerRequestRefHash: String(item.provider_request_ref_hash ?? ""), reviewHash: String(item.review_hash ?? ""),
+      status: status as OcrReviewCandidate["status"], reviewReason: typeof item.review_reason === "string" ? item.review_reason : null,
+      createdAt: String(item.created_at ?? ""), reviewedAt: typeof item.reviewed_at === "string" ? item.reviewed_at : null,
+    };
+  });
+  return {
+    sourceKind: "persistent-preview", sourceLabel: "加密 OCR 律师复核候选",
+    matterVersion: payload.matter_version!, snapshotHash: payload.snapshot_hash,
+    requestId: response.headers.get("X-Request-ID"), candidates,
+  };
+}
+
+export async function readOcrReviewCandidateText(input: {
+  candidateId: string;
+  config?: CaseDataSourceConfig;
+}): Promise<string> {
+  const config = input.config ?? caseDataSourceConfig;
+  if (config.kind !== "persistent-preview" || !MATTER_ID_PATTERN.test(input.candidateId)) {
+    throw new Error("OCR 候选标识无效。");
+  }
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/ocr-review-candidates/${input.candidateId}/content`, {
+    headers: { Accept: "text/plain" },
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as ErrorEnvelope;
+    throw new Error(errorMessage(payload, "OCR 候选文本读取失败。"));
+  }
+  const text = await response.text();
+  if (!text.trim() || text.length > 131_072) throw new Error("OCR 候选文本回执无效。");
+  return text;
+}
+
+export async function reviewOcrReviewCandidate(input: {
+  snapshot: OcrReviewCandidateSnapshot;
+  candidate: OcrReviewCandidate;
+  decision: "ACCEPTED" | "REJECTED";
+  reason: string;
+  config?: CaseDataSourceConfig;
+}): Promise<EvidenceMutationReceipt> {
+  const config = input.config ?? caseDataSourceConfig;
+  if (config.kind !== "persistent-preview" || input.candidate.status !== "CANDIDATE" || !input.reason.trim() || input.reason.length > 480) {
+    throw new Error("OCR 候选复核条件不完整。");
+  }
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/ocr-review-candidates/${input.candidate.candidateId}/review`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify({
+      expected_version: input.snapshot.matterVersion,
+      decision: input.decision,
+      review_hash: input.candidate.reviewHash,
+      reason: input.reason.trim(),
+    }),
+  });
+  const payload = (await response.json()) as { object_id?: string; matter_version?: number } | ErrorEnvelope;
+  const receipt = payload as { object_id?: string; matter_version?: number };
+  if (!response.ok || !MATTER_ID_PATTERN.test(receipt.object_id ?? "") || !Number.isInteger(receipt.matter_version)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "OCR 候选复核未写入审计账本。"));
+  }
+  return { objectId: receipt.object_id!, matterVersion: receipt.matter_version!, requestId: response.headers.get("X-Request-ID") };
 }
 
 export async function approveReviewableOfficeDraft(

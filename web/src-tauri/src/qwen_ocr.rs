@@ -2,7 +2,7 @@
 //! page.  This module does not perform network I/O; the transport is kept
 //! separate so tests cannot accidentally spend money or send case material.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -84,8 +84,8 @@ pub(crate) fn parse_single_page_ocr_response(
     if provider_request_ref.is_empty() || provider_request_ref.len() > 512 {
         return Err("OCR 服务回执标识无效。".to_string());
     }
-    let parsed: QwenResponse = serde_json::from_slice(response_body)
-        .map_err(|_| "OCR 服务回执格式无效。".to_string())?;
+    let parsed: QwenResponse =
+        serde_json::from_slice(response_body).map_err(|_| "OCR 服务回执格式无效。".to_string())?;
     let text = parsed
         .choices
         .first()
@@ -116,7 +116,9 @@ fn valid_workspace_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (3..=120).contains(&bytes.len())
         && bytes[0].is_ascii_alphanumeric()
-        && bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
 }
 
 fn is_png(value: &[u8]) -> bool {
@@ -147,8 +149,8 @@ struct QwenMessage {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_single_page_ocr_response, prepare_single_page_ocr, qwen_workspace_host,
-        MAX_QWEN_OCR_PAGE_BYTES,
+        MAX_QWEN_OCR_PAGE_BYTES, parse_single_page_ocr_response, prepare_single_page_ocr,
+        qwen_workspace_host,
     };
     use crate::model_provider_vault::QwenOcrCredentials;
     use zeroize::Zeroizing;
@@ -175,7 +177,11 @@ mod tests {
     fn request_is_one_png_page_with_fixed_ocr_contract() {
         let request = prepare_single_page_ocr(&credentials(), b"\x89PNG\r\n\x1a\nminimal").unwrap();
         let body = String::from_utf8(request.body).unwrap();
-        assert!(request.endpoint.starts_with("https://workspace-prod-01.cn-beijing.maas.aliyuncs.com/"));
+        assert!(
+            request
+                .endpoint
+                .starts_with("https://workspace-prod-01.cn-beijing.maas.aliyuncs.com/")
+        );
         assert!(body.contains("qwen3.5-ocr"));
         assert!(body.contains("data:image/png;base64,"));
         assert!(!request.authorization.contains("minimal"));

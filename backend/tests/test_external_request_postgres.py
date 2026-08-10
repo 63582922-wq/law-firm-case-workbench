@@ -20,9 +20,10 @@ class _Result:
 
 
 class _Connection:
-    def __init__(self, *, attempts: tuple[dict, ...] = ()) -> None:
+    def __init__(self, *, attempts: tuple[dict, ...] = (), call_cap: int = 3) -> None:
         self.request_id = str(uuid4())
         self.attempts = attempts
+        self.call_cap = call_cap
         self.executed: list[tuple[str, tuple | None]] = []
     def execute(self, sql: str, params: tuple | None = None):
         normalized = " ".join(sql.split())
@@ -40,7 +41,7 @@ class _Connection:
                 "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
             })
         if "FROM external_request_authorizations" in normalized and "FOR KEY SHARE" in normalized:
-            return _Result({"request_id": self.request_id, "call_cap": 3, "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)})
+            return _Result({"request_id": self.request_id, "call_cap": self.call_cap, "expires_at": datetime.now(timezone.utc) + timedelta(hours=1)})
         if "FROM external_request_attempts" in normalized and "FOR UPDATE" in normalized: return _Result(rows=self.attempts)
         if "UPDATE matters SET version = version + 1" in normalized: return _Result({"version": 4})
         return _Result()
@@ -106,6 +107,15 @@ class ExternalRequestPostgresTests(TestCase):
                 idempotency_key="external-outcome-001", request_id=connection.request_id,
                 status="SUCCEEDED", output_hash="d" * 64,
             ))
+
+    def test_single_call_authorization_allows_its_terminal_receipt(self) -> None:
+        connection = _Connection(attempts=({"sequence": 1, "status": "SUBMISSION_STARTED"},), call_cap=1)
+        receipt = self._run(connection, lambda: self.store.record_external_attempt(
+            matter_id=self.matter_id, actor=self.worker, expected_version=3,
+            idempotency_key="external-one-call-outcome", request_id=connection.request_id,
+            status="SUCCEEDED", output_hash="d" * 64,
+        ))
+        self.assertEqual(receipt.matter_version, 4)
 
     def test_native_ocr_requires_exactly_one_authorized_page_and_render_hash(self) -> None:
         page_id = str(uuid4())

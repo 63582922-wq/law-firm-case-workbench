@@ -27,6 +27,11 @@ export type DesktopSessionGrant = {
   expiresAt: string;
 };
 
+export type AuthorizedQwenOcrResult = {
+  candidateId: string;
+  matterVersion: number;
+};
+
 export type DesktopEnrollmentVaultStatus = {
   phase:
     | "NOT_INITIALIZED"
@@ -91,6 +96,22 @@ export async function readDesktopSessionGrant(): Promise<DesktopSessionGrant> {
   return invoke<DesktopSessionGrant>("desktop_session_grant");
 }
 
+export async function executeAuthorizedQwenOcr(input: {
+  matterId: string;
+  evidencePageId: string;
+  folderGrantId: string;
+  externalRequestId: string;
+  expectedVersion: number;
+}): Promise<AuthorizedQwenOcrResult> {
+  for (const value of [input.matterId, input.evidencePageId, input.folderGrantId, input.externalRequestId]) {
+    if (!UUID_PATTERN.test(value)) throw new Error("OCR 执行标识无效；未发送任何案卷内容。");
+  }
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    throw new Error("OCR 授权版本无效；未发送任何案卷内容。");
+  }
+  return invoke<AuthorizedQwenOcrResult>("execute_authorized_qwen_ocr", { input });
+}
+
 export async function initializeDesktopInstallation(): Promise<DesktopEnrollmentVaultStatus> {
   return invoke<DesktopEnrollmentVaultStatus>("initialize_desktop_installation", {
     confirmation: "INIT_LOCAL_KEYCHAIN",
@@ -135,6 +156,7 @@ export function installDesktopBridge(): void {
     modelProviderStatuses: readDesktopModelProviderStatuses,
     configureModelProviderKey: configureDesktopModelProviderKey,
     configureQwenConnection: configureDesktopQwenConnection,
+    executeAuthorizedQwenOcr,
     removeModelProviderKey: removeDesktopModelProviderKey,
     initializeInstallation: initializeDesktopInstallation,
     importSignedEnrollmentPackage,

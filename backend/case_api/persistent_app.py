@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from hmac import compare_digest
 from ipaddress import ip_address
+from tempfile import TemporaryDirectory
 from typing import Annotated, Protocol
 from urllib.parse import quote
 from uuid import UUID
@@ -96,7 +97,7 @@ from case_kernel.external_request_postgres import (
     PersistentExternalRequestSnapshot,
     PostgresExternalRequestStore,
 )
-from case_kernel.ocr_review_candidate_postgres import PostgresOcrReviewCandidateStore
+from case_kernel.ocr_review_candidate_postgres import OcrReviewCandidateSpec, PostgresOcrReviewCandidateStore
 from case_kernel.submission_access import (
     SubmissionAccessBlocked,
     SubmissionExportAccessBroker,
@@ -206,6 +207,7 @@ from .schemas import (
     PersistentExternalRequestAttemptRequest,
     PersistentExternalRequestPreflightRequest,
     PersistentExternalRequestSnapshotResponse,
+    PersistentNativeOcrCandidateStageRequest,
     PersistentOcrReviewCandidateDecisionRequest,
     PersistentOcrReviewCandidateSnapshotResponse,
     PersistentPaymentClassificationCandidateRequest,
@@ -3299,6 +3301,61 @@ def create_persistent_app(
             provider_request_ref_hash=body.provider_request_ref_hash,
             output_hash=body.output_hash, error_code=body.error_code,
         ))
+
+    @app.post(
+        "/v1/native-model/matters/{matter_id}/ocr-review-candidates",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        include_in_schema=False,
+    )
+    async def stage_native_ocr_review_candidate(
+        matter_id: UUID,
+        request: Request,
+        desktop_session_id: UUID,
+        body: PersistentNativeOcrCandidateStageRequest,
+        store: Annotated[PersistentOcrReviewCandidatePort, Depends(get_ocr_review_candidate_store)],
+    ) -> CaseLedgerReceiptResponse:
+        """Encrypt one completed native OCR response as a lawyer-review candidate.
+
+        This route deliberately accepts no file location, page image, provider
+        URL or prompt.  The page was already bounded and hash-verified by the
+        preceding native-only delivery route; only its text response may cross
+        this process boundary, and it is immediately placed in the managed
+        encrypted store.
+        """
+        identity = require_native_parent(request, str(desktop_session_id))
+        worker = dependencies.native_model_worker
+        if worker is None or worker.firm_id != identity.actor.firm_id:
+            raise PersistentAuthenticationBlocked("native OCR worker identity is not configured")
+        if dependencies.artifact_store is None:
+            raise PersistentOcrReviewCandidateServiceUnavailable(
+                "OCR candidate encrypted storage is not configured"
+            )
+        content = body.content.encode("utf-8")
+        # The store's case-root separation guard still applies.  OCR output
+        # has no source folder to materialize: create a private, empty worker
+        # scope solely to prove that no plaintext is staged in the case folder.
+        with TemporaryDirectory(prefix="lawcase-ocr-") as worker_scope:
+            encrypted = dependencies.artifact_store.put_bytes(
+                content,
+                expected_sha256=body.content_sha256,
+                case_root=worker_scope,
+            )
+        receipt = store.stage(
+            matter_id=str(matter_id), actor=worker, expected_version=body.expected_version,
+            idempotency_key=f"native-model-ocr-candidate:{body.external_request_id}:{body.content_sha256}",
+            spec=OcrReviewCandidateSpec(
+                external_request_id=str(body.external_request_id),
+                evidence_page_id=str(body.evidence_page_id),
+                provider_id="qwen",
+                source_page_sha256=body.source_page_sha256,
+                content_object_key=encrypted.object_key,
+                content_sha256=encrypted.plaintext_sha256,
+                content_bytes=encrypted.plaintext_bytes,
+                provider_request_ref_hash=body.provider_request_ref_hash,
+            ),
+        )
+        return _receipt(receipt)
 
     @app.post(
         "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/access",

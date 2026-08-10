@@ -160,7 +160,11 @@ class PostgresExternalRequestStore:
                 raise CaseLedgerPersistenceBlocked("unknown external submission must be reconciled before any retry")
             if latest is not None and latest["status"] in {"SUCCEEDED", "FAILED", "CANCELLED", "EXPIRED"}:
                 raise CaseLedgerPersistenceBlocked("external request is terminal; create a new lawyer-authorized request")
-            if len(attempts) >= authorization["call_cap"]:
+            # A call is consumed when it is submitted, not when its final
+            # receipt is written.  A one-call OCR authorization must still be
+            # able to record its SUCCEEDED/FAILED/UNKNOWN outcome after the
+            # single SUBMISSION_STARTED row exists.
+            if status == "SUBMISSION_STARTED" and len(attempts) >= authorization["call_cap"]:
                 raise CaseLedgerPersistenceBlocked("external request call cap is exhausted")
             if authorization["expires_at"] <= current:
                 if status != "EXPIRED":
