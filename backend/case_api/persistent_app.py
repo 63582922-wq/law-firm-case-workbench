@@ -930,6 +930,15 @@ def create_persistent_app(
             "外部调用预授权服务尚未启用，系统不会发送或回退到未审计请求。",
         )
 
+    @app.exception_handler(PersistentOcrReviewCandidateServiceUnavailable)
+    async def ocr_review_candidate_service_handler(_: Request, exc: PersistentOcrReviewCandidateServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "OCR_REVIEW_SERVICE_UNAVAILABLE",
+            "OCR 候选复核服务尚未启用，未显示或写入任何模型结果。",
+        )
+
     @app.exception_handler(ManagedArtifactBlocked)
     async def managed_artifact_handler(_: Request, exc: ManagedArtifactBlocked):
         del exc
