@@ -63,18 +63,48 @@ def parse_captured_lpr_snapshot(
     )
     if sha256(body).hexdigest() != capture.content_sha256 or len(body) != capture.content_bytes:
         raise LprSourceParseBlocked("LPR source bytes differ from the capture receipt")
-    if capture.media_type == "application/json":
-        raw = _parse_json_records(body, retrieved_on=capture.retrieved_at.date())
-    elif capture.media_type in {"text/html", "application/xhtml+xml"}:
-        raw = _parse_announcement_html(body, retrieved_on=capture.retrieved_at.date())
+    return parse_lpr_source_bytes(
+        source_id=capture.source_id,
+        source_url=capture.final_url,
+        content_sha256=capture.content_sha256,
+        media_type=capture.media_type,
+        retrieved_on=capture.retrieved_at.date(),
+        body=body,
+    )
+
+
+def parse_lpr_source_bytes(
+    *,
+    source_id: str,
+    source_url: str,
+    content_sha256: str,
+    media_type: str,
+    retrieved_on: date,
+    body: bytes,
+) -> ParsedLprSnapshot:
+    """Parse authenticated official LPR bytes for capture registration.
+
+    This is deliberately source-specific and receives the byte hash from the
+    encrypted-object verifier.  It does not accept a rate value from a browser
+    or from a previously serialized summary.
+    """
+
+    if source_id != _SOURCE_ID:
+        raise LprSourceParseBlocked("LPR parser requires the registered CFETS source")
+    if not body or sha256(body).hexdigest() != content_sha256:
+        raise LprSourceParseBlocked("official LPR bytes do not match the authenticated content hash")
+    if media_type == "application/json":
+        raw = _parse_json_records(body, retrieved_on=retrieved_on)
+    elif media_type in {"text/html", "application/xhtml+xml"}:
+        raw = _parse_announcement_html(body, retrieved_on=retrieved_on)
     else:
         raise LprSourceParseBlocked("captured media type is not an LPR data format")
     observations = _build_intervals(raw)
     payload = {
         "schema_version": "parsed-official-lpr-v1",
-        "source_id": capture.source_id,
-        "source_url": capture.final_url,
-        "content_sha256": capture.content_sha256,
+        "source_id": source_id,
+        "source_url": source_url,
+        "content_sha256": content_sha256,
         "observations": [
             {
                 "publication_date": item.publication_date.isoformat(),
@@ -92,9 +122,9 @@ def parse_captured_lpr_snapshot(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     return ParsedLprSnapshot(
-        source_id=capture.source_id,
-        source_url=capture.final_url,
-        content_sha256=capture.content_sha256,
+        source_id=source_id,
+        source_url=source_url,
+        content_sha256=content_sha256,
         observations=observations,
         parsed_output_hash=output_hash,
     )

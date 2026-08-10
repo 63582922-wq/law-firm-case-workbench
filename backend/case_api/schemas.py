@@ -1162,13 +1162,13 @@ class PersistentLegalRuleVersionRequest(BaseModel):
         ):
             raise ValueError("FIXED_ANNUAL_RATE requires only a base annual rate")
         if self.formula_kind == "LPR_MULTIPLE" and (
-            self.base_annual_rate is None
+            self.base_annual_rate is not None
             or self.rate_multiplier is None
             or self.parameter_source_snapshot_id is None
             or not self.parameter_evidence_locator
         ):
             raise ValueError(
-                "LPR_MULTIPLE requires a base annual rate, multiplier, official rate snapshot and locator"
+                "LPR_MULTIPLE derives its base annual rate from an official rate snapshot and locator; provide only the multiplier"
             )
         if self.formula_kind != "LPR_MULTIPLE" and (
             self.parameter_source_snapshot_id is not None

@@ -1664,6 +1664,41 @@ class PersistentApiTests(unittest.TestCase):
                 "effective_from": "2020-08-20",
                 "trigger_event_kind": "CLAIM_FILED",
                 "formula_kind": "LPR_MULTIPLE",
+                "rate_multiplier": "4",
+                "required_fact_keys": ["contract_before_2020_08_20"],
+                "priority": 100,
+                "approval_hash": "a" * 64,
+            },
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(legal_store.calls, [])
+
+    def test_lpr_rule_api_rejects_a_client_supplied_base_rate(self) -> None:
+        legal_store = FakePersistentLegalSourceStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    legal_source_store=legal_store,
+                )
+            )
+        )
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/legal-rule-versions",
+            headers={"Idempotency-Key": "lpr-rule-client-base-rate"},
+            json={
+                "expected_version": 7,
+                "rule_id": "private-lending-cap",
+                "rule_version": "PRIVATE-LENDING-LPR-2020-08",
+                "issue_key": "interest_cap_after_2020_08_20",
+                "source_snapshot_id": str(uuid4()),
+                "parameter_source_snapshot_id": str(uuid4()),
+                "parameter_evidence_locator": "records[0]",
+                "effective_from": "2020-08-20",
+                "trigger_event_kind": "CLAIM_FILED",
+                "formula_kind": "LPR_MULTIPLE",
                 "base_annual_rate": "0.0385",
                 "rate_multiplier": "4",
                 "required_fact_keys": ["contract_before_2020_08_20"],

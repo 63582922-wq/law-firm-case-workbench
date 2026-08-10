@@ -35,6 +35,7 @@ from .case_ledger_postgres import (
     _validate_uuid,
 )
 from .legal_rules import LegalEventKind
+from .lpr_source_parser import LprSourceParseBlocked, parse_lpr_source_bytes
 from .models import Actor, Role
 
 
@@ -50,6 +51,7 @@ _OFFICIAL_SOURCE_DOMAINS = frozenset(
     }
 )
 _OBJECT_KEY = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/([0-9a-f]{64})\.lca$")
+_CFETS_LPR_SOURCE_ID = "CFETS-LPR-HISTORY"
 
 
 class LegalAuthorityLevel(str, Enum):
@@ -137,6 +139,10 @@ class PostgresLegalSourceStore:
             (license_basis, "license_basis"),
         ):
             _require_text(value, name)
+        if source_id.strip() == _CFETS_LPR_SOURCE_ID:
+            raise CaseLedgerPersistenceBlocked(
+                "official LPR data must be registered from a reviewed capture so observations can be re-derived"
+            )
         _validate_official_url(official_url)
         _validate_sha256("content_sha256", content_sha256)
         _validate_sha256("verification_hash", verification_hash)
@@ -358,7 +364,7 @@ class PostgresLegalSourceStore:
                        capture.source_tier, capture.final_url, capture.retrieved_at,
                        capture.content_media_type, capture.content_sha256,
                        capture.storage_object_key, capture.capture_verification_hash,
-                       capture.parsed_output_hash, review.review_id,
+                       capture.parser_kind, capture.parsed_output_hash, review.review_id,
                        review.decision, review.provision_locator, review.review_hash
                 FROM official_source_capture_runs capture
                 JOIN official_source_capture_reviews review
@@ -418,6 +424,30 @@ class PostgresLegalSourceStore:
                 raise CaseLedgerPersistenceBlocked(
                     "reviewed capture encrypted object does not match its plaintext hash"
                 )
+            lpr_observations = ()
+            if capture["source_id"] == _CFETS_LPR_SOURCE_ID:
+                if capture["parser_kind"] not in {"CFETS_LPR_JSON", "CFETS_LPR_ANNOUNCEMENT"}:
+                    raise CaseLedgerPersistenceBlocked(
+                        "official LPR capture has an incompatible deterministic parser"
+                    )
+                try:
+                    parsed_lpr = parse_lpr_source_bytes(
+                        source_id=capture["source_id"],
+                        source_url=capture["final_url"],
+                        content_sha256=capture["content_sha256"],
+                        media_type=capture["content_media_type"],
+                        retrieved_on=capture["retrieved_at"].date(),
+                        body=source_bytes,
+                    )
+                except LprSourceParseBlocked as error:
+                    raise CaseLedgerPersistenceBlocked(
+                        "reviewed official LPR capture cannot be re-derived from authenticated bytes"
+                    ) from error
+                if parsed_lpr.parsed_output_hash != capture["parsed_output_hash"]:
+                    raise CaseLedgerPersistenceBlocked(
+                        "reviewed official LPR capture parsed output no longer matches its receipt"
+                    )
+                lpr_observations = parsed_lpr.observations
             verification_hash = _payload_hash(
                 {
                     "schema_version": "reviewed-official-source-registration-v1",
@@ -464,6 +494,28 @@ class PostgresLegalSourceStore:
                     run_id,
                 ),
             )
+            for observation in lpr_observations:
+                connection.execute(
+                    """
+                    INSERT INTO official_lpr_observations (
+                        snapshot_id, firm_id, content_sha256, parsed_output_hash,
+                        publication_date, effective_from, effective_until,
+                        one_year_rate, five_year_plus_rate, source_locator
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        snapshot_id,
+                        actor.firm_id,
+                        capture["content_sha256"],
+                        capture["parsed_output_hash"],
+                        observation.publication_date,
+                        observation.effective_from,
+                        observation.effective_until,
+                        observation.one_year_rate,
+                        observation.five_year_plus_rate,
+                        observation.source_locator,
+                    ),
+                )
             return _finish_command(
                 connection,
                 actor=actor,
@@ -536,7 +588,10 @@ class PostgresLegalSourceStore:
             raise CaseLedgerPersistenceBlocked("legal rule effective interval must be non-empty")
         if priority < 0:
             raise CaseLedgerPersistenceBlocked("legal rule priority cannot be negative")
-        derived_rate = _derive_rate(formula_kind, base_annual_rate, rate_multiplier)
+        if formula_kind is LegalRateFormulaKind.LPR_MULTIPLE and base_annual_rate is not None:
+            raise CaseLedgerPersistenceBlocked(
+                "LPR multiple base rate is derived from the verified official observation, not accepted from the client"
+            )
         normalized_required = _unique_texts(required_fact_keys, "required_fact_keys")
         normalized_transitions = _unique_texts(transition_rule_versions, "transition_rule_versions")
         rule_version_id = str(uuid4())
@@ -556,9 +611,8 @@ class PostgresLegalSourceStore:
             "effective_to": effective_to,
             "trigger_event_kind": trigger_event_kind,
             "formula_kind": formula_kind,
-            "base_annual_rate": base_annual_rate,
+            "base_annual_rate": None if formula_kind is LegalRateFormulaKind.LPR_MULTIPLE else base_annual_rate,
             "rate_multiplier": rate_multiplier,
-            "derived_annual_rate": derived_rate,
             "required_fact_keys": normalized_required,
             "transition_rule_versions": normalized_transitions,
             "conflict_set": conflict_set.strip() if conflict_set else None,
@@ -610,7 +664,7 @@ class PostgresLegalSourceStore:
             if parameter_source_snapshot_id is not None:
                 parameter_source = connection.execute(
                     """
-                    SELECT content_sha256, verification_status, license_status, authority_level,
+                    SELECT source_id, content_sha256, verification_status, license_status, authority_level,
                            license_basis, license_review_hash
                     FROM official_legal_source_snapshots
                     WHERE snapshot_id = %s AND firm_id = %s FOR SHARE
@@ -630,6 +684,27 @@ class PostgresLegalSourceStore:
                     raise CaseLedgerPersistenceBlocked(
                         "LPR parameter requires a verified active official rate-data snapshot"
                     )
+                if parameter_source["source_id"] != _CFETS_LPR_SOURCE_ID:
+                    raise CaseLedgerPersistenceBlocked(
+                        "LPR parameter source must be the registered CFETS observation source"
+                    )
+            resolved_base_rate = base_annual_rate
+            if formula_kind is LegalRateFormulaKind.LPR_MULTIPLE:
+                observation = connection.execute(
+                    """
+                    SELECT one_year_rate
+                    FROM official_lpr_observations
+                    WHERE snapshot_id = %s AND firm_id = %s AND source_locator = %s
+                    FOR SHARE
+                    """,
+                    (parameter_source_snapshot_id, actor.firm_id, parameter_evidence_locator),
+                ).fetchone()
+                if observation is None:
+                    raise CaseLedgerPersistenceBlocked(
+                        "LPR rule locator does not identify an authenticated official observation"
+                    )
+                resolved_base_rate = Decimal(str(observation["one_year_rate"]))
+            derived_rate = _derive_rate(formula_kind, resolved_base_rate, rate_multiplier)
             connection.execute(
                 """
                 INSERT INTO legal_rule_versions (
@@ -655,7 +730,7 @@ class PostgresLegalSourceStore:
                     effective_to,
                     trigger_event_kind.value,
                     formula_kind.value,
-                    base_annual_rate,
+                    resolved_base_rate,
                     rate_multiplier,
                     derived_rate,
                     json.dumps(normalized_required, ensure_ascii=False),
