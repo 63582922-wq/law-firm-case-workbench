@@ -272,6 +272,18 @@ class PersistentMatterCreateResponse(BaseModel):
     audit_event_id: UUID
 
 
+class PersistentMatterListItem(BaseModel):
+    matter_id: UUID
+    title: str
+    stage: str
+    version: int = Field(ge=1)
+    updated_at: datetime
+
+
+class PersistentMatterListResponse(BaseModel):
+    matters: tuple[PersistentMatterListItem, ...]
+
+
 class PersistentFactResponse(BaseModel):
     fact_id: UUID
     original_text: str

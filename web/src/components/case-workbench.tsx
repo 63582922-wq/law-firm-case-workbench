@@ -10,12 +10,15 @@ import { SubmissionWorkbench } from "@/components/submission-workbench";
 import {
   activatePersistentMatter,
   caseDataSourceConfig,
+  clearActivePersistentMatter,
   createPersistentMatter,
   getPersistentWorkspaceTarget,
   loadCaseReview,
+  loadPersistentMatterList,
   restoreActivePersistentMatter,
   type CaseDataSourceConfig,
   type CaseReviewView,
+  type PersistentMatterListItem,
 } from "@/lib/case-data-source";
 import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
@@ -117,6 +120,12 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <strong>{syntheticSource ? syntheticMatter.deadline : "尚未接入持久化期限台账"}</strong>
           <em>{syntheticSource ? "合成演示时间，不代表真实法律期限" : "系统不会沿用合成期限"}</em>
         </div>
+        {!syntheticSource && !workspaceAwaitingCase ? (
+          <button className={styles.caseSwitch} onClick={() => {
+            clearActivePersistentMatter();
+            setSourceConfig(caseDataSourceConfig);
+          }} type="button">切换案件</button>
+        ) : null}
       </section>
 
       <div className={styles.workspace}>
@@ -197,6 +206,24 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
   const [title, setTitle] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [matters, setMatters] = useState<PersistentMatterListItem[]>([]);
+  const [listState, setListState] = useState<"loading" | "ready" | "blocked">("loading");
+
+  useEffect(() => {
+    let active = true;
+    void loadPersistentMatterList()
+      .then((items) => {
+        if (!active) return;
+        setMatters(items);
+        setListState("ready");
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setListState("blocked");
+        setNotice(reason instanceof Error ? reason.message : "案件列表读取失败。");
+      });
+    return () => { active = false; };
+  }, []);
 
   async function createMatter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -233,6 +260,22 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
         </div>
         {notice ? <p className={styles.caseSetupNotice}>{notice}</p> : null}
       </form>
+      <section className={styles.casePicker} aria-label="可访问案件">
+        <div>
+          <p className={styles.eyebrow}>已有案件</p>
+          <h3>{listState === "loading" ? "正在读取可访问案件…" : listState === "blocked" ? "案件列表暂不可用" : matters.length === 0 ? "尚无可访问案件" : "选择一个已有案件"}</h3>
+        </div>
+        {listState === "ready" && matters.length > 0 ? (
+          <div className={styles.casePickerList}>
+            {matters.map((matter) => (
+              <button key={matter.matterId} onClick={() => onMatterCreated(matter.matterId)} type="button">
+                <span><strong>{matter.title}</strong><small>{matter.stage} · 版本 {matter.version}</small></span>
+                <em>打开</em>
+              </button>
+            ))}
+          </div>
+        ) : <small>只显示当前已登记身份在数据库中仍具有有效案件角色的案件。</small>}
+      </section>
     </section>
   );
 }

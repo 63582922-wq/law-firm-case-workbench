@@ -23,6 +23,14 @@ export type PersistentMatterCreateReceipt = {
   requestId: string | null;
 };
 
+export type PersistentMatterListItem = {
+  matterId: string;
+  title: string;
+  stage: string;
+  version: number;
+  updatedAt: string;
+};
+
 export type CaseReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1141,6 +1149,16 @@ export function activatePersistentMatter(matterId: string): CaseDataSourceConfig
   return caseDataSourceConfig;
 }
 
+export function clearActivePersistentMatter(): CaseDataSourceConfig {
+  if (typeof window !== "undefined") window.sessionStorage.removeItem(ACTIVE_MATTER_STORAGE_KEY);
+  caseDataSourceConfig = resolveCaseDataSourceConfig({
+    mode: process.env.NEXT_PUBLIC_CASE_DATA_SOURCE,
+    apiBase: process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE,
+    matterId: process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID,
+  });
+  return caseDataSourceConfig;
+}
+
 export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: string; matterId?: string }): CaseDataSourceConfig {
   const mode = input.mode?.trim() || "synthetic-alpha";
   if (mode === "synthetic-alpha") return { kind: "synthetic-alpha", label: "本机合成数据" };
@@ -1203,6 +1221,39 @@ export async function createPersistentMatter(title: string): Promise<PersistentM
     auditEventId,
     requestId: response.headers.get("X-Request-ID"),
   };
+}
+
+export async function loadPersistentMatterList(): Promise<PersistentMatterListItem[]> {
+  const target = getPersistentWorkspaceTarget();
+  if (!target) throw new Error("案件列表服务尚未在已登记桌面工作台中启用。");
+  const response = await persistentApiFetch(target, "/v1/matters", {
+    headers: { Accept: "application/json" },
+  });
+  const payload = (await response.json()) as {
+    matters?: { matter_id?: string; title?: string; stage?: string; version?: number; updated_at?: string }[];
+  } | ErrorEnvelope;
+  if (!response.ok || !("matters" in payload) || !Array.isArray(payload.matters)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案件列表读取失败。"));
+  }
+  return payload.matters.map((item) => {
+    if (
+      !MATTER_ID_PATTERN.test(item.matter_id ?? "") ||
+      typeof item.title !== "string" ||
+      typeof item.stage !== "string" ||
+      !Number.isInteger(item.version) ||
+      (item.version ?? 0) < 1 ||
+      !Number.isFinite(Date.parse(item.updated_at ?? ""))
+    ) {
+      throw new Error("案件列表回执格式无效，已停止切换案件。");
+    }
+    return {
+      matterId: item.matter_id ?? "",
+      title: item.title ?? "",
+      stage: item.stage ?? "",
+      version: item.version ?? 0,
+      updatedAt: item.updated_at ?? "",
+    };
+  });
 }
 
 export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<CaseReviewView> {

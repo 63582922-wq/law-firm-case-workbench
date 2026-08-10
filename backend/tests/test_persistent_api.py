@@ -208,9 +208,14 @@ class FakePersistentMatterStore:
 
     def __init__(self) -> None:
         self._delegate = InMemoryMatterStore()
+        self.items: list[dict] = []
 
     def create(self, **kwargs):
         return self._delegate.create(**kwargs)
+
+    def list_accessible(self, *, actor: Actor):
+        del actor
+        return list(self.items)
 
 
 class FakePersistentEvidenceStore:
@@ -899,6 +904,31 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(payload["matter_version"], 1)
         UUID(payload["matter_id"])
         UUID(payload["audit_event_id"])
+
+    def test_case_list_is_derived_from_the_server_identity(self) -> None:
+        store = FakePersistentMatterStore()
+        store.items = [{
+            "matter_id": self.matter_id,
+            "title": "测试甲借款纠纷",
+            "stage": "INGESTING",
+            "version": 2,
+            "updated_at": datetime.now(timezone.utc),
+        }]
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    matter_store=store,
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get("/v1/matters", headers={"X-Actor": "forged-actor-is-ignored"})
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["matters"][0]["matter_id"], self.matter_id)
+        self.assertEqual(payload["matters"][0]["title"], "测试甲借款纠纷")
 
     def test_server_identity_drives_fact_candidate_without_actor_headers(self) -> None:
         store = FakePersistentFactStore()

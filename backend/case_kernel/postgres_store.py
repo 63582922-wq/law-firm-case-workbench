@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from copy import deepcopy
+from datetime import datetime
 from hashlib import sha256
 import json
 from typing import Callable, Iterator
@@ -115,6 +116,34 @@ class PostgresMatterStore:
         _validate_identifiers(matter_id=matter_id, firm_id=firm_id, actor_id=None)
         with self._transaction(firm_id) as connection:
             return self._load_matter(connection, matter_id=matter_id, lock=False)
+
+    def list_accessible(self, *, actor: Actor) -> list[dict[str, str | int | datetime]]:
+        """List only matters for which the active database user has a live role."""
+        _validate_identifiers(matter_id=None, firm_id=actor.firm_id, actor_id=actor.actor_id)
+        with self._transaction(actor.firm_id) as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT m.matter_id, m.title, m.stage, m.version, m.updated_at
+                FROM matters m
+                JOIN matter_actor_roles mar
+                  ON mar.matter_id = m.matter_id AND mar.firm_id = m.firm_id
+                JOIN users u ON u.user_id = mar.user_id AND u.firm_id = mar.firm_id
+                WHERE m.firm_id = %s AND mar.user_id = %s
+                  AND mar.revoked_at IS NULL AND u.status = 'ACTIVE'
+                ORDER BY m.updated_at DESC, m.matter_id DESC
+                """,
+                (actor.firm_id, actor.actor_id),
+            ).fetchall()
+        return [
+            {
+                "matter_id": str(row["matter_id"]),
+                "title": row["title"],
+                "stage": row["stage"],
+                "version": row["version"],
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
 
     def audit_events(self, matter_id: str, *, firm_id: str | None = None) -> list[AuditEvent]:
         if firm_id is None:
@@ -454,7 +483,7 @@ class PostgresMatterStore:
         )
 
 
-def _validate_identifiers(*, matter_id: str, firm_id: str, actor_id: str | None) -> None:
+def _validate_identifiers(*, matter_id: str | None, firm_id: str, actor_id: str | None) -> None:
     for label, value in (("matter_id", matter_id), ("firm_id", firm_id), ("actor_id", actor_id)):
         if value is None:
             continue

@@ -130,6 +130,7 @@ from .schemas import (
     PersistentLocalFolderSelectionResponse,
     PersistentMatterCreateRequest,
     PersistentMatterCreateResponse,
+    PersistentMatterListResponse,
     PersistentOriginalPageAccessRequest,
     PersistentOriginalPageAccessResponse,
     PersistentCaseReviewSummaryResponse,
@@ -248,6 +249,8 @@ class PersistentFactLedgerPort(Protocol):
 
 class PersistentMatterStorePort(Protocol):
     def create(self, **kwargs): ...
+
+    def list_accessible(self, *, actor: Actor): ...
 
 
 class PersistentEvidenceManifestPort(Protocol):
@@ -963,6 +966,20 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             matter_version=receipt.matter_version,
             audit_event_id=UUID(receipt.audit_event_id),
         )
+
+    @app.get(
+        "/v1/matters",
+        response_model=PersistentMatterListResponse,
+        tags=["matters"],
+    )
+    async def list_persistent_matters(
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+    ) -> PersistentMatterListResponse:
+        if dependencies.matter_store is None:
+            raise PersistentRequestBlocked("matter listing persistence is not configured")
+        return PersistentMatterListResponse.model_validate({
+            "matters": dependencies.matter_store.list_accessible(actor=identity.actor),
+        })
 
     @app.get(
         "/v1/matters/{matter_id}/snapshot",

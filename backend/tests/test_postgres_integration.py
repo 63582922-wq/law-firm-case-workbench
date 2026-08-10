@@ -86,6 +86,9 @@ class PostgresMatterStoreIntegrationTests(unittest.TestCase):
         self.assertEqual(first, repeated)
         found = self.workflow.get_matter(self.actor, matter_id=matter_id)
         self.assertEqual(found.stage, MatterStage.CREATED)
+        accessible = self.store.list_accessible(actor=self.actor)
+        self.assertEqual([matter_id], [item["matter_id"] for item in accessible])
+        self.assertEqual("Synthetic UUID Matter", accessible[0]["title"])
         events = self.store.audit_events(matter_id, firm_id=self.firm_id)
         self.assertEqual(["MATTER_CREATED"], [event.event_type for event in events])
 
