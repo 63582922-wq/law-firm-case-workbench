@@ -114,6 +114,15 @@ from .schemas import (
     PersistentEvidenceAnnotationRequest,
     PersistentEvidenceDuplicateGroupRequest,
     PersistentEvidenceDuplicateResolutionRequest,
+    PersistentEvidenceIntakeClaimRequest,
+    PersistentEvidenceIntakeCompleteRequest,
+    PersistentEvidenceIntakeFinalizeRequest,
+    PersistentEvidenceIntakeHeartbeatRequest,
+    PersistentEvidenceIntakeHeartbeatResponse,
+    PersistentEvidenceIntakeLeaseResponse,
+    PersistentEvidenceIntakeReapRequest,
+    PersistentEvidenceIntakeRunRequest,
+    PersistentEvidenceIntakeSummaryResponse,
     PersistentEvidenceManifestLockRequest,
     PersistentEvidenceDerivativeCandidateRequest,
     PersistentEvidenceDerivativeRunClaimRequest,
@@ -206,6 +215,20 @@ class PersistentEvidenceManifestPort(Protocol):
     def get_local_folder_intake_summary(self, *, matter_id: str, actor: Actor): ...
 
     def list_local_folder_scan_file_page(self, **kwargs): ...
+
+    def enqueue_evidence_intake_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def claim_evidence_intake_item(self, **kwargs): ...
+
+    def renew_evidence_intake_item_lease(self, **kwargs): ...
+
+    def complete_evidence_intake_item(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def finalize_evidence_intake_item(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def reap_exhausted_evidence_intake_items(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_current_evidence_intake_summary(self, *, matter_id: str, actor: Actor): ...
 
     def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -2211,6 +2234,194 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 idempotency_key=idempotency_key,
                 manifest_hash=body.manifest_hash,
                 approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-intake-runs/current",
+        response_model=PersistentEvidenceIntakeSummaryResponse,
+        tags=["evidence-access"],
+    )
+    async def get_current_evidence_intake_run(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceIntakeSummaryResponse:
+        summary = evidence_store.get_current_evidence_intake_summary(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentEvidenceIntakeSummaryResponse.model_validate(summary.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["evidence-access"],
+    )
+    async def enqueue_evidence_intake_run(
+        matter_id: UUID,
+        request: Request,
+        body: PersistentEvidenceIntakeRunRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        _require_loopback(request)
+        folder_grants, _ = require_original_page_services()
+        current_manifest = folder_grants.scan_granted_folder(
+            grant_id=str(body.folder_grant_id),
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            session=_local_session(identity),
+        )
+        if current_manifest.manifest_hash != body.scan_manifest_hash:
+            raise LocalFolderAccessBlocked(
+                "the case folder changed after approval; rescan and approve the new scope before material intake"
+            )
+        return _receipt(
+            evidence_store.enqueue_evidence_intake_run(
+                matter_id=str(matter_id),
+                scan_id=str(body.scan_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+                scan_manifest_hash=body.scan_manifest_hash,
+                approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/claim",
+        response_model=PersistentEvidenceIntakeLeaseResponse,
+        tags=["evidence-worker"],
+    )
+    async def claim_evidence_intake_item(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceIntakeClaimRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceIntakeLeaseResponse:
+        lease = evidence_store.claim_evidence_intake_item(
+            matter_id=str(matter_id),
+            run_id=str(run_id),
+            actor=identity.actor,
+            expected_version=body.expected_version,
+            idempotency_key=idempotency_key,
+            lease_seconds=body.lease_seconds,
+        )
+        return PersistentEvidenceIntakeLeaseResponse.model_validate(lease.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/reap-exhausted",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def reap_exhausted_evidence_intake_items(
+        matter_id: UUID,
+        run_id: UUID,
+        body: PersistentEvidenceIntakeReapRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.reap_exhausted_evidence_intake_items(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/items/{item_id}/heartbeat",
+        response_model=PersistentEvidenceIntakeHeartbeatResponse,
+        tags=["evidence-worker"],
+    )
+    async def heartbeat_evidence_intake_item(
+        matter_id: UUID,
+        run_id: UUID,
+        item_id: UUID,
+        body: PersistentEvidenceIntakeHeartbeatRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> PersistentEvidenceIntakeHeartbeatResponse:
+        expires_at = evidence_store.renew_evidence_intake_item_lease(
+            matter_id=str(matter_id),
+            run_id=str(run_id),
+            item_id=str(item_id),
+            lease_id=str(body.lease_id),
+            actor=identity.actor,
+            lease_seconds=body.lease_seconds,
+        )
+        return PersistentEvidenceIntakeHeartbeatResponse(
+            run_id=run_id,
+            item_id=item_id,
+            lease_expires_at=expires_at,
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/items/{item_id}/complete",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def complete_evidence_intake_item(
+        matter_id: UUID,
+        run_id: UUID,
+        item_id: UUID,
+        body: PersistentEvidenceIntakeCompleteRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.complete_evidence_intake_item(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                item_id=str(item_id),
+                lease_id=str(body.lease_id),
+                evidence_file_id=str(body.evidence_file_id),
+                inspection_hash=body.inspection_hash,
+                scanner_name=body.scanner_name,
+                scanner_definitions_version=body.scanner_definitions_version,
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/items/{item_id}/finalize",
+        response_model=CaseLedgerReceiptResponse,
+        tags=["evidence-worker"],
+    )
+    async def finalize_evidence_intake_item(
+        matter_id: UUID,
+        run_id: UUID,
+        item_id: UUID,
+        body: PersistentEvidenceIntakeFinalizeRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            evidence_store.finalize_evidence_intake_item(
+                matter_id=str(matter_id),
+                run_id=str(run_id),
+                item_id=str(item_id),
+                lease_id=str(body.lease_id),
+                outcome=body.outcome,
+                outcome_code=body.outcome_code,
+                inspection_hash=body.inspection_hash,
+                scanner_name=body.scanner_name,
+                scanner_definitions_version=body.scanner_definitions_version,
+                actor=identity.actor,
+                expected_version=body.expected_version,
+                idempotency_key=idempotency_key,
             )
         )
 

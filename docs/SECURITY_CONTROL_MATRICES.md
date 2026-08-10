@@ -37,6 +37,7 @@
 | `EXPORT_SUBMISSION` | current 指针有效、未 `STALE/REVOKED`、导出权限与再认证 | 审计、Manifest 或权限异常即拒绝 |
 | `DELETE_ORIGINAL` | 法定/保全检查、双人或高风险批准、保留策略满足 | Agent 永远无权调用 |
 | `SEND_EXTERNAL_REQUEST` | 有效 preflight、字段最小化、成本/次数上限、供应商/地域允许 | `UNKNOWN_SUBMISSION` 禁止自动重试 |
+| `ENQUEUE/REGISTER_EVIDENCE_INTAKE` | 当前已批准扫描、有效 OS folder grant、Manifest 重验；登记还需本机恶意文件扫描谱系、源哈希和静态 PDF 检查 | grant/路径不落库；变化、扫描器不可用、活动/加密/损坏 PDF 均 fail closed；非 PDF 进入转换/人工处理 |
 
 ## 4. 外部处理 Preflight 契约
 

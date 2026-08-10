@@ -15,7 +15,7 @@ from typing import Mapping
 from psycopg.conninfo import conninfo_to_dict
 
 from .case_ledger_postgres import PostgresCaseLedgerStore
-from .evidence_manifest_postgres import PostgresEvidenceManifestStore
+from .evidence_intake_postgres import PostgresEvidenceIntakeStore
 from .formal_calculation_postgres import PostgresFormalCalculationStore
 from .legal_source_postgres import PostgresLegalSourceStore
 from .managed_artifact_store import LocalEncryptedArtifactStore
@@ -82,7 +82,7 @@ class RuntimeServices:
     settings: RuntimeSettings
     matter_store: MatterStore
     case_ledger_store: PostgresCaseLedgerStore | None
-    evidence_manifest_store: PostgresEvidenceManifestStore | None
+    evidence_manifest_store: PostgresEvidenceIntakeStore | None
     formal_calculation_store: PostgresFormalCalculationStore | None
     legal_source_store: PostgresLegalSourceStore | None
     official_source_capture_store: PostgresOfficialSourceCaptureStore | None
@@ -132,7 +132,7 @@ def build_runtime_services(
         settings=settings,
         matter_store=PostgresMatterStore(dsn),
         case_ledger_store=PostgresCaseLedgerStore(dsn),
-        evidence_manifest_store=PostgresEvidenceManifestStore(dsn),
+        evidence_manifest_store=PostgresEvidenceIntakeStore(dsn),
         formal_calculation_store=PostgresFormalCalculationStore(dsn),
         legal_source_store=PostgresLegalSourceStore(
             dsn, official_source_reader=artifact_reader

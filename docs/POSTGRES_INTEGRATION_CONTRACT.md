@@ -4,7 +4,7 @@
 
 ## 目的与边界
 
-`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据 Manifest 使用独立持久化适配器，保存不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest、派生件谱系和可恢复 Worker 任务。`case_kernel.legal_source_postgres.PostgresLegalSourceStore` 保存经人工核验的官方来源快照、服务端派生的规则版本、案件法律事件、关键事实绑定和不可变规则包；`PostgresOfficialSourceCaptureStore` 独立保存律师授权、一次抓取租约、加密内容回执、解析摘要和 append-only 复核结论。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 只从同案已确认交易、已批准付款分类、明确债务分配及当前已批准法律规则包构造正式计算，保存逐期本金、利息、逐笔冲抵和独立复算谱系。`case_kernel.submission_postgres.PostgresSubmissionStore` 保存已批准法院 PDF 成品、QA 编译规格、文件顺序和名称、四项正式依赖以及已核验导出。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0009_legal_source_license_review.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
+`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据使用 `PostgresEvidenceIntakeStore`（扩展 Manifest Store）保存版本化案卷盘点、逐文件材料接收租约、不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest 和派生件谱系。`case_kernel.legal_source_postgres.PostgresLegalSourceStore` 保存经人工核验的官方来源快照、服务端派生的规则版本、案件法律事件、关键事实绑定和不可变规则包；`PostgresOfficialSourceCaptureStore` 独立保存律师授权、一次抓取租约、加密内容回执、解析摘要和 append-only 复核结论。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 保存逐期本金、利息、逐笔冲抵和独立复算谱系。`case_kernel.submission_postgres.PostgresSubmissionStore` 保存已批准法院 PDF 成品、QA 编译规格、文件顺序和名称、四项正式依赖以及已核验导出。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0011_evidence_intake_runs.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
 
 它们不属于当前 Web/API 的合成 Alpha 运行路径。`alpha_*` 标识符会在建立数据库连接之前被拒绝；这条限制防止测试页面意外写入持久化环境。台账适配器还会在数据库内复核调用人具有本案未撤销且用户状态有效的角色，不能只信任请求携带的角色声明。
 
@@ -20,6 +20,8 @@
 8. 写入幂等回执并一次提交。
 
 任何错误导致整笔事务回滚。全部 SQL 使用参数绑定；不得用字符串拼接案件内容、身份或输入金额。
+
+案卷材料接收只允许主办律师基于当前已批准扫描建立；建立前通过 OS 绑定 grant 重算 Manifest。逐文件项目由 SYSTEM_WORKER 领取短租约，登记结果必须匹配该项目的相对路径、预期大小和 SHA-256，并保存本机扫描器/定义版本及结构检查哈希。新范围获批时旧接收任务统一 `STALE`，不删除已登记原件。
 
 正式计算命令还要求：币种为 `CNY` 且精确到分、交易日期为精确日期、同日顺序已批准、重复组已解决、法律规则期间连续覆盖整个计算区间、规则版本属于当前案件规则包。旧正式情景和计算运行保留为 `STALE`；新运行只有在独立复算完全一致后才成为 `VERIFIED`。`0006` 已加入官方快照登记、规则版本、法律事件、确认事实键绑定和规则包审批命令。正式计算 API 不接收规则段或客户端利率，只能按 `legal_bundle_id`/哈希读取数据库中已批准分段。
 

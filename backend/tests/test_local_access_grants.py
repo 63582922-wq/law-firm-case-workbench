@@ -206,6 +206,37 @@ class LocalFolderGrantTests(unittest.TestCase):
         self.assertEqual(manifest.originals[0].relative_path, "synthetic.pdf")
         self.assertNotIn(str(self.root), repr(manifest))
 
+    def test_approved_inventory_file_resolves_by_relative_path_and_rechecks_hash(self) -> None:
+        source = self.root / "法院送达资料" / "起诉状.pdf"
+        source.parent.mkdir()
+        source.write_bytes(b"synthetic-pdf")
+        handle = self.issue()
+        content_hash = sha256(source.read_bytes()).hexdigest()
+        resolved = self.registry.resolve_scanned_original(
+            grant_id=handle.grant_id,
+            actor=self.actor,
+            matter_id=self.matter_id,
+            session=self.session,
+            relative_path="法院送达资料/起诉状.pdf",
+            expected_sha256=content_hash,
+            expected_byte_size=source.stat().st_size,
+            now=self.now,
+        )
+        self.assertEqual(resolved.sha256, content_hash)
+        self.assertNotIn(str(self.root), repr(resolved))
+        source.write_bytes(b"changed")
+        with self.assertRaisesRegex(LocalFolderAccessBlocked, "changed"):
+            self.registry.resolve_scanned_original(
+                grant_id=handle.grant_id,
+                actor=self.actor,
+                matter_id=self.matter_id,
+                session=self.session,
+                relative_path="法院送达资料/起诉状.pdf",
+                expected_sha256=content_hash,
+                expected_byte_size=len(b"synthetic-pdf"),
+                now=self.now,
+            )
+
     def test_duplicate_hash_requires_unique_label_and_changed_original_fails_closed(self) -> None:
         duplicate = self.root / "duplicate.pdf"
         duplicate.write_bytes((self.root / "synthetic.pdf").read_bytes())

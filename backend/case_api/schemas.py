@@ -889,6 +889,99 @@ class PersistentLocalFolderScanFilePageResponse(BaseModel):
     has_more: bool
 
 
+class PersistentEvidenceIntakeRunRequest(PersistentApprovalRequest):
+    scan_id: UUID
+    scan_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    folder_grant_id: UUID
+
+
+class PersistentEvidenceIntakeRunSnapshot(BaseModel):
+    run_id: UUID
+    scan_id: UUID
+    scan_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["QUEUED", "RUNNING", "SUCCEEDED", "PARTIAL"]
+    total_items: int = Field(ge=1)
+    queued_items: int = Field(ge=0)
+    running_items: int = Field(ge=0)
+    registered_items: int = Field(ge=0)
+    review_required_items: int = Field(ge=0)
+    blocked_items: int = Field(ge=0)
+    failed_items: int = Field(ge=0)
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class PersistentEvidenceIntakeSummaryResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    run: PersistentEvidenceIntakeRunSnapshot | None
+
+
+class PersistentEvidenceIntakeClaimRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_seconds: int = Field(default=120, ge=30, le=300)
+
+
+class PersistentEvidenceIntakeReapRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+
+
+class PersistentEvidenceIntakeLeaseResponse(BaseModel):
+    run_id: UUID
+    item_id: UUID
+    lease_id: UUID
+    matter_id: UUID
+    scan_id: UUID
+    scan_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relative_path: str = Field(min_length=1, max_length=4096)
+    expected_byte_size: int = Field(ge=0)
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    detected_kind: str = Field(min_length=1, max_length=40)
+    attempt_count: int = Field(ge=1, le=3)
+    lease_expires_at: datetime
+    matter_version: int = Field(ge=1)
+
+
+class PersistentEvidenceIntakeHeartbeatRequest(BaseModel):
+    lease_id: UUID
+    lease_seconds: int = Field(default=120, ge=30, le=300)
+
+
+class PersistentEvidenceIntakeHeartbeatResponse(BaseModel):
+    run_id: UUID
+    item_id: UUID
+    lease_expires_at: datetime
+
+
+class PersistentEvidenceIntakeCompleteRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_id: UUID
+    evidence_file_id: UUID
+    inspection_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scanner_name: str = Field(min_length=1, max_length=160)
+    scanner_definitions_version: str = Field(min_length=1, max_length=160)
+
+
+class PersistentEvidenceIntakeFinalizeRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    lease_id: UUID
+    outcome: Literal["REVIEW_REQUIRED", "BLOCKED", "FAILED"]
+    outcome_code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{2,79}$")
+    inspection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    scanner_name: str | None = Field(default=None, min_length=1, max_length=160)
+    scanner_definitions_version: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def inspected_outcomes_have_scanner_provenance(self):
+        if self.outcome in {"REVIEW_REQUIRED", "BLOCKED"} and (
+            self.inspection_hash is None
+            or self.scanner_name is None
+            or self.scanner_definitions_version is None
+        ):
+            raise ValueError("inspected intake outcomes require scanner provenance")
+        return self
+
+
 class PersistentOriginalPageAccessRequest(BaseModel):
     folder_grant_id: UUID
 

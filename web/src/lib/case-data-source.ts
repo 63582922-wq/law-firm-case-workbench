@@ -139,6 +139,21 @@ export type LocalFolderIntakeView = {
     present: boolean;
   }[];
   filePage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
+  intakeRun: {
+    runId: string;
+    scanId: string;
+    scanManifestHash: string;
+    status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "PARTIAL";
+    totalItems: number;
+    queuedItems: number;
+    runningItems: number;
+    registeredItems: number;
+    reviewRequiredItems: number;
+    blockedItems: number;
+    failedItems: number;
+    createdAt: string;
+    completedAt: string | null;
+  } | null;
 };
 
 export type OriginalPagePreviewDelivery = {
@@ -486,6 +501,26 @@ type PersistentLocalFolderFilePage = {
   }[];
   next_cursor: string | null;
   has_more: boolean;
+};
+
+type PersistentEvidenceIntakeSummary = {
+  matter_id: string;
+  matter_version: number;
+  run: {
+    run_id: string;
+    scan_id: string;
+    scan_manifest_hash: string;
+    status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "PARTIAL";
+    total_items: number;
+    queued_items: number;
+    running_items: number;
+    registered_items: number;
+    review_required_items: number;
+    blocked_items: number;
+    failed_items: number;
+    created_at: string;
+    completed_at: string | null;
+  } | null;
 };
 
 type PersistentFormalCalculationSnapshot = {
@@ -1348,11 +1383,19 @@ export async function loadLocalFolderIntake(
   config: CaseDataSourceConfig = caseDataSourceConfig,
 ): Promise<LocalFolderIntakeView> {
   if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以读取案卷盘点。");
-  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/local-folder-intake`, {
-    headers: { Accept: "application/json" },
-  });
+  const [response, runResponse] = await Promise.all([
+    persistentApiFetch(config, `/v1/matters/${config.matterId}/local-folder-intake`, {
+      headers: { Accept: "application/json" },
+    }),
+    persistentApiFetch(config, `/v1/matters/${config.matterId}/evidence-intake-runs/current`, {
+      headers: { Accept: "application/json" },
+    }),
+  ]);
   const summary = (await response.json()) as PersistentLocalFolderIntakeSummary | ErrorEnvelope;
   if (!response.ok || !("summary_hash" in summary)) throw new Error(errorMessage(summary as ErrorEnvelope, "案卷盘点摘要不可用"));
+  const runSummary = (await runResponse.json()) as PersistentEvidenceIntakeSummary | ErrorEnvelope;
+  if (!runResponse.ok || !("run" in runSummary)) throw new Error(errorMessage(runSummary as ErrorEnvelope, "材料接收状态不可用"));
+  if (runSummary.matter_version !== summary.matter_version) throw new Error("案件在载入材料接收状态期间已变化，请重新载入。");
   const displayed = summary.candidate_scan ?? summary.approved_scan;
   if (!displayed) {
     return {
@@ -1363,10 +1406,11 @@ export async function loadLocalFolderIntake(
       displayedScanId: null,
       files: [],
       filePage: { loadedCount: 0, totalCount: 0, nextCursor: null, hasMore: false },
+      intakeRun: mapEvidenceIntakeRun(runSummary.run),
     };
   }
   const page = await loadPersistentLocalFolderFilePage(config, displayed.scan_id, summary.matter_version, null);
-  return mapLocalFolderIntake(summary, page);
+  return mapLocalFolderIntake(summary, page, runSummary);
 }
 
 export async function loadMoreLocalFolderFiles(
@@ -1439,6 +1483,41 @@ export async function approveLocalFolderScan(
     expectedObjectType: "LOCAL_FOLDER_SCAN",
     fallback: "案卷盘点范围未获批准",
     interrupted: "连接在案卷范围批准确认前中断。请刷新盘点状态；系统不会重复提交律师批准。",
+  });
+}
+
+export async function enqueueEvidenceIntakeRun(
+  intake: LocalFolderIntakeView,
+  folderGrantId: string,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<EvidenceMutationReceipt> {
+  if (config.kind !== "persistent-preview" || !intake.approvedScan || intake.candidateScan) {
+    throw new Error("只有当前已批准且没有待确认变化的案卷范围可以进入材料接收。");
+  }
+  if (intake.intakeRun) throw new Error("当前已批准案卷范围已经建立材料接收任务。");
+  const scan = intake.approvedScan;
+  const approvalHash = await sha256Text([
+    "evidence-intake-run-approval-v1",
+    config.matterId,
+    String(intake.matterVersion),
+    scan.scanId,
+    scan.manifestHash,
+    String(scan.totalFiles),
+    String(scan.totalBytes),
+  ].join("|"));
+  return postEvidenceMutation({
+    config,
+    path: "evidence-intake-runs",
+    body: {
+      expected_version: intake.matterVersion,
+      scan_id: scan.scanId,
+      scan_manifest_hash: scan.manifestHash,
+      approval_hash: approvalHash,
+      folder_grant_id: folderGrantId,
+    },
+    expectedObjectType: "EVIDENCE_INTAKE_RUN",
+    fallback: "材料接收任务未建立",
+    interrupted: "连接在材料接收任务回执前中断。请刷新接收状态；系统不会重复建立任务。",
   });
 }
 
@@ -1975,6 +2054,7 @@ function mapPersistentEvidencePage(item: PersistentEvidencePageItem): EvidenceRe
 function mapLocalFolderIntake(
   summary: PersistentLocalFolderIntakeSummary,
   page: PersistentLocalFolderFilePage,
+  runSummary: PersistentEvidenceIntakeSummary,
 ): LocalFolderIntakeView {
   const displayed = summary.candidate_scan ?? summary.approved_scan;
   return {
@@ -1990,6 +2070,26 @@ function mapLocalFolderIntake(
       nextCursor: page.next_cursor,
       hasMore: page.has_more,
     },
+    intakeRun: mapEvidenceIntakeRun(runSummary.run),
+  };
+}
+
+function mapEvidenceIntakeRun(run: PersistentEvidenceIntakeSummary["run"]): LocalFolderIntakeView["intakeRun"] {
+  if (!run) return null;
+  return {
+    runId: run.run_id,
+    scanId: run.scan_id,
+    scanManifestHash: run.scan_manifest_hash,
+    status: run.status,
+    totalItems: run.total_items,
+    queuedItems: run.queued_items,
+    runningItems: run.running_items,
+    registeredItems: run.registered_items,
+    reviewRequiredItems: run.review_required_items,
+    blockedItems: run.blocked_items,
+    failedItems: run.failed_items,
+    createdAt: run.created_at,
+    completedAt: run.completed_at,
   };
 }
 

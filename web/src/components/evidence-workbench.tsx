@@ -11,6 +11,7 @@ import {
   fetchEvidenceDerivative,
   fetchOriginalPagePreview,
   createLocalFolderScan,
+  enqueueEvidenceIntakeRun,
   inspectLocalFolderSelection,
   issueLocalFolderGrant,
   loadEvidenceReview,
@@ -70,8 +71,9 @@ export function EvidenceWorkbench() {
   const [folderBusy, setFolderBusy] = useState<"select" | "grant" | null>(null);
   const [folderNotice, setFolderNotice] = useState<string | null>(null);
   const [folderIntake, setFolderIntake] = useState<LocalFolderIntakeView | null>(null);
-  const [intakeBusy, setIntakeBusy] = useState<"scan" | "approve" | "more" | null>(null);
+  const [intakeBusy, setIntakeBusy] = useState<"scan" | "approve" | "enqueue" | "more" | null>(null);
   const [intakeConfirmed, setIntakeConfirmed] = useState(false);
+  const [intakeRunConfirmed, setIntakeRunConfirmed] = useState(false);
   const [intakeNotice, setIntakeNotice] = useState<string | null>(null);
   const [originalPreview, setOriginalPreview] = useState<{
     pageId: string;
@@ -306,6 +308,7 @@ export function EvidenceWorkbench() {
       setReview(refreshedReview);
       setFolderIntake(refreshedIntake);
       setIntakeConfirmed(false);
+      setIntakeRunConfirmed(false);
       setIntakeNotice(`已完成只读盘点并建立待确认清单；案件版本更新为 ${receipt.matterVersion}。尚未改变正式案卷范围。`);
     } catch (reason: unknown) {
       setIntakeNotice(reason instanceof Error ? reason.message : "案卷盘点未完成");
@@ -327,6 +330,7 @@ export function EvidenceWorkbench() {
       setReview(refreshedReview);
       setFolderIntake(refreshedIntake);
       setIntakeConfirmed(false);
+      setIntakeRunConfirmed(false);
       setManifestConfirmed(false);
       setIntakeNotice(`案卷文件范围已由主办律师批准；案件版本更新为 ${receipt.matterVersion}。依赖旧范围的证据清单和提交件已按规则失效。`);
     } catch (reason: unknown) {
@@ -346,6 +350,27 @@ export function EvidenceWorkbench() {
       setIntakeNotice(`已载入 ${refreshed.filePage.loadedCount} / ${refreshed.filePage.totalCount} 个文件记录。`);
     } catch (reason: unknown) {
       setIntakeNotice(reason instanceof Error ? `${reason.message} 已载入记录仍保留。` : "后续文件记录载入失败；已载入记录仍保留。");
+    } finally {
+      setIntakeBusy(null);
+    }
+  }
+
+  async function enqueueFolderIntake() {
+    if (!folderIntake?.approvedScan || folderIntake.candidateScan || !folderGrant || !intakeRunConfirmed) return;
+    setIntakeBusy("enqueue");
+    setIntakeNotice(null);
+    try {
+      const receipt = await enqueueEvidenceIntakeRun(folderIntake, folderGrant.grantId);
+      const [refreshedReview, refreshedIntake] = await Promise.all([
+        loadEvidenceReview(),
+        loadLocalFolderIntake(),
+      ]);
+      setReview(refreshedReview);
+      setFolderIntake(refreshedIntake);
+      setIntakeRunConfirmed(false);
+      setIntakeNotice(`材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。只有本机安全扫描器与材料 Worker 已配置时才会逐文件处理，未配置时保持等待。`);
+    } catch (reason: unknown) {
+      setIntakeNotice(reason instanceof Error ? reason.message : "材料接收任务未建立");
     } finally {
       setIntakeBusy(null);
     }
@@ -556,6 +581,32 @@ export function EvidenceWorkbench() {
               <button disabled={!intakeConfirmed || intakeBusy !== null} onClick={() => void approveCaseFolderScan()} type="button">
                 {intakeBusy === "approve" ? "正在记录批准…" : "主办律师批准案卷范围"}
               </button>
+            </div>
+          )}
+          {!folderIntake.candidateScan && folderIntake.approvedScan && !folderIntake.intakeRun && (
+            <div className={styles.intakeApproval}>
+              <label className={styles.confirmLine}>
+                <input checked={intakeRunConfirmed} onChange={(event) => setIntakeRunConfirmed(event.target.checked)} type="checkbox" />
+                我确认从当前已批准范围建立材料接收任务；系统只读原件，逐文件复核哈希和本机恶意文件扫描结果
+              </label>
+              <button disabled={!folderGrant || !intakeRunConfirmed || intakeBusy !== null} onClick={() => void enqueueFolderIntake()} type="button">
+                {intakeBusy === "enqueue" ? "正在建立任务…" : "开始材料接收"}
+              </button>
+            </div>
+          )}
+          {folderIntake.intakeRun && (
+            <div className={styles.intakeRunPanel}>
+              <div>
+                <strong>{intakeRunStatusLabel(folderIntake.intakeRun.status)}</strong>
+                <small>接收任务 {folderIntake.intakeRun.runId.slice(0, 12)}… · 绑定盘点 {folderIntake.intakeRun.scanManifestHash.slice(0, 12)}…</small>
+              </div>
+              <div className={styles.intakeRunCounts}>
+                <span><strong>{folderIntake.intakeRun.registeredItems}</strong>已登记 PDF</span>
+                <span><strong>{folderIntake.intakeRun.queuedItems + folderIntake.intakeRun.runningItems}</strong>等待/处理中</span>
+                <span><strong>{folderIntake.intakeRun.reviewRequiredItems}</strong>需转换或人工处理</span>
+                <span><strong>{folderIntake.intakeRun.blockedItems + folderIntake.intakeRun.failedItems}</strong>已阻断/失败</span>
+              </div>
+              <p>非 PDF 文件不会被伪造成页级证据；图片、Word、Excel、邮件和压缩包会进入后续安全转换或人工处理队列。</p>
             </div>
           )}
           {intakeNotice && <div className={styles.auditNotice} role="status">{intakeNotice}</div>}
@@ -918,6 +969,13 @@ function runStatusLabel(status: string): string {
   if (status === "SUCCEEDED") return "生成完成";
   if (status === "FAILED") return "生成失败";
   return status;
+}
+
+function intakeRunStatusLabel(status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "PARTIAL"): string {
+  if (status === "QUEUED") return "材料接收任务已排队";
+  if (status === "RUNNING") return "本机正在核验并登记材料";
+  if (status === "SUCCEEDED") return "当前范围的材料已完成登记";
+  return "材料接收完成，但仍有需要处理的文件";
 }
 
 function folderChangeLabel(kind: LocalFolderIntakeView["files"][number]["changeKind"]): string {

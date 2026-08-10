@@ -32,6 +32,7 @@ from case_kernel.evidence_manifest_postgres import (
     PersistentLocalFolderFileListPage,
     PersistentLocalFolderIntakeSummary,
 )
+from case_kernel.evidence_intake_postgres import PersistentEvidenceIntakeSummary
 from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
@@ -322,6 +323,40 @@ class FakePersistentEvidenceStore:
             audit_event_id=str(uuid4()),
             object_type="LOCAL_FOLDER_SCAN",
             object_id=kwargs["scan_id"],
+        )
+
+    def get_current_evidence_intake_summary(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("evidence_intake_summary", {"matter_id": matter_id, "actor": actor}))
+        return PersistentEvidenceIntakeSummary(
+            matter_id=matter_id,
+            matter_version=5,
+            run={
+                "run_id": str(uuid4()),
+                "scan_id": self.folder_scan_id,
+                "scan_manifest_hash": "2" * 64,
+                "status": "QUEUED",
+                "total_items": 1,
+                "queued_items": 1,
+                "running_items": 0,
+                "registered_items": 0,
+                "review_required_items": 0,
+                "blocked_items": 0,
+                "failed_items": 0,
+                "created_at": datetime(2026, 8, 10, 8, 5, tzinfo=timezone.utc).isoformat(),
+                "completed_at": None,
+            },
+        )
+
+    def enqueue_evidence_intake_run(self, **kwargs):
+        self.calls.append(("enqueue_evidence_intake", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="ENQUEUE_EVIDENCE_INTAKE_RUN",
+            idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()),
+            object_type="EVIDENCE_INTAKE_RUN",
+            object_id=str(uuid4()),
         )
 
     def lock_manifest(self, **kwargs):
@@ -1103,6 +1138,7 @@ class PersistentApiTests(unittest.TestCase):
             scan_call = next(kwargs for name, kwargs in evidence_store.calls if name == "create_folder_scan")
             self.assertEqual(scan_call["manifest"].total_files, 1)
             self.assertNotIn(str(root), repr(scan_call["manifest"]))
+            current_manifest_hash = scan_call["manifest"].manifest_hash
             approved = client.post(
                 f"/v1/matters/{self.matter_id}/local-folder-scans/{evidence_store.folder_scan_id}/approve",
                 headers={"Idempotency-Key": "local-folder-approve-api-001"},
@@ -1111,6 +1147,23 @@ class PersistentApiTests(unittest.TestCase):
             self.assertEqual(approved.status_code, 200, approved.text)
             approve_call = next(kwargs for name, kwargs in evidence_store.calls if name == "approve_folder_scan")
             self.assertEqual(approve_call["manifest_hash"], "2" * 64)
+            intake_run = client.get(f"/v1/matters/{self.matter_id}/evidence-intake-runs/current")
+            self.assertEqual(intake_run.status_code, 200, intake_run.text)
+            self.assertEqual(intake_run.json()["run"]["queued_items"], 1)
+            queued = client.post(
+                f"/v1/matters/{self.matter_id}/evidence-intake-runs",
+                headers={"Idempotency-Key": "evidence-intake-enqueue-api-001"},
+                json={
+                    "expected_version": 5,
+                    "scan_id": evidence_store.folder_scan_id,
+                    "scan_manifest_hash": current_manifest_hash,
+                    "approval_hash": "5" * 64,
+                    "folder_grant_id": granted.json()["grant_id"],
+                },
+            )
+            self.assertEqual(queued.status_code, 201, queued.text)
+            queue_call = next(kwargs for name, kwargs in evidence_store.calls if name == "enqueue_evidence_intake")
+            self.assertEqual(queue_call["scan_id"], evidence_store.folder_scan_id)
             issued = client.post(
                 f"/v1/matters/{self.matter_id}/evidence-pages/{page_id}/original-preview/access",
                 json={"folder_grant_id": granted.json()["grant_id"]},

@@ -345,6 +345,62 @@ class LocalFolderGrantRegistry:
         except (OSError, FolderScanBlocked) as error:
             raise LocalFolderAccessBlocked("the selected case folder is unavailable or changed") from error
 
+    def resolve_scanned_original(
+        self,
+        *,
+        grant_id: str,
+        actor: Actor,
+        matter_id: str,
+        session: LocalSessionProof,
+        relative_path: str,
+        expected_sha256: str,
+        expected_byte_size: int,
+        now: datetime | None = None,
+    ) -> AuthorizedOriginalFile:
+        """Resolve one approved inventory row without rescanning or exposing the root."""
+
+        current = _aware_now(now)
+        _validate_actor_and_session(actor, matter_id=matter_id, session=session, now=current)
+        record = self._current_record(grant_id, current=current)
+        if (
+            record.handle.firm_id != actor.firm_id
+            or record.handle.matter_id != matter_id
+            or record.handle.actor_id != actor.actor_id
+            or record.handle.session_id != session.session_id
+        ):
+            raise LocalFolderAccessBlocked("local folder read grant is outside the authenticated scope")
+        if (
+            not relative_path
+            or relative_path.startswith("/")
+            or "\\" in relative_path
+            or any(part in {"", ".", ".."} for part in relative_path.split("/"))
+        ):
+            raise LocalFolderAccessBlocked("approved inventory relative path is invalid")
+        if len(expected_sha256) != 64 or any(character not in "0123456789abcdef" for character in expected_sha256):
+            raise LocalFolderAccessBlocked("approved inventory SHA-256 is invalid")
+        if expected_byte_size < 0:
+            raise LocalFolderAccessBlocked("approved inventory byte size is invalid")
+        raw_path = record.resolved_root.joinpath(*relative_path.split("/"))
+        try:
+            if raw_path.is_symlink():
+                raise LocalFolderAccessBlocked("approved inventory file cannot be a symbolic link")
+            path = raw_path.resolve(strict=True)
+            root_stat = record.resolved_root.stat()
+            if root_stat.st_dev != record.device or root_stat.st_ino != record.inode:
+                raise LocalFolderAccessBlocked("the selected case folder changed after authorization")
+            if not path.is_file() or not path.is_relative_to(record.resolved_root):
+                raise LocalFolderAccessBlocked("approved inventory file escaped the authorized folder")
+            if path.stat().st_size != expected_byte_size or _hash_file(path) != expected_sha256:
+                raise LocalFolderAccessBlocked("approved inventory file changed after the lawyer-approved scan")
+        except OSError as error:
+            raise LocalFolderAccessBlocked("approved inventory file is unavailable or changed") from error
+        return AuthorizedOriginalFile(
+            relative_path=relative_path,
+            path=path,
+            byte_size=expected_byte_size,
+            sha256=expected_sha256,
+        )
+
     def _current_record(self, grant_id: str, *, current: datetime) -> _FolderGrantRecord:
         try:
             UUID(grant_id)

@@ -377,6 +377,16 @@
 .securityNotice { margin-top: 18px; padding: 14px 16px; display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
 .securityNotice strong { color: var(--red); }
 
+.intakeRunPanel { margin-top: 12px; padding: 12px; display: grid; gap: 10px; border: 1px solid #b8c7bd; background: #f3f7f3; }
+.intakeRunPanel > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
+.intakeRunPanel > div:first-child strong { font: 600 14px var(--font-serif); }
+.intakeRunPanel > div:first-child small { color: var(--ink-faint); font-size: 9px; }
+.intakeRunPanel p { margin: 0; color: var(--ink-soft); font-size: 9px; line-height: 1.55; }
+.intakeRunCounts { display: grid; grid-template-columns: repeat(4,minmax(110px,1fr)); border: 1px solid #cbd6ce; }
+.intakeRunCounts span { padding: 8px 10px; display: grid; gap: 2px; color: var(--ink-faint); border-right: 1px solid #cbd6ce; font-size: 9px; }
+.intakeRunCounts span:last-child { border-right: 0; }
+.intakeRunCounts strong { color: var(--ink); font: 600 15px var(--font-serif); }
+
 @media (max-width: 1360px) {
   .topbar, .caseHeader, .footer { padding-right: 24px; padding-left: 24px; }.caseSubline { max-width: 615px; }.content { padding-right: 28px; padding-left: 28px; }.evidenceArea { padding-right: 20px; padding-left: 20px; }.evidenceColumns { grid-template-columns: 194px minmax(410px,1fr) 252px; }.documentStage { padding-right: 17px; padding-left: 17px; }.documentPaper { padding-right: 32px; padding-left: 32px; }.topbarMeta span:first-child { display: none; }
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }

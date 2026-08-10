@@ -1949,6 +1949,30 @@ class PostgresEvidenceManifestStore:
             )
             if updated.rowcount != 1:
                 raise CaseLedgerPersistenceBlocked("local folder scan changed before approval")
+            connection.execute(
+                """
+                UPDATE evidence_intake_items item
+                SET status = 'STALE', lease_id = NULL, lease_expires_at = NULL,
+                    stale_at = now(), updated_at = now()
+                WHERE item.matter_id = %s AND item.firm_id = %s AND item.status <> 'STALE'
+                  AND EXISTS (
+                      SELECT 1 FROM evidence_intake_runs run
+                      WHERE run.run_id = item.run_id AND run.matter_id = item.matter_id
+                        AND run.firm_id = item.firm_id AND run.status <> 'STALE'
+                  )
+                """,
+                (matter_id, actor.firm_id),
+            )
+            connection.execute(
+                """
+                UPDATE evidence_intake_runs
+                SET status = 'STALE', stale_at = now(),
+                    stale_reason = '律师批准了新的案卷文件范围，旧材料接收任务已失效。',
+                    updated_at = now()
+                WHERE matter_id = %s AND firm_id = %s AND status <> 'STALE'
+                """,
+                (matter_id, actor.firm_id),
+            )
             _invalidate_current_evidence_outputs(
                 connection,
                 matter_id=matter_id,
