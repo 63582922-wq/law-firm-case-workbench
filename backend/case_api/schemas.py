@@ -1292,6 +1292,8 @@ class PersistentSubmissionQaRequest(BaseModel):
     legal_bundle_id: UUID
     calculation_run_id: UUID
     final_text_approval_id: UUID
+    consistency_review_id: UUID
+    consistency_output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_qa_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -1415,6 +1417,49 @@ class PersistentAgentExecutionSnapshotResponse(BaseModel):
     runs: tuple[dict[str, Any], ...]
     proposals: tuple[dict[str, Any], ...]
     receipts: tuple[dict[str, Any], ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentDocumentConsistencyReviewedDocumentRequest(BaseModel):
+    work_product_id: UUID
+    review_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentDocumentConsistencyFindingRequest(BaseModel):
+    finding_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    work_product_id: UUID
+    severity: Literal["BLOCKING", "WARNING"]
+    code: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,119}$")
+    field_id_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    source_refs_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentDocumentConsistencyReviewRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    canonical_fields_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    output_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    documents: list[PersistentDocumentConsistencyReviewedDocumentRequest] = Field(min_length=1, max_length=100)
+    findings: list[PersistentDocumentConsistencyFindingRequest] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="after")
+    def bindings_are_unique(self):
+        document_ids = [str(item.work_product_id) for item in self.documents]
+        finding_ids = [item.finding_id for item in self.findings]
+        if len(set(document_ids)) != len(document_ids):
+            raise ValueError("document consistency work-product bindings must be unique")
+        if len(set(finding_ids)) != len(finding_ids):
+            raise ValueError("document consistency finding identifiers must be unique")
+        if any(str(item.work_product_id) not in set(document_ids) for item in self.findings):
+            raise ValueError("document consistency finding must belong to a reviewed work product")
+        return self
+
+
+class PersistentDocumentConsistencySnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    reviews: tuple[dict[str, Any], ...]
+    findings: tuple[dict[str, Any], ...]
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 

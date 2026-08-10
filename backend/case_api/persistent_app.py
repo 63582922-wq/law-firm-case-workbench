@@ -81,6 +81,12 @@ from case_kernel.agent_execution_postgres import (
     PersistentAgentExecutionSnapshot,
     PostgresAgentExecutionStore,
 )
+from case_kernel.document_consistency_postgres import (
+    PersistentDocumentConsistencySnapshot,
+    PostgresDocumentConsistencyReviewStore,
+    PersistedDocumentConsistencyFinding,
+    ReviewedWorkProduct,
+)
 from case_kernel.external_request_postgres import (
     ExternalRequestPreflight,
     PersistentExternalRequestSnapshot,
@@ -186,6 +192,9 @@ from .schemas import (
     PersistentAgentExecutionSnapshotResponse,
     PersistentAgentRunRequest,
     PersistentAgentToolReceiptRequest,
+    PersistentDocumentConsistencyFindingRequest,
+    PersistentDocumentConsistencyReviewRequest,
+    PersistentDocumentConsistencySnapshotResponse,
     PersistentExternalRequestAttemptRequest,
     PersistentExternalRequestPreflightRequest,
     PersistentExternalRequestSnapshotResponse,
@@ -361,6 +370,14 @@ class PersistentAgentExecutionPort(Protocol):
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentAgentExecutionSnapshot: ...
 
 
+class PersistentDocumentConsistencyPort(Protocol):
+    def record_review(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_snapshot(
+        self, *, matter_id: str, actor: Actor
+    ) -> PersistentDocumentConsistencySnapshot: ...
+
+
 class PersistentExternalRequestPort(Protocol):
     def authorize_external_request(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -407,6 +424,10 @@ class PersistentAgentExecutionServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentDocumentConsistencyServiceUnavailable(RuntimeError):
+    pass
+
+
 class PersistentExternalRequestServiceUnavailable(RuntimeError):
     pass
 
@@ -424,6 +445,7 @@ class PersistentApiDependencies:
     submission_store: PersistentSubmissionPort | None = None
     reviewable_draft_store: PersistentReviewableDraftPort | None = None
     agent_execution_store: PersistentAgentExecutionPort | None = None
+    document_consistency_store: PersistentDocumentConsistencyPort | None = None
     external_request_store: PersistentExternalRequestPort | None = None
     submission_access_broker: SubmissionExportAccessBroker | None = None
     reviewable_draft_access_broker: ReviewableOfficeDraftAccessBroker | None = None
@@ -477,6 +499,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.agent_execution_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL Agent execution store")
+        if self.document_consistency_store is not None and not isinstance(
+            self.document_consistency_store, PostgresDocumentConsistencyReviewStore
+        ):
+            if not getattr(self.document_consistency_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL document consistency store")
         if self.external_request_store is not None and not isinstance(
             self.external_request_store, PostgresExternalRequestStore
         ):
@@ -574,6 +601,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "submission": "configured" if dependencies.submission_store else "not-configured",
             "reviewable_drafts": "configured" if dependencies.reviewable_draft_store else "not-configured",
             "agent_execution": "configured" if dependencies.agent_execution_store else "not-configured",
+            "document_consistency": "configured" if dependencies.document_consistency_store else "not-configured",
             "external_request": "configured" if dependencies.external_request_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
@@ -643,6 +671,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "Agent execution persistence is not configured"
             )
         return dependencies.agent_execution_store
+
+    def get_document_consistency_store() -> PersistentDocumentConsistencyPort:
+        if dependencies.document_consistency_store is None:
+            raise PersistentDocumentConsistencyServiceUnavailable(
+                "document consistency persistence is not configured"
+            )
+        return dependencies.document_consistency_store
 
     def get_external_request_store() -> PersistentExternalRequestPort:
         if dependencies.external_request_store is None:
@@ -792,6 +827,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "AGENT_EXECUTION_SERVICE_UNAVAILABLE",
             "Agent 计划与工具审计服务尚未启用，系统不会回退到内存记录。",
+        )
+
+    @app.exception_handler(PersistentDocumentConsistencyServiceUnavailable)
+    async def document_consistency_service_handler(_: Request, exc: PersistentDocumentConsistencyServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "DOCUMENT_CONSISTENCY_SERVICE_UNAVAILABLE",
+            "文书一致性审查服务尚未启用，系统不会把旧报告当作当前有效。",
         )
 
     @app.exception_handler(PersistentExternalRequestServiceUnavailable)
@@ -1469,6 +1513,59 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         )
 
     @app.get(
+        "/v1/matters/{matter_id}/document-consistency-reviews",
+        response_model=PersistentDocumentConsistencySnapshotResponse,
+        tags=["document-consistency"],
+    )
+    async def get_document_consistency_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        consistency_store: Annotated[
+            PersistentDocumentConsistencyPort, Depends(get_document_consistency_store)
+        ],
+    ) -> PersistentDocumentConsistencySnapshotResponse:
+        snapshot = consistency_store.get_snapshot(matter_id=str(matter_id), actor=identity.actor)
+        return PersistentDocumentConsistencySnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/document-consistency-reviews",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["document-consistency"],
+    )
+    async def record_document_consistency_review(
+        matter_id: UUID,
+        body: PersistentDocumentConsistencyReviewRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        consistency_store: Annotated[
+            PersistentDocumentConsistencyPort, Depends(get_document_consistency_store)
+        ],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            consistency_store.record_review(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                canonical_fields_hash=body.canonical_fields_hash, input_hash=body.input_hash,
+                output_hash=body.output_hash,
+                documents=tuple(
+                    ReviewedWorkProduct(
+                        work_product_id=str(item.work_product_id),
+                        review_input_hash=item.review_input_hash,
+                    ) for item in body.documents
+                ),
+                findings=tuple(
+                    PersistedDocumentConsistencyFinding(
+                        finding_id=item.finding_id, work_product_id=str(item.work_product_id),
+                        severity=item.severity, code=item.code,
+                        field_id_hash=item.field_id_hash,
+                        source_refs_hash=item.source_refs_hash,
+                    ) for item in body.findings
+                ),
+            )
+        )
+
+    @app.get(
         "/v1/matters/{matter_id}/external-requests",
         response_model=PersistentExternalRequestSnapshotResponse,
         tags=["external-requests"],
@@ -1626,6 +1723,8 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 legal_bundle_id=str(body.legal_bundle_id),
                 calculation_run_id=str(body.calculation_run_id),
                 final_text_approval_id=str(body.final_text_approval_id),
+                consistency_review_id=str(body.consistency_review_id),
+                consistency_output_hash=body.consistency_output_hash,
                 expected_qa_hash=body.expected_qa_hash,
             )
         )

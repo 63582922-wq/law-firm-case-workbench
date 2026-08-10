@@ -69,6 +69,12 @@ class FakeSubmissionConnection:
         self.legal_bundle_id = str(uuid4())
         self.calculation_run_id = str(uuid4())
         self.final_approval_id = str(uuid4())
+        self.consistency_review_id = str(uuid4())
+        self.consistency_input_hash = "8" * 64
+        self.consistency_output_hash = "9" * 64
+        self.consistency_status = "PASS"
+        self.consistency_blocking_count = 0
+        self.consistency_reviewed_version = 1
         self.final_text_hash = "d" * 64
         self.work_product_ids = [str(uuid4()) for _ in range(4)]
         self.product_rows = [
@@ -81,6 +87,7 @@ class FakeSubmissionConnection:
                 "artifact_sha256": "a" * 64,
                 "byte_size": 101,
                 "semantic_text_sha256": self.final_text_hash,
+                "review_input_hash": "f" * 64,
                 "status": "APPROVED",
                 "approval_hash": "1" * 64,
             },
@@ -93,6 +100,7 @@ class FakeSubmissionConnection:
                 "artifact_sha256": "b" * 64,
                 "byte_size": 102,
                 "semantic_text_sha256": None,
+                "review_input_hash": "e" * 64,
                 "status": "APPROVED",
                 "approval_hash": "2" * 64,
             },
@@ -105,6 +113,7 @@ class FakeSubmissionConnection:
                 "artifact_sha256": "c" * 64,
                 "byte_size": 103,
                 "semantic_text_sha256": None,
+                "review_input_hash": "c" * 64,
                 "status": "APPROVED",
                 "approval_hash": "3" * 64,
             },
@@ -117,6 +126,7 @@ class FakeSubmissionConnection:
                 "artifact_sha256": "e" * 64,
                 "byte_size": 104,
                 "semantic_text_sha256": None,
+                "review_input_hash": "b" * 64,
                 "status": "APPROVED",
                 "approval_hash": "4" * 64,
             },
@@ -191,6 +201,25 @@ class FakeSubmissionConnection:
                     "revoked_at": None,
                 }
             )
+        if "FROM document_consistency_reviews" in normalized:
+            return FakeResult(
+                row={
+                    "review_id": self.consistency_review_id,
+                    "input_hash": self.consistency_input_hash,
+                    "output_hash": self.consistency_output_hash,
+                    "blocking_count": self.consistency_blocking_count,
+                    "reviewed_matter_version": self.consistency_reviewed_version,
+                    "status": self.consistency_status,
+                }
+            )
+        if "FROM document_consistency_review_documents" in normalized:
+            return FakeResult(rows=[
+                {
+                    "work_product_id": row["work_product_id"],
+                    "review_input_hash": row["review_input_hash"],
+                }
+                for row in self.product_rows
+            ])
         if "SELECT bundle.lifecycle" in normalized and "manifest.status" in normalized:
             return FakeResult(
                 row={
@@ -305,6 +334,9 @@ class SubmissionStoreTests(unittest.TestCase):
                 calculation_output_hash="7" * 64,
                 final_text_approval_id=connection.final_approval_id,
                 final_text_hash=connection.final_text_hash,
+                consistency_review_id=connection.consistency_review_id,
+                consistency_input_hash=connection.consistency_input_hash,
+                consistency_output_hash=connection.consistency_output_hash,
                 approved_by=self.lead.actor_id,
             )
         )
@@ -408,6 +440,8 @@ class SubmissionStoreTests(unittest.TestCase):
                 legal_bundle_id=connection.legal_bundle_id,
                 calculation_run_id=connection.calculation_run_id,
                 final_text_approval_id=connection.final_approval_id,
+                consistency_review_id=connection.consistency_review_id,
+                consistency_output_hash=connection.consistency_output_hash,
                 expected_qa_hash=self.qa_hash(connection),
             ),
         )
@@ -448,11 +482,40 @@ class SubmissionStoreTests(unittest.TestCase):
                     legal_bundle_id=connection.legal_bundle_id,
                     calculation_run_id=connection.calculation_run_id,
                     final_text_approval_id=connection.final_approval_id,
+                    consistency_review_id=connection.consistency_review_id,
+                    consistency_output_hash=connection.consistency_output_hash,
                     expected_qa_hash=self.qa_hash(connection),
                 ),
             )
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertNotIn("INSERT INTO submission_bundles", sql)
+
+    def test_qa_bundle_rejects_blocked_or_stale_document_consistency_review(self) -> None:
+        connection = FakeSubmissionConnection()
+        connection.consistency_status = "BLOCKED"
+        connection.consistency_blocking_count = 1
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "current passing document consistency"):
+            self.run_with(
+                connection,
+                lambda: self.store.create_qa_ready_bundle(
+                    matter_id=self.matter_id, actor=self.lead, expected_version=1,
+                    idempotency_key="submission-qa-blocked-consistency-001",
+                    selections=self.selections(connection),
+                    required_document_kinds=(
+                        "DEFENCE_STATEMENT", "EVIDENCE_INDEX", "EVIDENCE_MATERIAL", "INTEREST_CALCULATION",
+                    ),
+                    evidence_manifest_id=connection.manifest_id, legal_bundle_id=connection.legal_bundle_id,
+                    calculation_run_id=connection.calculation_run_id,
+                    final_text_approval_id=connection.final_approval_id,
+                    consistency_review_id=connection.consistency_review_id,
+                    consistency_output_hash=connection.consistency_output_hash,
+                    expected_qa_hash=self.qa_hash(connection),
+                ),
+            )
+        self.assertNotIn(
+            "INSERT INTO submission_bundles",
+            "\n".join(statement for statement, _ in connection.executed),
+        )
 
     def test_lock_sets_unique_current_pointer_without_staling_dependencies(self) -> None:
         connection = FakeSubmissionConnection(stage="READY_TO_EXPORT")

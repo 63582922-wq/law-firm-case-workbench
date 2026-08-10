@@ -95,6 +95,7 @@ def build_desktop_persistent_runtime(
             services.submission_store,
             services.reviewable_draft_store,
             services.agent_execution_store,
+            services.document_consistency_store,
             services.external_request_store,
             services.artifact_store,
         )
@@ -116,6 +117,7 @@ def build_desktop_persistent_runtime(
         submission_store=services.submission_store,
         reviewable_draft_store=services.reviewable_draft_store,
         agent_execution_store=services.agent_execution_store,
+        document_consistency_store=services.document_consistency_store,
         external_request_store=services.external_request_store,
         artifact_access_broker=EphemeralArtifactAccessBroker(),
         submission_access_broker=SubmissionExportAccessBroker(),

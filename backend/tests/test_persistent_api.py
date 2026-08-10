@@ -43,6 +43,7 @@ from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
 from case_kernel.agent_execution_postgres import PersistentAgentExecutionSnapshot
+from case_kernel.document_consistency_postgres import PersistentDocumentConsistencySnapshot
 from case_kernel.external_request_postgres import PersistentExternalRequestSnapshot
 from case_kernel.reviewable_draft_access import (
     ReviewableDraftAccessPurpose,
@@ -720,6 +721,31 @@ class FakePersistentAgentExecutionStore:
             proposals=(), receipts=(), snapshot_hash="c" * 64,
         )
 
+
+class FakePersistentDocumentConsistencyStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def record_review(self, **kwargs):
+        self.calls.append(("record_review", kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name="RECORD_DOCUMENT_CONSISTENCY_REVIEW",
+            idempotency_key=kwargs["idempotency_key"], matter_id=kwargs["matter_id"],
+            matter_version=kwargs["expected_version"] + 1, audit_event_id=str(uuid4()),
+            object_type="DOCUMENT_CONSISTENCY_REVIEW", object_id=str(uuid4()),
+        )
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentDocumentConsistencySnapshot(
+            matter_id=matter_id, matter_version=12,
+            reviews=({"review_id": str(uuid4()), "status": "PASS", "input_hash": "a" * 64,
+                      "output_hash": "b" * 64, "blocking_count": 0, "warning_count": 1},),
+            findings=({"finding_id": "c" * 64, "severity": "WARNING", "code": "MISSING_SOURCE_REFS"},),
+            snapshot_hash="d" * 64,
+        )
 
 class FakePersistentExternalRequestStore:
     persistent_test_double = True
@@ -1795,6 +1821,7 @@ class PersistentApiTests(unittest.TestCase):
         legal_bundle_id = str(uuid4())
         calculation_run_id = str(uuid4())
         final_approval_id = str(uuid4())
+        consistency_review_id = str(uuid4())
         qa = client.post(
             f"/v1/matters/{self.matter_id}/submission-bundles/qa-ready",
             headers={"Idempotency-Key": "submission-qa-api-001"},
@@ -1817,6 +1844,8 @@ class PersistentApiTests(unittest.TestCase):
                 "legal_bundle_id": legal_bundle_id,
                 "calculation_run_id": calculation_run_id,
                 "final_text_approval_id": final_approval_id,
+                "consistency_review_id": consistency_review_id,
+                "consistency_output_hash": "d" * 64,
                 "expected_qa_hash": "b" * 64,
             },
         )
@@ -1824,6 +1853,7 @@ class PersistentApiTests(unittest.TestCase):
         qa_call = next(call for name, call in submission_store.calls if name == "create_qa_ready_bundle")
         self.assertEqual(qa_call["actor"], self.identity.actor)
         self.assertEqual(qa_call["evidence_manifest_id"], manifest_id)
+        self.assertEqual(qa_call["consistency_review_id"], consistency_review_id)
         self.assertEqual(qa_call["selections"][0].court_filename, "01_民事答辩状.pdf")
 
         locked = client.post(
@@ -2041,6 +2071,45 @@ class PersistentApiTests(unittest.TestCase):
         response = client.get(f"/v1/matters/{self.matter_id}/agent-executions")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["code"], "AGENT_EXECUTION_SERVICE_UNAVAILABLE")
+
+    def test_document_consistency_routes_keep_findings_hash_only_and_bind_server_identity(self) -> None:
+        consistency_store = FakePersistentDocumentConsistencyStore()
+        client = TestClient(create_persistent_app(PersistentApiDependencies(
+            settings=self.settings, case_ledger_store=FakePersistentFactStore(),
+            identity_resolver=StaticIdentityResolver(self.identity),
+            document_consistency_store=consistency_store,
+        )))
+        snapshot = client.get(f"/v1/matters/{self.matter_id}/document-consistency-reviews")
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertNotIn("canonical_value", snapshot.text)
+        product_id = str(uuid4())
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/document-consistency-reviews",
+            headers={"Idempotency-Key": "document-consistency-api-001"},
+            json={
+                "expected_version": 12, "canonical_fields_hash": "a" * 64,
+                "input_hash": "b" * 64, "output_hash": "c" * 64,
+                "documents": [{"work_product_id": product_id, "review_input_hash": "d" * 64}],
+                "findings": [{"finding_id": "e" * 64, "work_product_id": product_id,
+                              "severity": "WARNING", "code": "MISSING_SOURCE_REFS",
+                              "field_id_hash": None, "source_refs_hash": "f" * 64}],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        name, call = next(item for item in consistency_store.calls if item[0] == "record_review")
+        self.assertEqual(name, "record_review")
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["documents"][0].work_product_id, product_id)
+        self.assertEqual(call["findings"][0].field_id_hash, None)
+
+    def test_document_consistency_routes_fail_closed_without_store(self) -> None:
+        client = TestClient(create_persistent_app(PersistentApiDependencies(
+            settings=self.settings, case_ledger_store=FakePersistentFactStore(),
+            identity_resolver=StaticIdentityResolver(self.identity),
+        )))
+        response = client.get(f"/v1/matters/{self.matter_id}/document-consistency-reviews")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "DOCUMENT_CONSISTENCY_SERVICE_UNAVAILABLE")
 
     def test_external_preflight_route_records_only_bound_metadata(self) -> None:
         external_store = FakePersistentExternalRequestStore()

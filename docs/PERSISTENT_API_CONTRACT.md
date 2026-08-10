@@ -48,6 +48,8 @@ WebView 的全部正式案件请求现统一通过受控客户端：桌面模式
 
 `/v1/matters/{matter_id}/agent-executions` 是受控 Agent 审计面：读取只返回 Agent Run、Tool 提案和执行回执的版本/哈希/范围元数据；创建计划要求案件版本与幂等键，服务端重新检查提案连续性并交给持久层验证该 Skill/Tool 已启用。`/{proposal_id}/receipts` 只为受控系统 Worker 记录成功输出哈希或稳定错误码。任何计划都不等于工具授权；真正执行仍须再次经过 CaseSkillRegistry、案件范围与律师审批门。未注入该持久服务时接口返回 503，绝不使用进程内记录回退。
 
+`/v1/matters/{matter_id}/document-consistency-reviews` 是文书一致性审查的只读快照和 SYSTEM_WORKER 记录面。记录请求只含已批准 PDF 工作产物 UUID、共同 `review_input_hash`、报告/字段/来源哈希和发现代码；接口不接收文书正文、律师确认值或提示词。持久层对每一个绑定重查同案已批准工作产物，并重算安全报告投影哈希；律师和普通 Agent 不能伪造 `PASS`。创建提交 QA 时还会重查该记录覆盖的工作产物集合、版本和 `blocking_count=0`，任一不一致返回阻断错误。未注入服务时接口返回 503，不把内存报告当作当前审查。
+
 `/v1/matters/{matter_id}/external-requests` 是外部模型、OCR 与 MCP 的预授权面：主办/复核律师提交目的、字段标识、供应商、处理地域、保留/训练政策、服务名、次数、带 ISO 4217 币种的成本上限、输入/授权哈希和到期时间；系统 Worker 才能向 `/{request_id}/attempts` 写入“已提交”、成功或稳定失败回执。持久层拒绝无预授权、过期、超过次数上限、终态重试和 `UNKNOWN_SUBMISSION` 后的自动重试。该接口不接收供应商密钥、提示词或原始案卷正文。
 
 启动重验与短时 identity authority 已装配到打包 sidecar。其持久化装配只使用 `DesktopSessionAuthority` 作为同一个 API 的身份解析器，不复制或下放 actor、firm、role；文件夹授权和所有一次性文件许可也只在该 sidecar 进程内存活。仓库固定的生产信任目录仍为 `NOT_CONFIGURED`，专用 PostgreSQL、Keychain 工件密钥和私有对象目录也未配置。没有律所真实信任根、签发/续期/撤销服务和数据库逐案授权时，产品不会形成真实登录或开放案件路由。

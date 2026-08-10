@@ -4,7 +4,7 @@
 
 ## 目的与边界
 
-`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据使用 `PostgresEvidenceIntakeStore`（扩展 Manifest Store）保存版本化案卷盘点、逐文件材料接收租约、不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest 和派生件谱系。`case_kernel.legal_source_postgres.PostgresLegalSourceStore` 保存经人工核验的官方来源快照、服务端派生的规则版本、案件法律事件、关键事实绑定和不可变规则包；`PostgresOfficialSourceCaptureStore` 独立保存律师授权、一次抓取租约、加密内容回执、解析摘要和 append-only 复核结论。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 保存逐期本金、利息、逐笔冲抵和独立复算谱系。`case_kernel.submission_postgres.PostgresSubmissionStore` 保存已批准法院 PDF 成品、QA 编译规格、文件顺序和名称、四项正式依赖以及已核验导出。`PostgresAgentExecutionStore` 仅保存 Agent 计划、准许使用的 Skill/Tool、范围/审批门、输入输出哈希和执行结果；它不保存提示词或案卷正文，且计划本身不授予执行权限。`PostgresExternalRequestStore` 保存外部模型、OCR 或 MCP 的律师预授权与系统 Worker 回执，固定字段标识、供应商/地域/保留/训练政策、次数、带 ISO 4217 币种的成本上限及输入/授权哈希；`UNKNOWN_SUBMISSION` 阻断自动重试。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0018_external_request_cost_currency.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
+`case_kernel.postgres_store.PostgresMatterStore` 是案件状态机的生产标识适配器；`case_kernel.case_ledger_postgres.PostgresCaseLedgerStore` 负责事实、诉请、回应、争点、交易、付款分类/分配与重复组命令。证据使用 `PostgresEvidenceIntakeStore`（扩展 Manifest Store）保存版本化案卷盘点、逐文件材料接收租约、不可变原件/页、页级处置、重复结论、红框坐标、锁定 Manifest 和派生件谱系。`case_kernel.legal_source_postgres.PostgresLegalSourceStore` 保存经人工核验的官方来源快照、服务端派生的规则版本、案件法律事件、关键事实绑定和不可变规则包；`PostgresOfficialSourceCaptureStore` 独立保存律师授权、一次抓取租约、加密内容回执、解析摘要和 append-only 复核结论。`case_kernel.formal_calculation_postgres.PostgresFormalCalculationStore` 保存逐期本金、利息、逐笔冲抵和独立复算谱系。`PostgresDocumentConsistencyReviewStore` 只保存已经批准的 PDF 工作产物绑定、审查输入/输出/字段/来源哈希和阻断/警示代码，并让提交 QA 复核精确覆盖集与当前版本；不保存文书正文、确认值或提示词。`case_kernel.submission_postgres.PostgresSubmissionStore` 保存已批准法院 PDF 成品、QA 编译规格、文件顺序和名称、正式依赖、无阻断的一致性审查以及已核验导出。`PostgresAgentExecutionStore` 仅保存 Agent 计划、准许使用的 Skill/Tool、范围/审批门、输入输出哈希和执行结果；它不保存提示词或案卷正文，且计划本身不授予执行权限。`PostgresExternalRequestStore` 保存外部模型、OCR 或 MCP 的律师预授权与系统 Worker 回执，固定字段标识、供应商/地域/保留/训练政策、次数、带 ISO 4217 币种的成本上限及输入/授权哈希；`UNKNOWN_SUBMISSION` 阻断自动重试。它们要求 PostgreSQL 16+，并按文件名顺序执行 `backend/migrations/0001_core.sql` 至 `backend/migrations/0019_document_consistency_reviews.sql`；身份/成员关系服务须预先创建 UUID 律所、用户及案件角色数据。
 
 它们不属于当前 Web/API 的合成 Alpha 运行路径。`alpha_*` 标识符会在建立数据库连接之前被拒绝；这条限制防止测试页面意外写入持久化环境。台账适配器还会在数据库内复核调用人具有本案未撤销且用户状态有效的角色，不能只信任请求携带的角色声明。
 
@@ -29,7 +29,7 @@
 
 正式登记必须另外保存许可核验依据及其哈希。抓取转登记端点不接受对象键、发布者、效力层级、URL、内容哈希或条文定位的浏览器副本，而是锁定并读取同案抓取/复核记录、重新认证加密对象，再由服务端生成正式验证哈希。旧快照可以继续显示，但许可依据/哈希缺失时不得支撑新的规则版本或规则包。
 
-提交编译命令只接受 `CNY`、同案 `APPROVED` 且面向 `COURT_SUBMISSION` 的 PDF。QA 哈希绑定文件标识、顺序、法院文件名、锁定证据 Manifest、已批准法律规则包、同规则包的 `VERIFIED` 计算及当前最终文本审批。SYSTEM_WORKER 对法院 ZIP 和独立内部清单执行第二次结构/哈希核验后才能登记导出；读取对象键只允许系统 Worker，律师快照不包含对象键。导出内容只可由主办/复核律师通过 OS 绑定会话和 loopback 一次性许可读取。
+提交编译命令只接受 `CNY`、同案 `APPROVED` 且面向 `COURT_SUBMISSION` 的 PDF。QA 哈希绑定文件标识、顺序、法院文件名、锁定证据 Manifest、已批准法律规则包、同规则包的 `VERIFIED` 计算、当前最终文本审批，以及覆盖完全相同 PDF 集合的当前 `PASS` 文书一致性审查。SYSTEM_WORKER 对法院 ZIP 和独立内部清单执行第二次结构/哈希核验后才能登记导出；读取对象键只允许系统 Worker，律师快照不包含对象键。导出内容只可由主办/复核律师通过 OS 绑定会话和 loopback 一次性许可读取。
 
 事实、诉请、交易等候选不会直接成为正式结论；律师确认、回应、争点确认、付款分类批准和重复组结论才触发正式上游失效。诉请回应到事实、争点到事实/诉请、付款分类到债务分配、重复组到原交易均使用同律所同案件的正规化关联表；重复候选的处理只选择规范交易，不删除任何来源交易。
 

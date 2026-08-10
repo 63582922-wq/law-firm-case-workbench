@@ -10,6 +10,7 @@
 
 - 案件必须位于 `READY_TO_EXPORT`，并有唯一当前 `VALID + LOCKED` 提交包；
 - 文件必须是同案、`APPROVED`、`COURT_SUBMISSION`、`application/pdf` 且按明文 SHA-256 内容寻址的成品；
+- QA 必须引用一份当前 `PASS` 的文书一致性审查：它要覆盖完全相同的工作产物与 `review_input_hash`，绑定当前案件版本，且 `blocking_count=0`；任何文书或材料替换、审查阻断项或版本变化均不能沿用旧审查；
 - 币种固定为 `CNY`；
 - QA 哈希绑定文件标识、顺序、法院文件名和批准哈希；
 - 依赖必须同时包括当前锁定证据 Manifest、已批准法律规则包、使用该规则包的已核验计算、当前最终文本审批；

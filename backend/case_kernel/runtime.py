@@ -24,6 +24,7 @@ from .official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from .postgres_store import PostgresMatterStore
 from .reviewable_draft_postgres import PostgresReviewableDraftStore
 from .agent_execution_postgres import PostgresAgentExecutionStore
+from .document_consistency_postgres import PostgresDocumentConsistencyReviewStore
 from .external_request_postgres import PostgresExternalRequestStore
 from .submission_postgres import PostgresSubmissionStore
 from .store import InMemoryMatterStore, MatterStore
@@ -117,6 +118,7 @@ class RuntimeServices:
     submission_store: PostgresSubmissionStore | None
     reviewable_draft_store: PostgresReviewableDraftStore | None
     agent_execution_store: PostgresAgentExecutionStore | None
+    document_consistency_store: PostgresDocumentConsistencyReviewStore | None
     external_request_store: PostgresExternalRequestStore | None
     artifact_store: LocalEncryptedArtifactStore | None
     office_pdf_converter: SandboxedOfficePdfConverter | None
@@ -149,6 +151,7 @@ def build_runtime_services(
             submission_store=None,
             reviewable_draft_store=None,
             agent_execution_store=None,
+            document_consistency_store=None,
             external_request_store=None,
             artifact_store=None,
             office_pdf_converter=None,
@@ -182,6 +185,7 @@ def build_runtime_services(
             dsn, artifact_reader=artifact_reader
         ),
         agent_execution_store=PostgresAgentExecutionStore(dsn),
+        document_consistency_store=PostgresDocumentConsistencyReviewStore(dsn),
         external_request_store=PostgresExternalRequestStore(dsn),
         artifact_store=artifact_store,
         office_pdf_converter=office_converter,

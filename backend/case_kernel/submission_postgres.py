@@ -316,6 +316,8 @@ class PostgresSubmissionStore:
         legal_bundle_id: str,
         calculation_run_id: str,
         final_text_approval_id: str,
+        consistency_review_id: str,
+        consistency_output_hash: str,
         expected_qa_hash: str,
     ) -> CaseLedgerCommandReceipt:
         self._validate_command(
@@ -330,8 +332,10 @@ class PostgresSubmissionStore:
             ("legal_bundle_id", legal_bundle_id),
             ("calculation_run_id", calculation_run_id),
             ("final_text_approval_id", final_text_approval_id),
+            ("consistency_review_id", consistency_review_id),
         ):
             _validate_uuid(label, value)
+        _validate_sha256("consistency_output_hash", consistency_output_hash)
         _validate_sha256("expected_qa_hash", expected_qa_hash)
         command_name = "CREATE_QA_READY_SUBMISSION_BUNDLE"
         request_payload = {
@@ -350,6 +354,8 @@ class PostgresSubmissionStore:
             "legal_bundle_id": legal_bundle_id,
             "calculation_run_id": calculation_run_id,
             "final_text_approval_id": final_text_approval_id,
+            "consistency_review_id": consistency_review_id,
+            "consistency_output_hash": consistency_output_hash,
             "expected_qa_hash": expected_qa_hash,
         }
         request_hash = _payload_hash(request_payload)
@@ -395,6 +401,18 @@ class PostgresSubmissionStore:
             if len(defence_products) != 1 or defence_products[0]["semantic_text_sha256"] is None:
                 raise CaseLedgerPersistenceBlocked(
                     "submission requires exactly one text-hash-bound defence statement"
+                )
+            consistency_review = _load_passing_consistency_review(
+                connection=connection,
+                actor=actor,
+                matter_id=matter_id,
+                review_id=consistency_review_id,
+                expected_version=expected_version,
+                products=products,
+            )
+            if consistency_review["output_hash"] != consistency_output_hash:
+                raise CaseLedgerPersistenceBlocked(
+                    "submission consistency review output differs from the selected passing review"
                 )
             manifest = connection.execute(
                 """
@@ -471,6 +489,9 @@ class PostgresSubmissionStore:
                 calculation_output_hash=calculation["output_hash"],
                 final_text_approval_id=final_text_approval_id,
                 final_text_hash=approval["object_hash"],
+                consistency_review_id=consistency_review_id,
+                consistency_input_hash=consistency_review["input_hash"],
+                consistency_output_hash=consistency_output_hash,
                 approved_by=actor.actor_id,
             )
             input_hash = _payload_hash(input_payload)
@@ -513,9 +534,10 @@ class PostgresSubmissionStore:
                     legal_bundle_id, legal_bundle_hash,
                     calculation_run_id, calculation_output_hash,
                     final_text_approval_id, final_text_hash,
+                    consistency_review_id, consistency_input_hash, consistency_output_hash,
                     qa_hash, qa_approved_by, qa_approved_at
                 ) VALUES (%s, %s, %s, 'COURT_PDF_ONLY_V1', 'CNY', %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                 """,
                 (
                     bundle_id,
@@ -531,6 +553,9 @@ class PostgresSubmissionStore:
                     calculation["output_hash"],
                     final_text_approval_id,
                     approval["object_hash"],
+                    consistency_review_id,
+                    consistency_review["input_hash"],
+                    consistency_output_hash,
                     input_hash,
                     actor.actor_id,
                 ),
@@ -1228,7 +1253,7 @@ def _load_selected_products(
         """
         SELECT work_product_id, document_kind, audience, media_type,
                storage_object_key, artifact_sha256, byte_size,
-               semantic_text_sha256, status, approval_hash
+               semantic_text_sha256, review_input_hash, status, approval_hash
         FROM submission_work_products
         WHERE work_product_id = ANY(%s) AND matter_id = %s AND firm_id = %s
         FOR SHARE
@@ -1267,6 +1292,9 @@ def _compilation_input_payload(
     calculation_output_hash: str,
     final_text_approval_id: str,
     final_text_hash: str,
+    consistency_review_id: str,
+    consistency_input_hash: str,
+    consistency_output_hash: str,
     approved_by: str,
 ) -> dict[str, Any]:
     return {
@@ -1296,8 +1324,59 @@ def _compilation_input_payload(
         "calculation_output_hash": calculation_output_hash,
         "final_text_approval_id": final_text_approval_id,
         "final_text_hash": final_text_hash,
+        "consistency_review_id": consistency_review_id,
+        "consistency_input_hash": consistency_input_hash,
+        "consistency_output_hash": consistency_output_hash,
         "approved_by": approved_by,
     }
+
+
+def _load_passing_consistency_review(
+    *, connection, actor: Actor, matter_id: str, review_id: str,
+    expected_version: int, products: tuple[dict[str, Any], ...],
+) -> dict[str, Any]:
+    """Return a PASS review only when it covers this exact approved PDF set."""
+
+    review = connection.execute(
+        """
+        SELECT review_id, input_hash, output_hash, blocking_count,
+               reviewed_matter_version, status
+        FROM document_consistency_reviews
+        WHERE review_id = %s AND matter_id = %s AND firm_id = %s
+        FOR SHARE
+        """, (review_id, matter_id, actor.firm_id),
+    ).fetchone()
+    if (
+        review is None
+        or review["status"] != "PASS"
+        or review["blocking_count"] != 0
+        or review["reviewed_matter_version"] != expected_version
+    ):
+        raise CaseLedgerPersistenceBlocked(
+            "submission requires a current passing document consistency review"
+        )
+    rows = connection.execute(
+        """
+        SELECT work_product_id, review_input_hash
+        FROM document_consistency_review_documents
+        WHERE review_id = %s AND firm_id = %s AND matter_id = %s
+        ORDER BY work_product_id ASC
+        FOR SHARE
+        """, (review_id, actor.firm_id, matter_id),
+    ).fetchall()
+    reviewed = {
+        str(row["work_product_id"]): row["review_input_hash"]
+        for row in rows
+    }
+    selected = {
+        str(product["work_product_id"]): product["review_input_hash"]
+        for product in products
+    }
+    if reviewed != selected:
+        raise CaseLedgerPersistenceBlocked(
+            "document consistency review does not cover the exact selected work products"
+        )
+    return review
 
 
 def _validate_selections(
