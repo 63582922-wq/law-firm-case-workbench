@@ -11,6 +11,7 @@ from case_kernel.official_source_capture_postgres import PostgresOfficialSourceC
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.submission_postgres import PostgresSubmissionStore
 from case_kernel.reviewable_draft_postgres import PostgresReviewableDraftStore
+from case_kernel.agent_execution_postgres import PostgresAgentExecutionStore
 from case_kernel.runtime import (
     RuntimeConfigurationBlocked,
     RuntimeMode,
@@ -35,6 +36,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNone(services.official_source_capture_store)
         self.assertIsNone(services.submission_store)
         self.assertIsNone(services.reviewable_draft_store)
+        self.assertIsNone(services.agent_execution_store)
         self.assertIsNone(services.artifact_store)
         self.assertIsNone(services.office_pdf_converter)
         matter_connect.assert_not_called()
@@ -82,6 +84,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsInstance(services.official_source_capture_store, PostgresOfficialSourceCaptureStore)
         self.assertIsInstance(services.submission_store, PostgresSubmissionStore)
         self.assertIsInstance(services.reviewable_draft_store, PostgresReviewableDraftStore)
+        self.assertIsInstance(services.agent_execution_store, PostgresAgentExecutionStore)
         self.assertIsNone(services.artifact_store)
         self.assertNotIn("synthetic-password", repr(settings))
         matter_connect.assert_not_called()
