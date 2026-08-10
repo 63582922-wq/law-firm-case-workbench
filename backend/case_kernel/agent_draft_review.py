@@ -36,6 +36,31 @@ class ApprovedAgentDraftCandidate:
     approved_by: str
 
 
+def serialize_docx_candidate(candidate: StructuredDocxDraftCandidate) -> bytes:
+    """Canonical encrypted-payload representation; it contains no approval decision."""
+
+    payload = {
+        "schema_version": "agent-docx-draft-v1",
+        "title": candidate.draft.title,
+        "sections": [
+            {"heading": section.heading, "paragraphs": list(section.paragraphs), "source_refs": list(section.source_refs)}
+            for section in candidate.draft.sections
+        ],
+    }
+    return _canonical_bytes(payload)
+
+
+def serialize_xlsx_candidate(candidate: StructuredXlsxDraftCandidate) -> bytes:
+    """Canonical encrypted-payload representation; it contains no approval decision."""
+
+    return _canonical_bytes({
+        "schema_version": "agent-xlsx-ledger-v1",
+        "sheet_name": candidate.sheet_name,
+        "columns": list(candidate.columns),
+        "rows": [list(row) for row in candidate.rows],
+    })
+
+
 def prepare_docx_review_candidate(candidate: StructuredDocxDraftCandidate) -> AgentDraftReviewCandidate:
     content_hash = _hash({"schema_version": "agent-docx-review-content-v1", "title": candidate.draft.title, "approval_hash": candidate.draft.approval_hash, "sections": [{"heading": section.heading, "paragraphs": list(section.paragraphs), "source_refs": list(section.source_refs)} for section in candidate.draft.sections]})
     return _prepare("DOCX", candidate.input_hash, content_hash, "document_drafting", "create_reviewable_docx_draft")
@@ -66,7 +91,11 @@ def _prepare(document_kind: str, input_hash: str, content_hash: str, skill_id: s
 
 
 def _hash(value: object) -> str:
-    return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
 def _sha256(value: str) -> bool:
