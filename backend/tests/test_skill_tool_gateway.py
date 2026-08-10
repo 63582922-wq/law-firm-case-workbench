@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -80,6 +81,33 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
                 lawyer_approved=False,
                 release_locked=False,
             )
+
+    def test_interest_transition_planner_is_a_review_gated_deterministic_skill(self) -> None:
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "lawyer approval"):
+            self.gateway.execute(
+                skill_id="interest_calculation",
+                tool_id="plan_private_lending_transition",
+                payload={},
+                granted_scopes=frozenset({CapabilityScope.FORMAL_CALCULATION}),
+                lawyer_approved=False,
+                release_locked=False,
+            )
+        result, output_hash = self.gateway.execute(
+            skill_id="interest_calculation",
+            tool_id="plan_private_lending_transition",
+            payload={
+                "contract_formed_on": date(2019, 6, 17),
+                "claim_filed_on": date(2023, 4, 3),
+                "first_instance_accepted_on": date(2023, 4, 6),
+                "calculation_start": date(2019, 6, 17),
+                "calculation_end": date(2023, 8, 1),
+            },
+            granted_scopes=frozenset({CapabilityScope.FORMAL_CALCULATION}),
+            lawyer_approved=True,
+            release_locked=False,
+        )
+        self.assertEqual(len(result.segments), 2)
+        self.assertEqual(len(output_hash), 64)
 
 
 if __name__ == "__main__":

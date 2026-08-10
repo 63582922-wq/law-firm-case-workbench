@@ -9,6 +9,7 @@ desktop access.
 from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
+from datetime import date
 from hashlib import sha256
 import json
 from typing import Any
@@ -18,6 +19,10 @@ from .evidence_normalization_worker import normalize_authorized_material
 from .local_access_grants import AuthorizedOriginalFile
 from .office_reading_worker import read_authorized_office_document
 from .office_pdf_conversion_worker import SandboxedOfficePdfConverter
+from .private_lending_transition_planner import (
+    HistoricalInterestPayment,
+    plan_private_lending_interest_transition,
+)
 from .reviewable_draft_worker import create_reviewable_docx_draft, create_reviewable_xlsx_ledger
 from .skill_registry import CapabilityScope, CaseSkillRegistry, SkillRegistryBlocked
 
@@ -83,6 +88,15 @@ class CaseSkillToolGateway:
                 rows=_ledger_rows(payload),
                 converter=_required_office_converter(self._office_pdf_converter),
             )
+        elif tool_id == "plan_private_lending_transition":
+            result = plan_private_lending_interest_transition(
+                contract_formed_on=_optional_date(payload, "contract_formed_on"),
+                claim_filed_on=_optional_date(payload, "claim_filed_on"),
+                first_instance_accepted_on=_optional_date(payload, "first_instance_accepted_on"),
+                calculation_start=_required_date(payload, "calculation_start"),
+                calculation_end=_required_date(payload, "calculation_end"),
+                historical_interest_payments=_historical_interest_payments(payload),
+            )
         else:
             raise SkillToolGatewayBlocked("registered tool has no local execution adapter")
         return result, _result_hash(result)
@@ -114,6 +128,27 @@ def _text(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
         raise SkillToolGatewayBlocked(f"tool requires non-empty {key}")
+    return value
+
+
+def _optional_date(payload: dict[str, Any], key: str) -> date | None:
+    value = payload.get(key)
+    if value is not None and not isinstance(value, date):
+        raise SkillToolGatewayBlocked(f"tool requires {key} to be a date or null")
+    return value
+
+
+def _required_date(payload: dict[str, Any], key: str) -> date:
+    value = _optional_date(payload, key)
+    if value is None:
+        raise SkillToolGatewayBlocked(f"tool requires {key} to be a date")
+    return value
+
+
+def _historical_interest_payments(payload: dict[str, Any]) -> tuple[HistoricalInterestPayment, ...]:
+    value = payload.get("historical_interest_payments", ())
+    if not isinstance(value, tuple) or not all(isinstance(item, HistoricalInterestPayment) for item in value):
+        raise SkillToolGatewayBlocked("tool requires tuple[HistoricalInterestPayment] historical_interest_payments")
     return value
 
 

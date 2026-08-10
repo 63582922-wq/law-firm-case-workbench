@@ -138,6 +138,7 @@ def default_case_skill_registry() -> CaseSkillRegistry:
         ToolDefinition("create_pdf_derivative", "1.0.0", frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), False, False, True),
         ToolDefinition("search_authoritative_rules", "1.0.0", frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}), False, True, False),
         ToolDefinition("get_rule_snapshot", "1.0.0", frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}), False, False, False),
+        ToolDefinition("plan_private_lending_transition", "1.0.0", frozenset({CapabilityScope.FORMAL_CALCULATION}), False, False, False),
         ToolDefinition("calculate_interest_schedule", "1.0.0", frozenset({CapabilityScope.FORMAL_CALCULATION}), False, False, False),
         ToolDefinition("validate_submission_bundle", "1.0.0", frozenset({CapabilityScope.COURT_RELEASE}), False, False, True),
     )
@@ -154,7 +155,7 @@ def default_case_skill_registry() -> CaseSkillRegistry:
         SkillDefinition("document_drafting", "1.0.0", "答辩状和说明文书草拟", SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_docx_draft", "create_pdf_derivative"), ApprovalGate.LAWYER_REVIEW, "DraftDocument", no_original_mutation),
         SkillDefinition("spreadsheet_ledger", "1.0.0", "交易台账与核算表生成", SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_xlsx_ledger",), ApprovalGate.LAWYER_REVIEW, "LedgerWorkbook", no_original_mutation),
         SkillDefinition("legal_rule_research", "1.0.0", "官方法源与公开研究检索", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}), ("search_authoritative_rules", "get_rule_snapshot"), ApprovalGate.LAWYER_REVIEW, "LegalResearchCandidates", no_original_mutation),
-        SkillDefinition("interest_calculation", "1.0.0", "利息与本息冲抵计算", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.FORMAL_CALCULATION}), ("calculate_interest_schedule",), ApprovalGate.LAWYER_REVIEW, "InterestCalculation", no_original_mutation),
+        SkillDefinition("interest_calculation", "1.0.0", "利息与本息冲抵计算", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.FORMAL_CALCULATION}), ("plan_private_lending_transition", "calculate_interest_schedule"), ApprovalGate.LAWYER_REVIEW, "InterestCalculation", no_original_mutation),
         SkillDefinition("submission_bundle_validation", "1.0.0", "法院提交包校验", SkillMaturity.GATED, frozenset({CapabilityScope.COURT_RELEASE}), ("validate_submission_bundle",), ApprovalGate.RELEASE_LOCK, "SubmissionValidation", no_original_mutation),
     )
     return CaseSkillRegistry(tools=tools, skills=skills)
