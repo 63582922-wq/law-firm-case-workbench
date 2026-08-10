@@ -1416,3 +1416,56 @@ class PersistentAgentExecutionSnapshotResponse(BaseModel):
     proposals: tuple[dict[str, Any], ...]
     receipts: tuple[dict[str, Any], ...]
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentExternalRequestPreflightRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    request_kind: Literal["MODEL", "OCR", "MCP"]
+    purpose: str = Field(min_length=1, max_length=240)
+    provider_id: str = Field(min_length=1, max_length=240)
+    processor_region: str = Field(min_length=1, max_length=240)
+    retention_policy: str = Field(min_length=1, max_length=240)
+    training_policy: str = Field(min_length=1, max_length=240)
+    selected_field_ids: list[str] = Field(min_length=1, max_length=30)
+    service_id: str = Field(min_length=1, max_length=240)
+    call_cap: int = Field(ge=1, le=100)
+    cost_cap_minor: int = Field(ge=0, le=10_000_000)
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    authorization_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def selected_fields_are_unique(self):
+        if len(set(self.selected_field_ids)) != len(self.selected_field_ids):
+            raise ValueError("selected external fields must be unique")
+        if any(not item.strip() or len(item) > 160 for item in self.selected_field_ids):
+            raise ValueError("selected external field identifier is invalid")
+        return self
+
+
+class PersistentExternalRequestAttemptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    status: Literal["SUBMISSION_STARTED", "SUCCEEDED", "FAILED", "UNKNOWN_SUBMISSION", "CANCELLED", "EXPIRED"]
+    provider_request_ref_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    output_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    error_code: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def attempt_shape_is_status_bound(self):
+        if self.status == "SUBMISSION_STARTED":
+            valid = self.provider_request_ref_hash is not None and self.output_hash is None and self.error_code is None
+        elif self.status == "SUCCEEDED":
+            valid = self.provider_request_ref_hash is None and self.output_hash is not None and self.error_code is None
+        else:
+            valid = self.provider_request_ref_hash is None and self.output_hash is None and self.error_code is not None
+        if not valid:
+            raise ValueError("external request attempt status does not match receipt fields")
+        return self
+
+
+class PersistentExternalRequestSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    authorizations: tuple[dict[str, Any], ...]
+    attempts: tuple[dict[str, Any], ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

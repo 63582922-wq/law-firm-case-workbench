@@ -43,6 +43,7 @@ from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
 from case_kernel.agent_execution_postgres import PersistentAgentExecutionSnapshot
+from case_kernel.external_request_postgres import PersistentExternalRequestSnapshot
 from case_kernel.reviewable_draft_access import (
     ReviewableDraftAccessPurpose,
     ReviewableOfficeDraftAccessBroker,
@@ -718,6 +719,25 @@ class FakePersistentAgentExecutionStore:
             runs=({"run_id": str(uuid4()), "agent_id": "case-manager", "agent_version": "1.0.0", "policy_manifest_hash": "a" * 64, "input_hash": "b" * 64, "input_matter_version": 11, "created_at": datetime.now(timezone.utc).isoformat()},),
             proposals=(), receipts=(), snapshot_hash="c" * 64,
         )
+
+
+class FakePersistentExternalRequestStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def authorize_external_request(self, **kwargs):
+        self.calls.append(("authorize", kwargs))
+        return CaseLedgerCommandReceipt("AUTHORIZE_EXTERNAL_REQUEST", kwargs["idempotency_key"], kwargs["matter_id"], kwargs["expected_version"] + 1, str(uuid4()), "EXTERNAL_REQUEST", str(uuid4()))
+
+    def record_external_attempt(self, **kwargs):
+        self.calls.append(("attempt", kwargs))
+        return CaseLedgerCommandReceipt("RECORD_EXTERNAL_REQUEST_ATTEMPT", kwargs["idempotency_key"], kwargs["matter_id"], kwargs["expected_version"] + 1, str(uuid4()), "EXTERNAL_REQUEST_ATTEMPT", str(uuid4()))
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentExternalRequestSnapshot(matter_id, 12, (), (), "e" * 64)
 
 
 class FakePersistentOfficialSourceCaptureStore:
@@ -2021,6 +2041,39 @@ class PersistentApiTests(unittest.TestCase):
         response = client.get(f"/v1/matters/{self.matter_id}/agent-executions")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["code"], "AGENT_EXECUTION_SERVICE_UNAVAILABLE")
+
+    def test_external_preflight_route_records_only_bound_metadata(self) -> None:
+        external_store = FakePersistentExternalRequestStore()
+        client = TestClient(create_persistent_app(PersistentApiDependencies(
+            settings=self.settings, case_ledger_store=FakePersistentFactStore(),
+            identity_resolver=StaticIdentityResolver(self.identity), external_request_store=external_store,
+        )))
+        response = client.post(
+            f"/v1/matters/{self.matter_id}/external-requests",
+            headers={"Idempotency-Key": "external-preflight-api-001"},
+            json={
+                "expected_version": 12, "request_kind": "MODEL", "purpose": "提取付款日期",
+                "provider_id": "approved-provider", "processor_region": "CN", "retention_policy": "30D",
+                "training_policy": "NO_TRAINING", "selected_field_ids": ["evidence:page:1"],
+                "service_id": "model-x", "call_cap": 2, "cost_cap_minor": 1000,
+                "input_hash": "a" * 64, "authorization_hash": "b" * 64,
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        name, call = external_store.calls[0]
+        self.assertEqual(name, "authorize")
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["preflight"].selected_field_ids, ("evidence:page:1",))
+
+    def test_external_request_routes_fail_closed_without_preflight_store(self) -> None:
+        client = TestClient(create_persistent_app(PersistentApiDependencies(
+            settings=self.settings, case_ledger_store=FakePersistentFactStore(),
+            identity_resolver=StaticIdentityResolver(self.identity),
+        )))
+        response = client.get(f"/v1/matters/{self.matter_id}/external-requests")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "EXTERNAL_REQUEST_SERVICE_UNAVAILABLE")
 
 
 if __name__ == "__main__":

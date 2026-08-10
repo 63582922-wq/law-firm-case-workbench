@@ -1,6 +1,6 @@
 # 数据库迁移（未执行）
 
-`0001_core.sql` 至 `0016_agent_execution_ledger.sql` 是面向 PostgreSQL 16+、按文件名顺序执行的架构，不含任何真实数据，也未在本仓库中执行。
+`0001_core.sql` 至 `0017_external_request_ledger.sql` 是面向 PostgreSQL 16+、按文件名顺序执行的架构，不含任何真实数据，也未在本仓库中执行。
 
 迁移包含的安全语义：
 

@@ -81,6 +81,11 @@ from case_kernel.agent_execution_postgres import (
     PersistentAgentExecutionSnapshot,
     PostgresAgentExecutionStore,
 )
+from case_kernel.external_request_postgres import (
+    ExternalRequestPreflight,
+    PersistentExternalRequestSnapshot,
+    PostgresExternalRequestStore,
+)
 from case_kernel.submission_access import (
     SubmissionAccessBlocked,
     SubmissionExportAccessBroker,
@@ -181,6 +186,9 @@ from .schemas import (
     PersistentAgentExecutionSnapshotResponse,
     PersistentAgentRunRequest,
     PersistentAgentToolReceiptRequest,
+    PersistentExternalRequestAttemptRequest,
+    PersistentExternalRequestPreflightRequest,
+    PersistentExternalRequestSnapshotResponse,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
     PersistentTransactionPageResponse,
@@ -353,6 +361,14 @@ class PersistentAgentExecutionPort(Protocol):
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentAgentExecutionSnapshot: ...
 
 
+class PersistentExternalRequestPort(Protocol):
+    def authorize_external_request(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def record_external_attempt(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot: ...
+
+
 class PersistentOfficialSourceCapturePort(Protocol):
     def queue_capture(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -391,6 +407,10 @@ class PersistentAgentExecutionServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentExternalRequestServiceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PersistentApiDependencies:
     settings: RuntimeSettings
@@ -404,6 +424,7 @@ class PersistentApiDependencies:
     submission_store: PersistentSubmissionPort | None = None
     reviewable_draft_store: PersistentReviewableDraftPort | None = None
     agent_execution_store: PersistentAgentExecutionPort | None = None
+    external_request_store: PersistentExternalRequestPort | None = None
     submission_access_broker: SubmissionExportAccessBroker | None = None
     reviewable_draft_access_broker: ReviewableOfficeDraftAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
@@ -456,6 +477,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.agent_execution_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL Agent execution store")
+        if self.external_request_store is not None and not isinstance(
+            self.external_request_store, PostgresExternalRequestStore
+        ):
+            if not getattr(self.external_request_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL external-request store")
         if (
             self.artifact_access_broker is not None
             or self.submission_access_broker is not None
@@ -548,6 +574,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "submission": "configured" if dependencies.submission_store else "not-configured",
             "reviewable_drafts": "configured" if dependencies.reviewable_draft_store else "not-configured",
             "agent_execution": "configured" if dependencies.agent_execution_store else "not-configured",
+            "external_request": "configured" if dependencies.external_request_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
             "reviewable_draft_access": "configured" if dependencies.reviewable_draft_access_broker else "not-configured",
@@ -616,6 +643,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "Agent execution persistence is not configured"
             )
         return dependencies.agent_execution_store
+
+    def get_external_request_store() -> PersistentExternalRequestPort:
+        if dependencies.external_request_store is None:
+            raise PersistentExternalRequestServiceUnavailable(
+                "external request persistence is not configured"
+            )
+        return dependencies.external_request_store
 
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
@@ -758,6 +792,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "AGENT_EXECUTION_SERVICE_UNAVAILABLE",
             "Agent 计划与工具审计服务尚未启用，系统不会回退到内存记录。",
+        )
+
+    @app.exception_handler(PersistentExternalRequestServiceUnavailable)
+    async def external_request_service_handler(_: Request, exc: PersistentExternalRequestServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "EXTERNAL_REQUEST_SERVICE_UNAVAILABLE",
+            "外部调用预授权服务尚未启用，系统不会发送或回退到未审计请求。",
         )
 
     @app.exception_handler(ManagedArtifactBlocked)
@@ -1421,6 +1464,71 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 matter_id=str(matter_id), actor=identity.actor,
                 expected_version=body.expected_version, idempotency_key=idempotency_key,
                 proposal_id=str(proposal_id), status=body.status,
+                output_hash=body.output_hash, error_code=body.error_code,
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/external-requests",
+        response_model=PersistentExternalRequestSnapshotResponse,
+        tags=["external-requests"],
+    )
+    async def get_external_request_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
+    ) -> PersistentExternalRequestSnapshotResponse:
+        snapshot = external_store.get_snapshot(matter_id=str(matter_id), actor=identity.actor)
+        return PersistentExternalRequestSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/external-requests",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["external-requests"],
+    )
+    async def authorize_external_request(
+        matter_id: UUID,
+        body: PersistentExternalRequestPreflightRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            external_store.authorize_external_request(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                preflight=ExternalRequestPreflight(
+                    request_kind=body.request_kind, purpose=body.purpose, provider_id=body.provider_id,
+                    processor_region=body.processor_region, retention_policy=body.retention_policy,
+                    training_policy=body.training_policy, selected_field_ids=tuple(body.selected_field_ids),
+                    service_id=body.service_id, call_cap=body.call_cap, cost_cap_minor=body.cost_cap_minor,
+                    input_hash=body.input_hash, authorization_hash=body.authorization_hash,
+                    expires_at=body.expires_at,
+                ),
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/external-requests/{request_id}/attempts",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["external-requests"],
+    )
+    async def record_external_request_attempt(
+        matter_id: UUID,
+        request_id: UUID,
+        body: PersistentExternalRequestAttemptRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            external_store.record_external_attempt(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                request_id=str(request_id), status=body.status,
+                provider_request_ref_hash=body.provider_request_ref_hash,
                 output_hash=body.output_hash, error_code=body.error_code,
             )
         )
