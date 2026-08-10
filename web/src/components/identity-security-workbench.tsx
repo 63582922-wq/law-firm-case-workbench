@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   activateDesktopEnrollment,
+  configureDesktopQwenConnection,
   disableLocalEnrollment,
   configureDesktopModelProviderKey,
   importSignedEnrollmentPackage,
@@ -30,6 +31,9 @@ export function IdentitySecurityWorkbench({
   const [vaultBusy, setVaultBusy] = useState<"initialize" | "activate" | "import" | "renew" | "revoke" | "resolve" | "disable" | null>(null);
   const [modelProviderBusy, setModelProviderBusy] = useState<DesktopModelProviderStatus["providerId"] | null>(null);
   const [modelProviderMessage, setModelProviderMessage] = useState<string | null>(null);
+  const [qwenWorkspaceId, setQwenWorkspaceId] = useState("");
+  const [qwenRegionId, setQwenRegionId] = useState<"cn-beijing" | "ap-southeast-1">("cn-beijing");
+  const [qwenConnectionBusy, setQwenConnectionBusy] = useState(false);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
   const [revokeArmed, setRevokeArmed] = useState(false);
@@ -105,6 +109,21 @@ export function IdentitySecurityWorkbench({
       setModelProviderMessage(readableError(error, "API Key 未移除。"));
     } finally {
       setModelProviderBusy(null);
+    }
+  }
+
+  async function configureQwenConnection() {
+    setQwenConnectionBusy(true);
+    setModelProviderMessage(null);
+    try {
+      const status = await configureDesktopQwenConnection(qwenRegionId, qwenWorkspaceId);
+      setModelProviderStatuses((current) => replaceModelProviderStatus(current, status));
+      setQwenWorkspaceId("");
+      setModelProviderMessage(`通义千问百炼已固定到${status.connectionLabel}。业务空间 ID 不会显示在页面、案卷或审计记录中。`);
+    } catch (error) {
+      setModelProviderMessage(readableError(error, "百炼业务空间配置未保存。"));
+    } finally {
+      setQwenConnectionBusy(false);
     }
   }
 
@@ -335,6 +354,28 @@ export function IdentitySecurityWorkbench({
             onRemove={() => void removeModelProvider("qwen")}
           />
         </div>
+        {modelProviderStatuses?.find((item) => item.providerId === "qwen")?.configured && (
+          <div className={styles.qwenConnectionSettings}>
+            <div>
+              <strong>固定百炼调用地域</strong>
+              <small>Qwen 的 API Key 按地域和业务空间生效。这里只接受官方固定地域与业务空间 ID，不接受自定义接口地址。</small>
+            </div>
+            <label>
+              <span>地域</span>
+              <select value={qwenRegionId} onChange={(event) => setQwenRegionId(event.target.value as "cn-beijing" | "ap-southeast-1")}>
+                <option value="cn-beijing">华北2（北京）</option>
+                <option value="ap-southeast-1">新加坡</option>
+              </select>
+            </label>
+            <label>
+              <span>业务空间 ID</span>
+              <input autoComplete="off" maxLength={120} onChange={(event) => setQwenWorkspaceId(event.target.value)} placeholder="从百炼控制台复制" value={qwenWorkspaceId} />
+            </label>
+            <button disabled={qwenConnectionBusy || qwenWorkspaceId.trim().length === 0} onClick={() => void configureQwenConnection()} type="button">
+              {qwenConnectionBusy ? "正在保存…" : "保存调用地点"}
+            </button>
+          </div>
+        )}
         {modelProviderMessage ? <p className={styles.modelProviderMessage} role="status">{modelProviderMessage}</p> : null}
       </section>
       <ExternalRequestAudit />
@@ -453,7 +494,7 @@ function ModelProviderRow({
     <article>
       <div>
         <strong>{provider?.displayName ?? fallbackName}</strong>
-        <small>{provider ? `${provider.modelId} · ${note}` : note}</small>
+        <small>{provider ? `${provider.modelId} · ${provider.connectionLabel} · ${note}` : note}</small>
       </div>
       <em className={configured ? styles.modelProviderReady : styles.modelProviderMissing}>{configured ? "已在本机配置" : "未配置"}</em>
       <div className={styles.modelProviderActions}>

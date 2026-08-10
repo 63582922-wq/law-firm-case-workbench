@@ -462,6 +462,14 @@
 .modelProviderActions button:disabled { border-color: var(--line-strong); color: var(--ink-faint); background: var(--sheet); cursor: not-allowed; }
 .modelProviderActions .modelProviderRemove { border-color: var(--red); color: var(--red); background: var(--red-soft); }
 .modelProviderMessage { margin: 0; padding: 10px 17px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.qwenConnectionSettings { display: grid; grid-template-columns: minmax(220px, 1.4fr) 150px minmax(190px, 1fr) auto; align-items: end; gap: 12px; padding: 13px 17px; border-top: 1px solid var(--line); background: #f7f4ec; }
+.qwenConnectionSettings > div { display: grid; gap: 5px; }
+.qwenConnectionSettings strong { font-size: 11px; }
+.qwenConnectionSettings small { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.qwenConnectionSettings label { display: grid; gap: 5px; color: var(--ink-soft); font-size: 9px; }
+.qwenConnectionSettings input, .qwenConnectionSettings select { min-height: 32px; border: 1px solid var(--line-strong); border-radius: 0; background: var(--sheet); color: var(--ink); font: inherit; font-size: 10px; padding: 6px 8px; }
+.qwenConnectionSettings button { min-height: 32px; border: 1px solid var(--ink); background: var(--ink); color: var(--sheet); font: inherit; font-size: 9px; cursor: pointer; padding: 7px 10px; }
+.qwenConnectionSettings button:disabled { border-color: var(--line-strong); background: var(--sheet); color: var(--ink-faint); cursor: not-allowed; }
 .agentCapabilities { margin-top: 18px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
 .agentCapabilitiesHeading { min-height: 94px; padding: 16px 17px; display: flex; justify-content: space-between; gap: 24px; align-items: end; border-bottom: 1px solid var(--line); }
 .agentCapabilitiesHeading h3 { margin: 5px 0 7px; font: 600 18px var(--font-serif); }
@@ -526,7 +534,7 @@
   .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.officialCasePolicy { grid-template-columns: 1fr; gap: 12px; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
   .securityArea { padding-right: 20px; padding-left: 20px; }.securityColumns, .securityActions { grid-template-columns: 1fr; }
-  .modelProviderList article { grid-template-columns: minmax(0, 1fr) 100px; }.modelProviderActions { grid-column: 1 / -1; justify-content: start; }
+  .modelProviderList article { grid-template-columns: minmax(0, 1fr) 100px; }.modelProviderActions { grid-column: 1 / -1; justify-content: start; }.qwenConnectionSettings { grid-template-columns: 1fr 1fr; }.qwenConnectionSettings > div { grid-column: 1 / -1; }
   .agentCapabilityList article { grid-template-columns: minmax(190px, 1.3fr) 82px minmax(100px, 1fr); }.agentCapabilityList code { display: none; }
   .agentAuditSummary { grid-template-columns: repeat(2, minmax(0, 1fr)); }.agentAuditList article { grid-template-columns: 28px minmax(160px, 1fr) 110px; }.agentAuditList code { display: none; }
   .externalRequestList dl { grid-template-columns: 1fr; }

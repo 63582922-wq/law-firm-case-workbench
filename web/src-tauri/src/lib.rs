@@ -489,6 +489,15 @@ async fn configure_desktop_model_provider_key(
 }
 
 #[tauri::command]
+fn configure_desktop_qwen_connection(
+    region_id: String,
+    workspace_id: String,
+    vault: State<'_, ModelProviderVault>,
+) -> Result<ModelProviderStatus, String> {
+    vault.save_qwen_connection(region_id, workspace_id)
+}
+
+#[tauri::command]
 async fn remove_desktop_model_provider_key(
     app: AppHandle,
     provider_id: String,
@@ -1175,6 +1184,7 @@ pub fn run() {
             desktop_enrollment_vault_status,
             desktop_model_provider_statuses,
             configure_desktop_model_provider_key,
+            configure_desktop_qwen_connection,
             remove_desktop_model_provider_key,
             initialize_desktop_installation,
             import_signed_enrollment_package,

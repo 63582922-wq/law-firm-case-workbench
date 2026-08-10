@@ -43,18 +43,32 @@ declare global {
         displayName: string;
         modelId: string;
         configured: boolean;
+        connectionReady: boolean;
+        connectionLabel: string;
       }> | null>;
       configureModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
         configured: boolean;
+        connectionReady: boolean;
+        connectionLabel: string;
+      }>;
+      configureQwenConnection(regionId: "cn-beijing" | "ap-southeast-1", workspaceId: string): Promise<{
+        providerId: "deepseek" | "qwen";
+        displayName: string;
+        modelId: string;
+        configured: boolean;
+        connectionReady: boolean;
+        connectionLabel: string;
       }>;
       removeModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
         configured: boolean;
+        connectionReady: boolean;
+        connectionLabel: string;
       }>;
       initializeInstallation(): Promise<{
         phase: string;

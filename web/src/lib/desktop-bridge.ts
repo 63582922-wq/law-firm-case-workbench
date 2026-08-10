@@ -48,6 +48,8 @@ export type DesktopModelProviderStatus = {
   displayName: string;
   modelId: string;
   configured: boolean;
+  connectionReady: boolean;
+  connectionLabel: string;
 };
 
 export async function readDesktopRuntimeStatus(): Promise<DesktopRuntimeStatus | null> {
@@ -69,6 +71,13 @@ export async function configureDesktopModelProviderKey(
   providerId: DesktopModelProviderStatus["providerId"],
 ): Promise<DesktopModelProviderStatus> {
   return invoke<DesktopModelProviderStatus>("configure_desktop_model_provider_key", { providerId });
+}
+
+export async function configureDesktopQwenConnection(
+  regionId: "cn-beijing" | "ap-southeast-1",
+  workspaceId: string,
+): Promise<DesktopModelProviderStatus> {
+  return invoke<DesktopModelProviderStatus>("configure_desktop_qwen_connection", { regionId, workspaceId });
 }
 
 export async function removeDesktopModelProviderKey(
@@ -124,6 +133,7 @@ export function installDesktopBridge(): void {
     enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
     modelProviderStatuses: readDesktopModelProviderStatuses,
     configureModelProviderKey: configureDesktopModelProviderKey,
+    configureQwenConnection: configureDesktopQwenConnection,
     removeModelProviderKey: removeDesktopModelProviderKey,
     initializeInstallation: initializeDesktopInstallation,
     importSignedEnrollmentPackage,
