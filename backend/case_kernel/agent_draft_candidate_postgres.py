@@ -79,8 +79,9 @@ class PostgresAgentDraftCandidateStore:
         return prepare_docx_review_candidate(parse_docx_candidate(raw)) if spec.document_kind == "DOCX" else prepare_xlsx_review_candidate(parse_xlsx_candidate(raw))
 
     def _insert_candidate(self, c, matter_id, actor, spec, candidate):
-        c.execute("INSERT INTO agent_draft_candidates (candidate_id, firm_id, matter_id, document_kind, agent_id, agent_version, skill_id, tool_id, content_object_key, content_sha256, content_bytes, input_hash, review_hash, rationale_hash, status, registered_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CANDIDATE',%s)", (str(uuid4()), actor.firm_id, matter_id, spec.document_kind, spec.agent_id.strip(), spec.agent_version.strip(), candidate.skill_id, candidate.tool_id, spec.content_object_key, spec.content_sha256, spec.content_bytes, candidate.input_hash, candidate.review_hash, spec.rationale_hash, actor.actor_id))
-        return None
+        candidate_id = str(uuid4())
+        c.execute("INSERT INTO agent_draft_candidates (candidate_id, firm_id, matter_id, document_kind, agent_id, agent_version, skill_id, tool_id, content_object_key, content_sha256, content_bytes, input_hash, review_hash, rationale_hash, status, registered_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'CANDIDATE',%s)", (candidate_id, actor.firm_id, matter_id, spec.document_kind, spec.agent_id.strip(), spec.agent_version.strip(), candidate.skill_id, candidate.tool_id, spec.content_object_key, spec.content_sha256, spec.content_bytes, candidate.input_hash, candidate.review_hash, spec.rationale_hash, actor.actor_id))
+        return candidate_id
 
     def _command(self, matter_id, actor, version, key, name, payload, roles, apply):
         digest = _payload_hash(payload)
@@ -90,7 +91,7 @@ class PostgresAgentDraftCandidateStore:
             if prior is not None: return prior
             _authorize_and_lock_matter(c, actor=actor, matter_id=matter_id, expected_version=version, allowed_roles=roles)
             result = apply(c)
-            object_id = result[0] if result else str(uuid4())
+            object_id = result[0] if isinstance(result, tuple) else result or str(uuid4())
             return _finish_command(c, actor=actor, matter_id=matter_id, expected_version=version, command_name=name, idempotency_key=key, payload_hash=digest, event_type=name, object_type="AGENT_DRAFT_CANDIDATE", object_id=object_id, audit_payload={"candidate_hash": payload.get("review_hash", payload.get("approval_hash")), "result": result}, stale_submission=False, stale_calculations=False)
 
     @contextmanager
