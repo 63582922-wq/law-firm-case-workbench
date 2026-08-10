@@ -3,8 +3,11 @@
 import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
+  createFormalCalculation,
   loadCalculationReview,
+  loadLegalReview,
   type CalculationReviewView,
+  type LegalReviewView,
 } from "@/lib/case-data-source";
 import styles from "./case-workbench.module.css";
 
@@ -42,6 +45,16 @@ function allocationPolicy(value: string | null) {
 
 export function CalculationWorkbench() {
   const [state, setState] = useState<CalculationState>({ status: "loading" });
+  const [legalReview, setLegalReview] = useState<LegalReviewView | null>(null);
+  const [scenario, setScenario] = useState({
+    obligationId: "",
+    startDate: "",
+    endDate: "",
+    allocationPolicy: "INTEREST_THEN_PRINCIPAL" as const,
+    approved: false,
+  });
+  const [scenarioBusy, setScenarioBusy] = useState(false);
+  const [scenarioNotice, setScenarioNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -58,6 +71,9 @@ export function CalculationWorkbench() {
       }
     }
     void load();
+    void loadLegalReview()
+      .then((review) => { if (active) setLegalReview(review); })
+      .catch((reason: unknown) => { if (active) setScenarioNotice(reason instanceof Error ? reason.message : "法律规则包快照读取失败"); });
     return () => {
       active = false;
     };
@@ -65,6 +81,39 @@ export function CalculationWorkbench() {
 
   const persistent = caseDataSourceConfig.kind !== "synthetic-alpha";
   const review = state.status === "ready" ? state.review : null;
+
+  async function createScenario() {
+    if (!legalReview?.currentBundle || legalReview.matterVersion === null) return;
+    if (!scenario.approved) {
+      setScenarioNotice("请先确认：债务单元、计算区间、人民币币种与已批准冲抵顺序已经核对。");
+      return;
+    }
+    setScenarioBusy(true);
+    setScenarioNotice(null);
+    try {
+      const receipt = await createFormalCalculation({
+        expectedVersion: legalReview.matterVersion,
+        obligationId: scenario.obligationId,
+        startDate: scenario.startDate,
+        endDate: scenario.endDate,
+        legalBundleId: legalReview.currentBundle.bundleId,
+        legalBundleHash: legalReview.currentBundle.bundleHash,
+        allocationPolicy: scenario.allocationPolicy,
+      });
+      const [calculation, refreshedLegal] = await Promise.all([
+        loadCalculationReview(undefined, scenario.obligationId.trim()),
+        loadLegalReview(),
+      ]);
+      setState({ status: "ready", review: calculation });
+      setLegalReview(refreshedLegal);
+      setScenario((prior) => ({ ...prior, approved: false }));
+      setScenarioNotice(`正式计算与独立复算已完成；案件版本更新为 ${receipt.matterVersion}。`);
+    } catch (reason: unknown) {
+      setScenarioNotice(reason instanceof Error ? reason.message : "正式计算未完成");
+    } finally {
+      setScenarioBusy(false);
+    }
+  }
 
   return (
     <section className={styles.calculationArea} aria-label="利息计算">
@@ -105,6 +154,21 @@ export function CalculationWorkbench() {
               <p>{review.emptyReason}</p>
               <small>需要先核验交易、付款性质、同日顺序和规则适用期间，再由主办律师批准。</small>
             </section>
+          )}
+
+          {persistent && legalReview?.status === "reviewable" && (
+            <form className={styles.formalCalculationForm} onSubmit={(event) => { event.preventDefault(); void createScenario(); }}>
+              <div className={styles.formalCalculationHeading}><div><p className={styles.eyebrow}>正式情景审批</p><h3>按当前规则包运行独立复算</h3><small>利率、交易金额、付款性质和人民币币种均从已批准台账读取；本表不提供这些字段的编辑入口。</small></div><span>{legalReview.currentBundle ? `规则包 v${legalReview.currentBundle.version}` : "尚无已批准规则包"}</span></div>
+              <div className={styles.formalCalculationFields}>
+                <label><span>债务单元标识</span><input required value={scenario.obligationId} onChange={(event) => setScenario((prior) => ({ ...prior, obligationId: event.target.value }))} placeholder="选择已批准付款分配使用的 obligation_id" /></label>
+                <label><span>计算起日</span><input required type="date" value={scenario.startDate} onChange={(event) => setScenario((prior) => ({ ...prior, startDate: event.target.value }))} /></label>
+                <label><span>计算止日</span><input required type="date" value={scenario.endDate} onChange={(event) => setScenario((prior) => ({ ...prior, endDate: event.target.value }))} /></label>
+                <label><span>冲抵顺序</span><select value={scenario.allocationPolicy} onChange={(event) => setScenario((prior) => ({ ...prior, allocationPolicy: event.target.value as typeof prior.allocationPolicy }))}><option value="INTEREST_THEN_PRINCIPAL">先息后本</option><option value="PRINCIPAL_THEN_INTEREST">先本后息</option></select></label>
+              </div>
+              <label className={styles.formalCalculationCheck}><input checked={scenario.approved} onChange={(event) => setScenario((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该债务单元已有同案、已确认且已分类的人民币交易；计算区间受当前规则包连续覆盖，冲抵顺序已由律师批准。</span></label>
+              <div className={styles.formalCalculationActions}><button disabled={scenarioBusy || !legalReview.currentBundle} type="submit">{scenarioBusy ? "正在独立复算…" : "建立正式计算"}</button><small>任何交易、规则包、币种、同日顺序、重复组或独立复算不符合条件，服务端都会拒绝创建结果。</small></div>
+              {scenarioNotice && <p className={styles.formalCalculationNotice} role="status">{scenarioNotice}</p>}
+            </form>
           )}
 
           {review?.status === "ready" && (

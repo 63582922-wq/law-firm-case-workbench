@@ -358,6 +358,12 @@ export type LegalBundleReceipt = {
   requestId: string | null;
 };
 
+export type FormalCalculationReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1849,6 +1855,79 @@ export async function approveCaseLegalBundle(
   }
   if (payload.object_type !== "CASE_LEGAL_BUNDLE") {
     throw new Error("规则包审批回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function createFormalCalculation(
+  input: {
+    expectedVersion: number;
+    obligationId: string;
+    startDate: string;
+    endDate: string;
+    legalBundleId: string;
+    legalBundleHash: string;
+    allocationPolicy: "INTEREST_THEN_PRINCIPAL" | "PRINCIPAL_THEN_INTEREST";
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<FormalCalculationReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以建立正式计算情景。");
+  }
+  const obligationId = input.obligationId.trim();
+  if (!obligationId || !input.startDate || !input.endDate || input.startDate >= input.endDate) {
+    throw new Error("请填写债务单元及有效的计算起止日期。");
+  }
+  if (!input.legalBundleId || !input.legalBundleHash) {
+    throw new Error("当前案件没有可核验的已批准法律规则包。");
+  }
+  const approvalHash = await sha256Text([
+    "formal-calculation-approval-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    obligationId,
+    input.startDate,
+    input.endDate,
+    input.legalBundleId,
+    input.legalBundleHash,
+    input.allocationPolicy,
+    "CNY_ONLY",
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/formal-calculations`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        obligation_id: obligationId,
+        start_date: input.startDate,
+        end_date: input.endDate,
+        legal_bundle_id: input.legalBundleId,
+        legal_bundle_hash: input.legalBundleHash,
+        allocation_policy: input.allocationPolicy,
+        approval_hash: approvalHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在正式计算确认前中断。请刷新规则包和交易台账核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "正式计算未完成"));
+  }
+  if (payload.object_type !== "CALCULATION_RUN") {
+    throw new Error("正式计算回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,
