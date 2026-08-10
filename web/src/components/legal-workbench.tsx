@@ -3,13 +3,16 @@
 import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
+  approveLegalFactBinding,
   loadLegalReview,
+  loadCaseReview,
   loadOfficialSourceCaptureReview,
   approveLprMultipleRuleVersion,
   queueOfficialSourceCapture,
   registerReviewedOfficialSourceCapture,
   reviewOfficialSourceCapture,
   type LegalReviewView,
+  type CaseReviewView,
   type OfficialSourceCaptureView,
 } from "@/lib/case-data-source";
 import { officialCasePolicyLinks, officialCaseResearchCatalog } from "@/lib/official-case-catalog";
@@ -30,6 +33,10 @@ export function LegalWorkbench() {
   const [ruleBusy, setRuleBusy] = useState(false);
   const [ruleNotice, setRuleNotice] = useState<string | null>(null);
   const [ruleApproved, setRuleApproved] = useState(false);
+  const [caseReview, setCaseReview] = useState<CaseReviewView | null>(null);
+  const [factBinding, setFactBinding] = useState({ factKey: "", factId: "", approved: false });
+  const [bindingBusy, setBindingBusy] = useState(false);
+  const [bindingNotice, setBindingNotice] = useState<string | null>(null);
   const [lprRule, setLprRule] = useState({
     ruleId: "",
     ruleVersion: "",
@@ -61,6 +68,13 @@ export function LegalWorkbench() {
       })
       .catch((reason: unknown) => {
         if (active) setCaptureError(reason instanceof Error ? reason.message : "官方法源抓取快照读取失败");
+      });
+    loadCaseReview()
+      .then((result) => {
+        if (active) setCaseReview(result);
+      })
+      .catch((reason: unknown) => {
+        if (active) setBindingNotice(reason instanceof Error ? reason.message : "案件事实快照读取失败");
       });
     return () => {
       active = false;
@@ -218,6 +232,32 @@ export function LegalWorkbench() {
     }
   }
 
+  async function bindLegalFact() {
+    if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
+    if (!factBinding.approved) {
+      setBindingNotice("请先确认：只有同案且已确认的事实可以成为法律规则锚点。");
+      return;
+    }
+    setBindingBusy(true);
+    setBindingNotice(null);
+    try {
+      const receipt = await approveLegalFactBinding({
+        expectedVersion: review.matterVersion,
+        factKey: factBinding.factKey,
+        factId: factBinding.factId,
+      });
+      const [refreshedLegal, refreshedCase] = await Promise.all([loadLegalReview(), loadCaseReview()]);
+      setReview(refreshedLegal);
+      setCaseReview(refreshedCase);
+      setFactBinding((prior) => ({ ...prior, approved: false }));
+      setBindingNotice(`法律规则事实锚点已建立；案件版本更新为 ${receipt.matterVersion}。`);
+    } catch (reason: unknown) {
+      setBindingNotice(reason instanceof Error ? reason.message : "法律规则事实锚点未建立");
+    } finally {
+      setBindingBusy(false);
+    }
+  }
+
   const legalFormulaSources = review.sources.filter(
     (source) => source.snapshotId
       && source.verificationStatus === "VERIFIED"
@@ -238,6 +278,7 @@ export function LegalWorkbench() {
   const availableFactKeys = [...new Set(review.factBindings
     .filter((binding) => binding.status === "APPROVED")
     .map((binding) => binding.factKey))];
+  const confirmedFacts = caseReview?.facts.filter((fact) => fact.status === "CONFIRMED") ?? [];
 
   return (
     <section className={styles.legalArea} aria-label="法律规则">
@@ -490,6 +531,16 @@ export function LegalWorkbench() {
           <div><p className={styles.eyebrow}>规则层</p><h3 id="rule-versions-title">规则版本与案件事实锚点</h3></div>
           <span>{review.status === "reviewable" ? "写入动作受案件版本与律师确认约束" : "发现模式不允许写入"}</span>
         </div>
+        {review.status === "reviewable" && (
+          <form className={styles.legalFactBindingForm} onSubmit={(event) => { event.preventDefault(); void bindLegalFact(); }}>
+            <div><strong>建立规则所需事实锚点</strong><small>先在“事实与争点”确认事实；此处只把规则键绑定到同案已确认事实，不生成事实或法律结论。</small></div>
+            <label><span>规则事实键</span><input required value={factBinding.factKey} onChange={(event) => setFactBinding((prior) => ({ ...prior, factKey: event.target.value }))} placeholder="例如 contract_before_2020_08_20" /></label>
+            <label><span>已确认案件事实</span><select required value={factBinding.factId} onChange={(event) => setFactBinding((prior) => ({ ...prior, factId: event.target.value }))}><option value="">选择同案已确认事实</option>{confirmedFacts.map((fact) => <option key={fact.factId} value={fact.factId}>{fact.text}</option>)}</select></label>
+            <label className={styles.legalFactBindingCheck}><input checked={factBinding.approved} onChange={(event) => setFactBinding((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该事实已被审阅，并且确实是本规则适用所需的同案事实。</span></label>
+            <button disabled={bindingBusy || !confirmedFacts.length} type="submit">{bindingBusy ? "正在绑定…" : "建立事实锚点"}</button>
+            {bindingNotice && <p role="status">{bindingNotice}</p>}
+          </form>
+        )}
         {review.status === "reviewable" && (
           <form className={styles.lprRuleForm} onSubmit={(event) => { event.preventDefault(); void approveLprRule(); }}>
             <div className={styles.lprRuleFormHeading}>

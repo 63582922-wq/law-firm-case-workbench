@@ -217,6 +217,13 @@
 .legalRuleRow small { color: var(--ink-faint); font-size: 9px; }
 .legalRuleRow > span:nth-child(4) { color: var(--red); font: 600 14px var(--font-serif); }
 .legalRuleHead { min-height: 34px; color: var(--ink-faint); background: var(--sheet-muted); }
+.legalFactBindingForm { padding: 14px 17px; display: grid; grid-template-columns: minmax(180px, 1.2fr) minmax(160px, 1fr) minmax(210px, 1.25fr) minmax(88px, auto); gap: 11px; align-items: end; border-bottom: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.legalFactBindingForm > div { align-self: start; display: grid; gap: 4px; }.legalFactBindingForm strong { font-size: 11px; }.legalFactBindingForm small { color: var(--ink-faint); font-size: 9px; line-height: 1.5; }
+.legalFactBindingForm > label:not(.legalFactBindingCheck) { min-width: 0; display: grid; gap: 5px; }.legalFactBindingForm > label > span { color: var(--ink-soft); font-size: 9px; font-weight: 650; }
+.legalFactBindingForm input[type="text"], .legalFactBindingForm input:not([type]), .legalFactBindingForm select { min-width: 0; height: 31px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink); font: 10px var(--font-sans); padding: 5px 7px; }
+.legalFactBindingCheck { min-width: 0; display: grid; grid-template-columns: 15px minmax(0, 1fr); gap: 6px; align-items: start; color: var(--ink-soft); font-size: 9px; line-height: 1.5; }.legalFactBindingCheck input { margin: 1px 0 0; }
+.legalFactBindingForm > button { min-height: 31px; padding: 6px 9px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: 600 9px var(--font-sans); cursor: pointer; }.legalFactBindingForm > button:disabled { opacity: .42; cursor: not-allowed; }
+.legalFactBindingForm > p { grid-column: 1 / -1; margin: 0; padding: 8px 9px; border: 1px solid #ddc99f; color: var(--ink-soft); background: var(--ochre-soft); font-size: 9px; line-height: 1.5; }
 .lprRuleForm { display: grid; gap: 15px; padding: 16px 17px 17px; border-bottom: 1px solid var(--line-strong); background: var(--sheet-muted); }
 .lprRuleFormHeading { display: flex; justify-content: space-between; gap: 18px; align-items: start; }
 .lprRuleFormHeading > div { display: grid; gap: 4px; }

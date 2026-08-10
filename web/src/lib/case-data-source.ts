@@ -334,6 +334,18 @@ export type LegalRuleVersionReceipt = {
   requestId: string | null;
 };
 
+export type FactDecisionReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
+export type LegalFactBindingReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1111,6 +1123,58 @@ export async function loadMoreCaseTransactions(
   };
 }
 
+export async function decidePersistentFact(
+  input: {
+    factId: string;
+    expectedVersion: number;
+    status: "CONFIRMED" | "DISPUTED" | "DENIED" | "INVALIDATED";
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<FactDecisionReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以确认案件事实。");
+  }
+  const decisionHash = await sha256Text([
+    "case-fact-decision-v1",
+    config.matterId,
+    input.factId,
+    String(input.expectedVersion),
+    input.status,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/facts/${input.factId}/decision`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        status: input.status,
+        decision_hash: decisionHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在事实决定确认前中断。请刷新案件台账核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案件事实决定未保存"));
+  }
+  if (payload.object_type !== "FACT") {
+    throw new Error("事实决定回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
 async function loadPersistentLedgerPage<T extends { matter_version: number; items: unknown[] }>(
   config: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>,
   projection: "fact-pages" | "transaction-pages",
@@ -1571,6 +1635,58 @@ export async function approveLprMultipleRuleVersion(
   }
   if (payload.object_type !== "LEGAL_RULE_VERSION") {
     throw new Error("规则审批回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function approveLegalFactBinding(
+  input: { expectedVersion: number; factKey: string; factId: string },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LegalFactBindingReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以建立法律规则事实锚点。");
+  }
+  const factKey = input.factKey.trim();
+  if (!factKey) throw new Error("请填写规则所需事实键。");
+  if (!input.factId) throw new Error("请选择已确认的案件事实。");
+  const approvalHash = await sha256Text([
+    "case-legal-fact-binding-approval-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    factKey,
+    input.factId,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/legal-fact-bindings`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        fact_key: factKey,
+        fact_id: input.factId,
+        approval_hash: approvalHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在事实锚点确认前中断。请刷新法律快照核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "法律规则事实锚点未建立"));
+  }
+  if (payload.object_type !== "CASE_LEGAL_FACT_BINDING") {
+    throw new Error("事实锚点回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,

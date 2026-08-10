@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
   confirmSyntheticFact,
+  decidePersistentFact,
   loadCaseReview,
   loadMoreCaseFacts,
   loadMoreCaseTransactions,
@@ -48,7 +49,12 @@ export function FactsWorkbench() {
   async function confirmCandidate(factId: string) {
     setConfirming(factId);
     try {
-      setReview(await confirmSyntheticFact(factId));
+      if (review?.sourceKind === "persistent-preview" && review.matterVersion !== null) {
+        await decidePersistentFact({ factId, expectedVersion: review.matterVersion, status: "CONFIRMED" });
+        await reloadReview();
+      } else {
+        setReview(await confirmSyntheticFact(factId));
+      }
     } catch (cause) { setError(cause instanceof Error ? cause.message : "无法确认候选事实"); }
     finally { setConfirming(null); }
   }
@@ -73,8 +79,8 @@ export function FactsWorkbench() {
         {review.transactions.map((transaction) => <div className={styles.ledgerRow} key={transaction.transactionId}><strong>{transaction.date ?? "日期待确认"} · {currencySymbol(transaction.currency)} {transaction.amount}</strong><small>{statusLabel(transaction.status)} · {statusLabel(transaction.nature)} · {transaction.application} · {transaction.currency}</small></div>)}
         <LedgerPagination loaded={review.transactionPage.loadedCount} total={review.transactionPage.totalCount} hasMore={review.transactionPage.hasMore} busy={loadingMore === "transactions"} onMore={() => void loadMore("transactions")} />
       </LedgerSection>
-      {review.pendingFacts.length > 0 && <LedgerSection title="待律师确认的事实候选" note={review.sourceKind === "synthetic-alpha" ? "此操作仅改变本机合成台账。" : "持久化确认必须绑定案件版本与审计请求。"}>
-        {review.pendingFacts.map((fact) => <div className={styles.ledgerRow} key={fact.factId}><strong>{fact.text}</strong><small>{fact.origin} · {fact.evidenceCount} 个原始证据定位</small>{review.sourceKind === "synthetic-alpha" ? <button className={styles.candidateAction} disabled={confirming === fact.factId} onClick={() => void confirmCandidate(fact.factId)} type="button">{confirming === fact.factId ? "正在确认…" : "确认合成候选"}</button> : <button className={styles.disabledAction} disabled type="button">请在版本化审批流程确认</button>}</div>)}
+      {review.pendingFacts.length > 0 && <LedgerSection title="待律师确认的事实候选" note={review.sourceKind === "synthetic-alpha" ? "此操作仅改变本机合成台账。" : "确认操作固定案件版本、事实标识、决定状态与审计哈希；上游依赖会随决定变化重新核验。"}>
+        {review.pendingFacts.map((fact) => <div className={styles.ledgerRow} key={fact.factId}><strong>{fact.text}</strong><small>{fact.origin} · {fact.evidenceCount} 个原始证据定位</small><button className={styles.candidateAction} disabled={confirming === fact.factId} onClick={() => void confirmCandidate(fact.factId)} type="button">{confirming === fact.factId ? "正在确认…" : review.sourceKind === "synthetic-alpha" ? "确认合成候选" : "确认本案事实"}</button>{review.sourceKind === "persistent-preview" && <small>确认后才能作为法律规则所需事实锚点；不代替对方主张、付款性质或最终诉讼立场。</small>}</div>)}
       </LedgerSection>}
     </div>
     {pageError && <div className={styles.inlineError} role="alert"><strong>后续记录未载入</strong><span>{pageError}</span><button className={styles.candidateAction} onClick={() => void reloadReview()} type="button">重新载入当前案件</button></div>}
