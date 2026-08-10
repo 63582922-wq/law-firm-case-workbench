@@ -46,6 +46,8 @@ Tauri 原生层现可通过系统 Keychain API 显式生成、保存并回读 32
 
 WebView 的全部正式案件请求现统一通过受控客户端：桌面模式从原生命令取得动态 `127.0.0.1` 地址和短时 Bearer，不使用 Cookie、不持久化令牌、不允许调用方覆盖身份头；固定配置地址如存在必须与 grant 完全一致。派生 PDF、ZIP 和 PNG 的内容读取仍使用独立一次性 Bearer。持久 API 仅为 `tauri://localhost` 开放所需 CORS 方法/头和最小响应头；未登记 Origin 的预检失败。401 不自动重试写命令。
 
+`/v1/matters/{matter_id}/agent-executions` 是受控 Agent 审计面：读取只返回 Agent Run、Tool 提案和执行回执的版本/哈希/范围元数据；创建计划要求案件版本与幂等键，服务端重新检查提案连续性并交给持久层验证该 Skill/Tool 已启用。`/{proposal_id}/receipts` 只为受控系统 Worker 记录成功输出哈希或稳定错误码。任何计划都不等于工具授权；真正执行仍须再次经过 CaseSkillRegistry、案件范围与律师审批门。未注入该持久服务时接口返回 503，绝不使用进程内记录回退。
+
 启动重验与短时 identity authority 已装配到打包 sidecar，但仓库固定的生产信任目录仍为 `NOT_CONFIGURED`，专用 PostgreSQL 也未配置。没有律所真实信任根、签发/续期/撤销服务和数据库逐案授权时，产品不会形成真实登录或开放案件路由。
 
 API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数据库审计事务。已知错误返回稳定代码、中文消息和相同请求号，不向普通界面暴露数据库异常或连接信息。

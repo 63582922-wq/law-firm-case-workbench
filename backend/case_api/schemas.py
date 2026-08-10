@@ -1368,3 +1368,51 @@ class PersistentReviewableOfficeDraftAccessResponse(BaseModel):
     purpose: Literal["REVIEW_PDF", "DOWNLOAD_EDITABLE"]
     access_token: str = Field(min_length=20, max_length=200)
     expires_at: datetime
+
+
+class PersistentAgentToolProposalRequest(BaseModel):
+    sequence: int = Field(ge=1, le=100)
+    skill_id: str = Field(min_length=1, max_length=120)
+    tool_id: str = Field(min_length=1, max_length=120)
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    rationale_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentAgentRunRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    agent_id: str = Field(min_length=1, max_length=120)
+    agent_version: str = Field(min_length=1, max_length=80)
+    policy_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposals: list[PersistentAgentToolProposalRequest] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def proposal_sequences_are_contiguous(self):
+        sequences = sorted(item.sequence for item in self.proposals)
+        if sequences != list(range(1, len(self.proposals) + 1)):
+            raise ValueError("Agent Tool proposal sequences must be contiguous from 1")
+        return self
+
+
+class PersistentAgentToolReceiptRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    status: Literal["SUCCEEDED", "BLOCKED", "FAILED", "STALE_RESULT"]
+    output_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    error_code: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @model_validator(mode="after")
+    def successful_and_unsuccessful_receipts_have_separate_shapes(self):
+        if self.status == "SUCCEEDED" and self.output_hash is not None and self.error_code is None:
+            return self
+        if self.status != "SUCCEEDED" and self.output_hash is None and self.error_code is not None:
+            return self
+        raise ValueError("Agent Tool receipt status does not match output/error fields")
+
+
+class PersistentAgentExecutionSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    runs: tuple[dict[str, Any], ...]
+    proposals: tuple[dict[str, Any], ...]
+    receipts: tuple[dict[str, Any], ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

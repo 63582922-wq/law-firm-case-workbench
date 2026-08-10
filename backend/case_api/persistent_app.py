@@ -76,6 +76,11 @@ from case_kernel.reviewable_draft_postgres import (
     PersistentReviewableOfficeDraftSnapshot,
     PostgresReviewableDraftStore,
 )
+from case_kernel.agent_execution_postgres import (
+    AgentToolProposal,
+    PersistentAgentExecutionSnapshot,
+    PostgresAgentExecutionStore,
+)
 from case_kernel.submission_access import (
     SubmissionAccessBlocked,
     SubmissionExportAccessBroker,
@@ -173,6 +178,9 @@ from .schemas import (
     PersistentReviewableOfficeDraftAccessRequest,
     PersistentReviewableOfficeDraftAccessResponse,
     PersistentReviewableOfficeDraftSnapshotResponse,
+    PersistentAgentExecutionSnapshotResponse,
+    PersistentAgentRunRequest,
+    PersistentAgentToolReceiptRequest,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
     PersistentTransactionPageResponse,
@@ -337,6 +345,14 @@ class PersistentReviewableDraftPort(Protocol):
     def get_reviewable_office_draft_artifact_locator(self, **kwargs): ...
 
 
+class PersistentAgentExecutionPort(Protocol):
+    def plan_agent_run(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def record_tool_execution_receipt(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentAgentExecutionSnapshot: ...
+
+
 class PersistentOfficialSourceCapturePort(Protocol):
     def queue_capture(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -371,6 +387,10 @@ class PersistentReviewableDraftServiceUnavailable(RuntimeError):
     pass
 
 
+class PersistentAgentExecutionServiceUnavailable(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class PersistentApiDependencies:
     settings: RuntimeSettings
@@ -383,6 +403,7 @@ class PersistentApiDependencies:
     official_source_capture_store: PersistentOfficialSourceCapturePort | None = None
     submission_store: PersistentSubmissionPort | None = None
     reviewable_draft_store: PersistentReviewableDraftPort | None = None
+    agent_execution_store: PersistentAgentExecutionPort | None = None
     submission_access_broker: SubmissionExportAccessBroker | None = None
     reviewable_draft_access_broker: ReviewableOfficeDraftAccessBroker | None = None
     artifact_access_broker: EphemeralArtifactAccessBroker | None = None
@@ -430,6 +451,11 @@ class PersistentApiDependencies:
         ):
             if not getattr(self.reviewable_draft_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL reviewable-draft store")
+        if self.agent_execution_store is not None and not isinstance(
+            self.agent_execution_store, PostgresAgentExecutionStore
+        ):
+            if not getattr(self.agent_execution_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL Agent execution store")
         if (
             self.artifact_access_broker is not None
             or self.submission_access_broker is not None
@@ -521,6 +547,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "official_source_capture": "configured" if dependencies.official_source_capture_store else "not-configured",
             "submission": "configured" if dependencies.submission_store else "not-configured",
             "reviewable_drafts": "configured" if dependencies.reviewable_draft_store else "not-configured",
+            "agent_execution": "configured" if dependencies.agent_execution_store else "not-configured",
             "artifact_access": "configured" if dependencies.artifact_access_broker else "not-configured",
             "submission_access": "configured" if dependencies.submission_access_broker else "not-configured",
             "reviewable_draft_access": "configured" if dependencies.reviewable_draft_access_broker else "not-configured",
@@ -582,6 +609,13 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "reviewable Office draft persistence is not configured"
             )
         return dependencies.reviewable_draft_store
+
+    def get_agent_execution_store() -> PersistentAgentExecutionPort:
+        if dependencies.agent_execution_store is None:
+            raise PersistentAgentExecutionServiceUnavailable(
+                "Agent execution persistence is not configured"
+            )
+        return dependencies.agent_execution_store
 
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
@@ -715,6 +749,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "REVIEWABLE_DRAFT_SERVICE_UNAVAILABLE",
             "可审阅 Word/Excel 草稿服务尚未启用，系统不会暴露未验证文件。",
+        )
+
+    @app.exception_handler(PersistentAgentExecutionServiceUnavailable)
+    async def agent_execution_service_handler(_: Request, exc: PersistentAgentExecutionServiceUnavailable):
+        del exc
+        return _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "AGENT_EXECUTION_SERVICE_UNAVAILABLE",
+            "Agent 计划与工具审计服务尚未启用，系统不会回退到内存记录。",
         )
 
     @app.exception_handler(ManagedArtifactBlocked)
@@ -1314,6 +1357,71 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 matter_id=str(matter_id), actor=identity.actor,
                 expected_version=body.expected_version, idempotency_key=idempotency_key,
                 pair_id=str(pair_id), approval_hash=body.approval_hash,
+            )
+        )
+
+    @app.get(
+        "/v1/matters/{matter_id}/agent-executions",
+        response_model=PersistentAgentExecutionSnapshotResponse,
+        tags=["agent-execution"],
+    )
+    async def get_agent_execution_snapshot(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        agent_store: Annotated[PersistentAgentExecutionPort, Depends(get_agent_execution_store)],
+    ) -> PersistentAgentExecutionSnapshotResponse:
+        snapshot = agent_store.get_snapshot(matter_id=str(matter_id), actor=identity.actor)
+        return PersistentAgentExecutionSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.post(
+        "/v1/matters/{matter_id}/agent-executions",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["agent-execution"],
+    )
+    async def plan_agent_execution(
+        matter_id: UUID,
+        body: PersistentAgentRunRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        agent_store: Annotated[PersistentAgentExecutionPort, Depends(get_agent_execution_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            agent_store.plan_agent_run(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                agent_id=body.agent_id, agent_version=body.agent_version,
+                policy_manifest_hash=body.policy_manifest_hash, input_hash=body.input_hash,
+                proposals=tuple(
+                    AgentToolProposal(
+                        sequence=item.sequence, skill_id=item.skill_id, tool_id=item.tool_id,
+                        input_hash=item.input_hash, rationale_hash=item.rationale_hash,
+                    )
+                    for item in body.proposals
+                ),
+            )
+        )
+
+    @app.post(
+        "/v1/matters/{matter_id}/agent-executions/{proposal_id}/receipts",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["agent-execution"],
+    )
+    async def record_agent_tool_execution_receipt(
+        matter_id: UUID,
+        proposal_id: UUID,
+        body: PersistentAgentToolReceiptRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        agent_store: Annotated[PersistentAgentExecutionPort, Depends(get_agent_execution_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(
+            agent_store.record_tool_execution_receipt(
+                matter_id=str(matter_id), actor=identity.actor,
+                expected_version=body.expected_version, idempotency_key=idempotency_key,
+                proposal_id=str(proposal_id), status=body.status,
+                output_hash=body.output_hash, error_code=body.error_code,
             )
         )
 

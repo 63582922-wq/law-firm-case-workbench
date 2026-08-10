@@ -42,6 +42,7 @@ from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
+from case_kernel.agent_execution_postgres import PersistentAgentExecutionSnapshot
 from case_kernel.reviewable_draft_access import (
     ReviewableDraftAccessPurpose,
     ReviewableOfficeDraftAccessBroker,
@@ -687,6 +688,35 @@ class FakePersistentReviewableDraftStore:
             audit_event_id=str(uuid4()),
             object_type="REVIEWABLE_OFFICE_DRAFT_PAIR",
             object_id=kwargs["pair_id"],
+        )
+
+
+class FakePersistentAgentExecutionStore:
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def _receipt(self, name: str, kwargs: dict) -> CaseLedgerCommandReceipt:
+        self.calls.append((name, kwargs))
+        return CaseLedgerCommandReceipt(
+            command_name=name.upper(), idempotency_key=kwargs["idempotency_key"],
+            matter_id=kwargs["matter_id"], matter_version=kwargs["expected_version"] + 1,
+            audit_event_id=str(uuid4()), object_type="AGENT_RUN", object_id=str(uuid4()),
+        )
+
+    def plan_agent_run(self, **kwargs):
+        return self._receipt("plan_agent_run", kwargs)
+
+    def record_tool_execution_receipt(self, **kwargs):
+        return self._receipt("record_tool_execution_receipt", kwargs)
+
+    def get_snapshot(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
+        return PersistentAgentExecutionSnapshot(
+            matter_id=matter_id, matter_version=12,
+            runs=({"run_id": str(uuid4()), "agent_id": "case-manager", "agent_version": "1.0.0", "policy_manifest_hash": "a" * 64, "input_hash": "b" * 64, "input_matter_version": 11, "created_at": datetime.now(timezone.utc).isoformat()},),
+            proposals=(), receipts=(), snapshot_hash="c" * 64,
         )
 
 
@@ -1947,6 +1977,50 @@ class PersistentApiTests(unittest.TestCase):
         response = client.get(f"/v1/matters/{self.matter_id}/reviewable-office-drafts")
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["code"], "REVIEWABLE_DRAFT_SERVICE_UNAVAILABLE")
+
+    def test_agent_execution_routes_bind_plan_to_server_identity_and_hashes(self) -> None:
+        agent_store = FakePersistentAgentExecutionStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    agent_execution_store=agent_store,
+                )
+            )
+        )
+        snapshot = client.get(f"/v1/matters/{self.matter_id}/agent-executions")
+        self.assertEqual(snapshot.status_code, 200, snapshot.text)
+        self.assertEqual(snapshot.json()["runs"][0]["agent_id"], "case-manager")
+        planned = client.post(
+            f"/v1/matters/{self.matter_id}/agent-executions",
+            headers={"Idempotency-Key": "agent-plan-api-001"},
+            json={
+                "expected_version": 12, "agent_id": "case-manager", "agent_version": "1.0.0",
+                "policy_manifest_hash": "a" * 64, "input_hash": "b" * 64,
+                "proposals": [{"sequence": 1, "skill_id": "office_reading", "tool_id": "parse_office_document", "input_hash": "c" * 64, "rationale_hash": "d" * 64}],
+            },
+        )
+        self.assertEqual(planned.status_code, 201, planned.text)
+        name, call = next(item for item in agent_store.calls if item[0] == "plan_agent_run")
+        self.assertEqual(name, "plan_agent_run")
+        self.assertEqual(call["actor"], self.identity.actor)
+        self.assertEqual(call["proposals"][0].tool_id, "parse_office_document")
+
+    def test_agent_execution_routes_fail_closed_without_agent_store(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/agent-executions")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["code"], "AGENT_EXECUTION_SERVICE_UNAVAILABLE")
 
 
 if __name__ == "__main__":
