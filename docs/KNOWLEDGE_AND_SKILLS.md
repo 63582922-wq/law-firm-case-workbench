@@ -285,7 +285,7 @@ reviewer / reviewed_at / status
 4. `FORMAL_CALCULATION`：只能调用版本化的确定性计算器；
 5. `COURT_RELEASE`：仅在律师锁定提交版后执行最终校验。
 
-任何 Agent 都不得直接执行 Shell、读取任意磁盘位置、删除原件、上传原始案卷到互联网或绕过律师审批。模型只提出结构化 `ActionProposal`；工具执行、版本更新和审计由后端状态机完成。
+任何 Agent 都不得直接执行 Shell、读取任意磁盘位置、删除原件、上传原始案卷到互联网或绕过律师审批。模型只提出结构化 `ActionProposal`；工具执行、版本更新和审计由后端状态机完成。当前 `CaseSkillToolGateway` 只接收已经由文件夹授权层签发的 `AuthorizedOriginalFile`，拒绝路径字符串，因此 Agent 无法借由工具读取任意文件。
 
 ### 11.2 每种文档能力的上线门
 
