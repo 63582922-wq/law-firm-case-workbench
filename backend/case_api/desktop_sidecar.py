@@ -136,7 +136,10 @@ def create_desktop_sidecar_app(
         # route. Returning it directly preserves its request correlation,
         # CORS, error handling, and authorization middleware instead of
         # copying routes into a second FastAPI application.
-        return create_persistent_app(persistent_dependencies)
+        return create_persistent_app(
+            persistent_dependencies,
+            native_parent_api_token=parent_api_token,
+        )
     trust = trust or load_desktop_enrollment_trust()
     identity = identity or DesktopIdentityRuntime(
         phase="NOT_ENROLLED",

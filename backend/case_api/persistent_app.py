@@ -6,6 +6,7 @@ explicit dependencies this factory exposes only a disabled health response.
 
 from dataclasses import dataclass
 from datetime import datetime
+from hmac import compare_digest
 from ipaddress import ip_address
 from typing import Annotated, Protocol
 from urllib.parse import quote
@@ -562,7 +563,16 @@ class PersistentApiDependencies:
                 raise ValueError("local intake authorization requires folder grants and evidence persistence")
 
 
-def create_persistent_app(dependencies: PersistentApiDependencies | None = None) -> FastAPI:
+def create_persistent_app(
+    dependencies: PersistentApiDependencies | None = None,
+    *,
+    native_parent_api_token: str | None = None,
+) -> FastAPI:
+    if native_parent_api_token is not None and (
+        len(native_parent_api_token) != 64
+        or not all(char in "0123456789abcdef" for char in native_parent_api_token)
+    ):
+        raise ValueError("native desktop parent token is invalid")
     enabled = dependencies is not None
     if dependencies is not None:
         dependencies.validate()
@@ -738,6 +748,15 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         if dependencies.local_folder_grants is None or dependencies.original_page_access_broker is None:
             raise PersistentEvidenceServiceUnavailable("original-page preview access is not configured")
         return dependencies.local_folder_grants, dependencies.original_page_access_broker
+
+    def require_native_parent(request: Request, session_id: str) -> ServerIdentityContext:
+        if native_parent_api_token is None or dependencies.desktop_session_authority is None:
+            raise PersistentAuthenticationBlocked("native model bridge is not configured")
+        _require_loopback(request)
+        if not compare_digest(request.headers.get("authorization", ""), f"Bearer {native_parent_api_token}"):
+            # Do not disclose that this private endpoint exists.
+            raise KeyError("native-model-bridge")
+        return dependencies.desktop_session_authority.resolve_native_session(session_id=session_id)
 
     @app.exception_handler(PersistentAuthenticationBlocked)
     async def authentication_handler(_: Request, exc: PersistentAuthenticationBlocked):
@@ -3088,6 +3107,60 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 "Cache-Control": "no-store, private",
                 "Content-Disposition": f'inline; filename="{delivery.file_name}"',
                 "Content-Security-Policy": "sandbox",
+                "X-Content-Type-Options": "nosniff",
+                "X-Artifact-SHA256": delivery.content_sha256,
+                "X-Image-Width": str(delivery.width),
+                "X-Image-Height": str(delivery.height),
+            },
+        )
+
+    @app.post(
+        "/v1/native-model/matters/{matter_id}/evidence-pages/{evidence_page_id}/content",
+        response_class=Response,
+        include_in_schema=False,
+    )
+    async def deliver_native_model_page(
+        matter_id: UUID,
+        evidence_page_id: UUID,
+        request: Request,
+        folder_grant_id: UUID,
+        desktop_session_id: UUID,
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+    ) -> Response:
+        """Return exactly one verified page to the trusted native parent.
+
+        The route is deliberately invisible to the WebView API surface and
+        needs both the process-only parent token and a live OS-bound session.
+        It does not accept a file path, arbitrary URL, raw document body or
+        arbitrary content type.
+        """
+        identity = require_native_parent(request, str(desktop_session_id))
+        _, broker = require_original_page_services()
+        locator = evidence_store.get_original_page_locator(
+            matter_id=str(matter_id), evidence_page_id=str(evidence_page_id), actor=identity.actor,
+        )
+        issued = broker.issue(
+            locator=locator,
+            folder_grant_id=str(folder_grant_id),
+            actor=identity.actor,
+            session=_local_session(identity),
+        )
+        delivery = broker.deliver(
+            access_token=issued.access_token,
+            actor=identity.actor,
+            matter_id=str(matter_id),
+            evidence_page_id=str(evidence_page_id),
+            session=_local_session(identity),
+            client_ip=request.client.host if request.client else "",
+        )
+        if len(delivery.content) > 20 * 1024 * 1024:
+            raise OriginalPageAccessBlocked("the verified evidence page exceeds the native OCR upload limit")
+        return Response(
+            content=delivery.content,
+            media_type=delivery.media_type,
+            headers={
+                "Cache-Control": "no-store, private",
+                "Content-Disposition": f'attachment; filename="{delivery.file_name}"',
                 "X-Content-Type-Options": "nosniff",
                 "X-Artifact-SHA256": delivery.content_sha256,
                 "X-Image-Width": str(delivery.width),

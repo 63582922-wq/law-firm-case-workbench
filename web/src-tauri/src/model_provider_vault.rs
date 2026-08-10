@@ -76,6 +76,17 @@ struct QwenConnection {
     workspace_id: String,
 }
 
+/// Short-lived credentials passed only to the native model transport.
+///
+/// The API key is deliberately kept out of the webview, desktop bridge and
+/// status objects.  It is read from Keychain immediately before a bounded
+/// request and is zeroized when the transport drops it.
+pub(crate) struct QwenOcrCredentials {
+    pub(crate) api_key: Zeroizing<String>,
+    pub(crate) region_id: String,
+    pub(crate) workspace_id: String,
+}
+
 pub(crate) struct ModelProviderVault {
     operation_lock: Mutex<()>,
 }
@@ -159,6 +170,31 @@ impl ModelProviderVault {
             .set_password(&encoded)
             .map_err(|_| "无法写入 macOS Keychain 的百炼连接配置。".to_string())?;
         self.status_locked(ModelProvider::Qwen)
+    }
+
+    pub(crate) fn load_qwen_ocr_credentials(&self) -> Result<QwenOcrCredentials, String> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "模型连接安全存储状态锁定失败。".to_string())?;
+        let api_key = entry(ModelProvider::Qwen)?
+            .get_password()
+            .map_err(|_| "Qwen3.5-OCR 尚未在 macOS Keychain 中配置 API Key。".to_string())?;
+        if !valid_api_key(&api_key) {
+            return Err("Qwen3.5-OCR 的 Keychain 密钥格式无效，已拒绝调用。".to_string());
+        }
+        let raw_connection = connection_entry(ModelProvider::Qwen)?
+            .get_password()
+            .map_err(|_| "尚未固定 Qwen3.5-OCR 的百炼地域和业务空间。".to_string())?;
+        let connection = serde_json::from_str::<QwenConnection>(&raw_connection)
+            .map_err(|_| "Qwen3.5-OCR 的百炼连接配置无效，已拒绝调用。".to_string())?;
+        let connection = valid_qwen_connection(connection.region_id, connection.workspace_id)
+            .map_err(|_| "Qwen3.5-OCR 的百炼连接配置无效，已拒绝调用。".to_string())?;
+        Ok(QwenOcrCredentials {
+            api_key: Zeroizing::new(api_key),
+            region_id: connection.region_id,
+            workspace_id: connection.workspace_id,
+        })
     }
 
     fn status_locked(&self, provider: ModelProvider) -> Result<ModelProviderStatus, String> {

@@ -105,6 +105,17 @@ class DesktopSessionIdentityTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Origin": "tauri://localhost", "Authorization": f"Bearer {ACCESS_TOKEN}"},
             )
 
+    def test_native_parent_can_resolve_only_an_existing_live_session_id(self) -> None:
+        grant = self.authority.exchange(
+            request=self._request("POST", "/exchange", self._headers()),
+            bootstrap_token=BOOTSTRAP,
+        )
+        resolved = self.authority.resolve_native_session(session_id=grant.session_id)
+        self.assertEqual(resolved.actor, self.actor)
+        self.authority.revoke(session_id=grant.session_id)
+        with self.assertRaises(PersistentAuthenticationBlocked):
+            self.authority.resolve_native_session(session_id=grant.session_id)
+
     async def test_expired_bearer_is_removed_and_rejected(self) -> None:
         self.authority.exchange(
             request=self._request("POST", "/exchange", self._headers()),

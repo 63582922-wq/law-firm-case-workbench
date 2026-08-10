@@ -202,6 +202,31 @@ class DesktopSessionAuthority:
                 if identity.session_id == session_id:
                     self._sessions.pop(digest, None)
 
+    def resolve_native_session(self, *, session_id: str) -> ServerIdentityContext:
+        """Resolve the current desktop session for the native parent only.
+
+        This is intentionally not an HTTP authentication path.  The caller is
+        additionally required to prove the per-process parent token held by
+        Tauri, so a WebView cannot turn a session identifier into an original
+        evidence read capability.
+        """
+        try:
+            UUID(session_id)
+        except (TypeError, ValueError) as error:
+            raise PersistentAuthenticationBlocked("desktop native session is invalid") from error
+        now = self._clock()
+        with self._lock:
+            for digest, identity in tuple(self._sessions.items()):
+                if identity.session_id != session_id:
+                    continue
+                try:
+                    identity.validate(now=now)
+                except PersistentAuthenticationBlocked:
+                    self._sessions.pop(digest, None)
+                    raise
+                return identity
+        raise PersistentAuthenticationBlocked("desktop native session is unavailable")
+
     def _validate_request_boundary(self, request: Request) -> None:
         host = request.client.host if request.client is not None else ""
         try:

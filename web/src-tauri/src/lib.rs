@@ -1602,6 +1602,7 @@ mod tests {
 }
 mod enrollment_vault;
 mod model_provider_vault;
+mod qwen_ocr;
 mod native_activation_prompt;
 mod native_model_api_key_prompt;
 
