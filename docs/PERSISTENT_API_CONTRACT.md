@@ -34,13 +34,15 @@ Tauri 原生层现可通过系统 Keychain API 显式生成、保存并回读 32
 
 每次 sidecar 启动还必须重新验签 Keychain 登记：信任目录未就绪时不读 Keychain，返回码 44 仅表示 `NOT_ENROLLED`，其他凭证/绑定/时效错误为 `BLOCKED`。有效登记才建立一次性父进程 bootstrap，并由 Rust 立即交换最长 30 分钟 Bearer；普通运行状态不包含 bearer、bootstrap 或 session ID。WebView 会话 grant 还要求专用数据库同时 `CONFIGURED`，当前禁用 sidecar 不挂载案件路由。
 
+WebView 的全部正式案件请求现统一通过受控客户端：桌面模式从原生命令取得动态 `127.0.0.1` 地址和短时 Bearer，不使用 Cookie、不持久化令牌、不允许调用方覆盖身份头；固定配置地址如存在必须与 grant 完全一致。派生 PDF、ZIP 和 PNG 的内容读取仍使用独立一次性 Bearer。持久 API 仅为 `tauri://localhost` 开放所需 CORS 方法/头和最小响应头；未登记 Origin 的预检失败。401 不自动重试写命令。
+
 启动重验与短时 identity authority 已装配到打包 sidecar，但仓库固定的生产信任目录仍为 `NOT_CONFIGURED`，专用 PostgreSQL 也未配置。没有律所真实信任根、签发/续期/撤销服务和数据库逐案授权时，产品不会形成真实登录或开放案件路由。
 
 API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数据库审计事务。已知错误返回稳定代码、中文消息和相同请求号，不向普通界面暴露数据库异常或连接信息。
 
 ## 未完成门槛
 
-- 律所真实签发/续期/撤销服务、生产根运营、WebView 持久 API 会话客户端、专用数据库下的桌面 identity authority 正式装配，或真实 OIDC/MFA；
+- 律所真实签发/续期/撤销服务、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
 - 大案件分页、按角色最小展示与字段级脱敏；
 - 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；

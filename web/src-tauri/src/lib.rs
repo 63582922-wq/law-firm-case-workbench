@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -346,7 +347,7 @@ fn desktop_session_grant(
 fn snapshot_desktop_session_grant(
     runtime: &LocalApiRuntime,
 ) -> Result<DesktopSessionGrant, String> {
-    let state = runtime
+    let mut state = runtime
         .inner
         .lock()
         .map_err(|_| "本机会话状态锁定失败。".to_string())?;
@@ -355,6 +356,21 @@ fn snapshot_desktop_session_grant(
         || state.persistence_phase != "CONFIGURED"
     {
         return Err("专用案件数据库和本机会话尚未同时就绪。".to_string());
+    }
+    let expires_at = state
+        .session_expires_at
+        .clone()
+        .ok_or_else(|| "本机会话到期时间尚未就绪。".to_string())?;
+    let parsed_expiry = DateTime::parse_from_rfc3339(&expires_at)
+        .map_err(|_| "本机会话到期时间无效。".to_string())?
+        .with_timezone(&Utc);
+    let now = Utc::now();
+    if parsed_expiry <= now || parsed_expiry > now + ChronoDuration::minutes(31) {
+        state.session_phase = "EXPIRED".to_string();
+        state.session_id = None;
+        state.session_expires_at = None;
+        state.desktop_access_token = None;
+        return Err("本机会话已到期或有效期异常；请重新启动工作台。".to_string());
     }
     Ok(DesktopSessionGrant {
         api_base: state
@@ -370,10 +386,7 @@ fn snapshot_desktop_session_grant(
             .session_id
             .clone()
             .ok_or_else(|| "本机会话标识尚未就绪。".to_string())?,
-        expires_at: state
-            .session_expires_at
-            .clone()
-            .ok_or_else(|| "本机会话到期时间尚未就绪。".to_string())?,
+        expires_at,
     })
 }
 
@@ -708,6 +721,7 @@ mod tests {
         snapshot_desktop_session_grant, validate_matter_id, validate_selected_root,
         verify_ready_payload,
     };
+    use chrono::{Duration as ChronoDuration, Utc};
     use sha2::{Digest, Sha256};
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -808,7 +822,10 @@ mod tests {
             state.persistence_phase = "NOT_CONFIGURED".to_string();
             state.api_base = Some("http://127.0.0.1:43127".to_string());
             state.session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
-            state.session_expires_at = Some("2026-08-10T12:30:00Z".to_string());
+            state.session_expires_at = Some(
+                (Utc::now() + ChronoDuration::minutes(20))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
             state.desktop_access_token = Some(zeroize::Zeroizing::new("s".repeat(64)));
         }
         assert!(snapshot_desktop_session_grant(&runtime).is_err());
@@ -820,6 +837,30 @@ mod tests {
         let status = serde_json::to_string(&super::snapshot_runtime(&runtime)).unwrap();
         assert!(!status.contains(&"s".repeat(64)));
         assert!(!status.contains("sessionId"));
+    }
+
+    #[test]
+    fn expired_session_is_zeroized_before_webview_grant() {
+        let runtime = LocalApiRuntime::default();
+        {
+            let mut state = runtime.inner.lock().unwrap();
+            state.phase = "READY".to_string();
+            state.session_phase = "READY".to_string();
+            state.persistence_phase = "CONFIGURED".to_string();
+            state.api_base = Some("http://127.0.0.1:43127".to_string());
+            state.session_id = Some("11111111-1111-4111-8111-111111111111".to_string());
+            state.session_expires_at = Some(
+                (Utc::now() - ChronoDuration::seconds(1))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+            state.desktop_access_token = Some(zeroize::Zeroizing::new("s".repeat(64)));
+        }
+        assert!(snapshot_desktop_session_grant(&runtime).is_err());
+        let state = runtime.inner.lock().unwrap();
+        assert_eq!(state.session_phase, "EXPIRED");
+        assert!(state.session_id.is_none());
+        assert!(state.session_expires_at.is_none());
+        assert!(state.desktop_access_token.is_none());
     }
 
     #[test]

@@ -439,6 +439,38 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(client.get("/healthz").json()["mode"], "disabled")
         self.assertEqual(client.get(f"/v1/matters/{self.matter_id}/facts").status_code, 404)
 
+    def test_enabled_api_allows_only_tauri_origin_and_required_webview_headers(self) -> None:
+        app = create_persistent_app(
+            PersistentApiDependencies(
+                settings=self.settings,
+                case_ledger_store=FakePersistentFactStore(),
+                identity_resolver=StaticIdentityResolver(self.identity),
+            )
+        )
+        client = TestClient(app)
+        allowed = client.options(
+            f"/v1/matters/{self.matter_id}/snapshot",
+            headers={
+                "Origin": "tauri://localhost",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization,idempotency-key",
+            },
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+        self.assertEqual(allowed.headers["access-control-allow-origin"], "tauri://localhost")
+        self.assertNotIn("access-control-allow-credentials", allowed.headers)
+
+        denied = client.options(
+            f"/v1/matters/{self.matter_id}/snapshot",
+            headers={
+                "Origin": "https://evil.example",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            },
+        )
+        self.assertEqual(denied.status_code, 400, denied.text)
+        self.assertNotIn("access-control-allow-origin", denied.headers)
+
     def test_server_identity_drives_fact_candidate_without_actor_headers(self) -> None:
         store = FakePersistentFactStore()
         app = create_persistent_app(

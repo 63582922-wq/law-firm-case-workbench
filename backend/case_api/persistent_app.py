@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 
 from case_kernel.case_ledger_postgres import (
     CaseLedgerCommandReceipt,
@@ -370,6 +371,28 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         docs_url="/docs" if enabled else None,
         redoc_url=None,
     )
+    if enabled:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["tauri://localhost"],
+            allow_credentials=False,
+            allow_methods=["GET", "POST"],
+            allow_headers=[
+                "Accept",
+                "Authorization",
+                "Content-Type",
+                "Idempotency-Key",
+            ],
+            expose_headers=[
+                "Content-Disposition",
+                "Content-Length",
+                "X-Artifact-SHA256",
+                "X-Image-Height",
+                "X-Image-Width",
+                "X-Request-ID",
+            ],
+            max_age=600,
+        )
 
     @app.middleware("http")
     async def request_context_middleware(request: Request, call_next):

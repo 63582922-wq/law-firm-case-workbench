@@ -25,6 +25,7 @@ export function IdentitySecurityWorkbench({
   const sessionReady = desktopRuntime?.sessionPhase === "READY";
   const signedCredentialSaved = vaultStatus?.phase === "CREDENTIAL_SAVED_VERIFIED";
   const persistenceConfigured = desktopRuntime?.persistencePhase === "CONFIGURED";
+  const caseAccessReady = processReady && trustReady && identityEnrolled && sessionReady && persistenceConfigured;
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +105,7 @@ export function IdentitySecurityWorkbench({
           <h2>先证明律师身份，再核验本案权限</h2>
           <p>系统不会根据电脑用户名、文件夹名称或页面自选角色授予权限。</p>
         </div>
-        <span className={styles.securityBlockedPill}>真实案件未启用</span>
+        <span className={caseAccessReady ? styles.statusPill : styles.securityBlockedPill}>{caseAccessReady ? "受控案件会话已就绪" : "真实案件未启用"}</span>
       </header>
 
       <div className={styles.securityStatusGrid}>
@@ -123,7 +124,7 @@ export function IdentitySecurityWorkbench({
         <StatusCell
           label="律所签名登记"
           value={identityEnrolled ? "已登记" : signedCredentialSaved ? "已验签保存" : "未登记"}
-          note={identityEnrolled ? sessionReady ? "已重新验签并建立最长 30 分钟本机会话" : "登记已验签，但本机会话尚未就绪" : signedCredentialSaved ? "已保存；重启后将按当前信任目录重新验签" : desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
+          note={identityEnrolled ? sessionReady ? "已重新验签并建立最长 30 分钟本机会话" : desktopRuntime?.sessionPhase === "EXPIRED" ? "短时会话已到期；重启后重新核验" : "登记已验签，但本机会话尚未就绪" : signedCredentialSaved ? "已保存；重启后将按当前信任目录重新验签" : desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
           state={identityEnrolled && sessionReady ? "ready" : "blocked"}
         />
         <StatusCell
@@ -134,9 +135,9 @@ export function IdentitySecurityWorkbench({
         />
         <StatusCell
           label="案件访问"
-          value="保持禁用"
-          note="任一前置门未通过时，不显示真实案卷，也不回退合成结果"
-          state="blocked"
+          value={caseAccessReady ? "已放行" : "保持禁用"}
+          note={caseAccessReady ? "WebView 只在内存中取得短时令牌；每个案件仍由数据库逐案授权" : "任一前置门未通过时，不显示真实案卷，也不回退合成结果"}
+          state={caseAccessReady ? "ready" : "blocked"}
         />
       </div>
 

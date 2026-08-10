@@ -3,11 +3,12 @@ import {
   alphaCalculationPreviewRequest,
   type CalculationPreview,
 } from "@/lib/synthetic-calculation";
+import { persistentApiFetch } from "@/lib/persistent-api-client";
 import { syntheticMatter } from "@/lib/synthetic-matter";
 
 export type CaseDataSourceConfig =
   | { kind: "synthetic-alpha"; label: "本机合成数据" }
-  | { kind: "persistent-preview"; label: "持久化内部预览"; apiBase: string; matterId: string }
+  | { kind: "persistent-preview"; label: "持久化内部预览"; apiBase: string | null; matterId: string }
   | { kind: "persistent-disabled"; label: "持久化模式未启用"; reason: string };
 
 export type CaseReviewView = {
@@ -574,16 +575,16 @@ export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: st
   }
   const apiBase = input.apiBase?.trim().replace(/\/$/, "") || "";
   const matterId = input.matterId?.trim() || "";
-  if (!apiBase || !matterId) {
-    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "缺少持久化服务地址或案件标识，未回退到合成数据。" };
+  if (!matterId) {
+    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "缺少案件标识，未回退到合成数据。" };
   }
-  if (!isAllowedPreviewOrigin(apiBase)) {
+  if (apiBase && !isAllowedPreviewOrigin(apiBase)) {
     return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "持久化服务地址不符合本机或 HTTPS 安全边界。" };
   }
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(matterId)) {
     return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "案件标识不是有效 UUID，已停止读取。" };
   }
-  return { kind: "persistent-preview", label: "持久化内部预览", apiBase, matterId };
+  return { kind: "persistent-preview", label: "持久化内部预览", apiBase: apiBase || null, matterId };
 }
 
 export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<CaseReviewView> {
@@ -596,8 +597,7 @@ export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSour
     if (!response.ok || !("facts" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "本机合成台账快照不可用"));
     return mapSyntheticReview(payload, response.headers.get("X-Request-ID"));
   }
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/snapshot`, {
-    credentials: "include",
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/snapshot`, {
     headers: { Accept: "application/json" },
   });
   const payload = (await response.json()) as PersistentSnapshot | ErrorEnvelope;
@@ -608,8 +608,7 @@ export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSour
 export async function loadEvidenceReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<EvidenceReviewView> {
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") return mapSyntheticEvidence();
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/evidence-snapshot`, {
-    credentials: "include",
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/evidence-snapshot`, {
     headers: { Accept: "application/json" },
   });
   const payload = (await response.json()) as PersistentEvidenceSnapshot | ErrorEnvelope;
@@ -638,9 +637,10 @@ export async function loadCalculationReview(
   if (!obligationId) {
     return emptyPersistentCalculation("尚未选择需要计算的债务单元；系统未显示任何演示金额。", null, null);
   }
-  const response = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/calculations/${encodeURIComponent(obligationId)}/current`,
-    { credentials: "include", headers: { Accept: "application/json" }, cache: "no-store" },
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/calculations/${encodeURIComponent(obligationId)}/current`,
+    { headers: { Accept: "application/json" } },
   );
   const payload = (await response.json()) as PersistentFormalCalculationSnapshot | ErrorEnvelope;
   if (!response.ok || !("snapshot_hash" in payload)) {
@@ -663,10 +663,8 @@ export async function loadLegalReview(
 ): Promise<LegalReviewView> {
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") return syntheticLegalDiscoveryView();
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/legal-review`, {
-    credentials: "include",
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/legal-review`, {
     headers: { Accept: "application/json" },
-    cache: "no-store",
   });
   const payload = (await response.json()) as PersistentLegalReviewSnapshot | ErrorEnvelope;
   if (!response.ok || !("snapshot_hash" in payload)) {
@@ -680,10 +678,8 @@ export async function loadOfficialSourceCaptureReview(
 ): Promise<OfficialSourceCaptureView> {
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") return syntheticOfficialSourceProbeView();
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/official-source-captures`, {
-    credentials: "include",
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/official-source-captures`, {
     headers: { Accept: "application/json" },
-    cache: "no-store",
   });
   const payload = (await response.json()) as PersistentOfficialSourceCaptureSnapshot | ErrorEnvelope;
   if (!response.ok || !("runs" in payload)) {
@@ -713,9 +709,8 @@ export async function queueOfficialSourceCapture(
   ].join("|"));
   let response: Response;
   try {
-    response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/official-source-captures`, {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/official-source-captures`, {
       method: "POST",
-      credentials: "include",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -776,11 +771,11 @@ export async function reviewOfficialSourceCapture(
   ].join("|"));
   let response: Response;
   try {
-    response = await fetch(
-      `${config.apiBase}/v1/matters/${config.matterId}/official-source-captures/${input.runId}/review`,
+    response = await persistentApiFetch(
+      config,
+      `/v1/matters/${config.matterId}/official-source-captures/${input.runId}/review`,
       {
         method: "POST",
-        credentials: "include",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -851,11 +846,11 @@ export async function registerReviewedOfficialSourceCapture(
   ].join("|"));
   let response: Response;
   try {
-    response = await fetch(
-      `${config.apiBase}/v1/matters/${config.matterId}/official-source-captures/${input.runId}/register`,
+    response = await persistentApiFetch(
+      config,
+      `/v1/matters/${config.matterId}/official-source-captures/${input.runId}/register`,
       {
         method: "POST",
-        credentials: "include",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -893,10 +888,8 @@ export async function loadSubmissionReview(
 ): Promise<SubmissionReviewView> {
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") return syntheticSubmissionView();
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/submission-snapshot`, {
-    credentials: "include",
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/submission-snapshot`, {
     headers: { Accept: "application/json" },
-    cache: "no-store",
   });
   const payload = (await response.json()) as PersistentSubmissionSnapshot | ErrorEnvelope;
   if (!response.ok || !("snapshot_hash" in payload)) {
@@ -916,9 +909,10 @@ export async function fetchSubmissionExport(
     throw new Error("当前案件没有有效且已核验的法院提交包。");
   }
   const exportId = review.currentExport.exportId;
-  const accessResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/submission-exports/${exportId}/access`,
-    { method: "POST", credentials: "include", headers: { Accept: "application/json" } },
+  const accessResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/submission-exports/${exportId}/access`,
+    { method: "POST", headers: { Accept: "application/json" } },
   );
   const accessPayload = (await accessResponse.json()) as
     | { access_token: string; export_id: string; expires_at: string }
@@ -929,13 +923,13 @@ export async function fetchSubmissionExport(
   if (accessPayload.export_id !== exportId) {
     throw new Error("下载许可与当前提交包不一致，已停止读取。");
   }
-  const contentResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/submission-exports/${exportId}/content`,
+  const contentResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/submission-exports/${exportId}/content`,
     {
-      credentials: "include",
       headers: { Accept: "application/zip", Authorization: `Bearer ${accessPayload.access_token}` },
-      cache: "no-store",
     },
+    "provided-bearer",
   );
   if (!contentResponse.ok) {
     const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
@@ -970,11 +964,11 @@ export async function fetchEvidenceDerivative(
   if (derivative.status !== "VERIFIED") {
     throw new Error("该证据派生件尚未完成完整性核验。");
   }
-  const accessResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/access`,
+  const accessResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/access`,
     {
       method: "POST",
-      credentials: "include",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({ purpose }),
     },
@@ -988,13 +982,13 @@ export async function fetchEvidenceDerivative(
   if (accessPayload.derivative_id !== derivative.derivativeId) {
     throw new Error("证据派生件读取许可与当前记录不一致，已停止读取。");
   }
-  const contentResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/content`,
+  const contentResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-derivatives/${derivative.derivativeId}/content`,
     {
-      credentials: "include",
       headers: { Accept: "application/pdf", Authorization: `Bearer ${accessPayload.access_token}` },
-      cache: "no-store",
     },
+    "provided-bearer",
   );
   if (!contentResponse.ok) {
     const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
@@ -1029,9 +1023,8 @@ export async function inspectLocalFolderSelection(
   if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以选择案卷文件夹。");
   const normalizedRoot = selectedRoot.trim();
   if (!normalizedRoot) throw new Error("本机没有返回已选择的案卷文件夹。");
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/local-folder-selections/inspect`, {
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/local-folder-selections/inspect`, {
     method: "POST",
-    credentials: "include",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify({ selected_root: normalizedRoot }),
   });
@@ -1053,9 +1046,8 @@ export async function issueLocalFolderGrant(
   config: CaseDataSourceConfig = caseDataSourceConfig,
 ): Promise<LocalFolderGrant> {
   if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以授权案卷文件夹。");
-  const response = await fetch(`${config.apiBase}/v1/matters/${config.matterId}/local-folder-grants`, {
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/local-folder-grants`, {
     method: "POST",
-    credentials: "include",
     headers: { Accept: "application/json", "Content-Type": "application/json" },
     body: JSON.stringify({
       selected_root: selection.selectedRoot,
@@ -1085,11 +1077,11 @@ export async function fetchOriginalPagePreview(
   config: CaseDataSourceConfig = caseDataSourceConfig,
 ): Promise<OriginalPagePreviewDelivery> {
   if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以预览原始证据页。");
-  const accessResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/access`,
+  const accessResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/access`,
     {
       method: "POST",
-      credentials: "include",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
       body: JSON.stringify({ folder_grant_id: folderGrantId }),
     },
@@ -1101,13 +1093,13 @@ export async function fetchOriginalPagePreview(
     throw new Error(errorMessage(accessPayload as ErrorEnvelope, "无法取得原始证据页的短时预览许可"));
   }
   if (accessPayload.evidence_page_id !== pageId) throw new Error("原始证据页预览许可与当前页面不一致。");
-  const contentResponse = await fetch(
-    `${config.apiBase}/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/content`,
+  const contentResponse = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-pages/${pageId}/original-preview/content`,
     {
-      credentials: "include",
       headers: { Accept: "image/png", Authorization: `Bearer ${accessPayload.access_token}` },
-      cache: "no-store",
     },
+    "provided-bearer",
   );
   if (!contentResponse.ok) {
     const payload = (await contentResponse.json().catch(() => ({}))) as ErrorEnvelope;
@@ -1345,9 +1337,8 @@ async function postEvidenceMutation(input: {
 }): Promise<EvidenceMutationReceipt> {
   let response: Response;
   try {
-    response = await fetch(`${input.config.apiBase}/v1/matters/${input.config.matterId}/${input.path}`, {
+    response = await persistentApiFetch(input.config, `/v1/matters/${input.config.matterId}/${input.path}`, {
       method: "POST",
-      credentials: "include",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
@@ -1394,11 +1385,11 @@ export async function enqueueEvidenceDerivativeRun(
   const approvalHash = await sha256Text(approvalBinding);
   let response: Response;
   try {
-    response = await fetch(
-      `${config.apiBase}/v1/matters/${config.matterId}/evidence-manifests/${review.lockedManifest.manifestId}/derivative-runs`,
+    response = await persistentApiFetch(
+      config,
+      `/v1/matters/${config.matterId}/evidence-manifests/${review.lockedManifest.manifestId}/derivative-runs`,
       {
         method: "POST",
-        credentials: "include",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -2096,6 +2087,7 @@ function errorMessage(payload: ErrorEnvelope, fallback: string): string {
 function isAllowedPreviewOrigin(value: string): boolean {
   try {
     const url = new URL(value);
+    if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) return false;
     if (url.protocol === "https:") return true;
     return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   } catch {
