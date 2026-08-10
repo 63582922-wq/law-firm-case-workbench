@@ -59,6 +59,10 @@ from case_api.desktop_official_capture_runtime import (
     DesktopOfficialCaptureRuntimeBlocked,
     build_desktop_official_capture_runtime,
 )
+from case_api.desktop_agent_draft_runtime import (
+    DesktopAgentDraftRuntimeBlocked,
+    build_desktop_agent_draft_runtime,
+)
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeSettings
 
@@ -634,10 +638,25 @@ def run() -> int:
             if persistent_runtime is not None
             else None
         )
+        # This is an in-process executor, not an HTTP route.  Constructing it
+        # here makes the sidecar fail before opening any case route if an
+        # operator explicitly enables it with an unsafe Office/worker setup.
+        # A later local Agent supervisor receives this object directly; the
+        # WebView never does.
+        agent_draft_runtime = (
+            build_desktop_agent_draft_runtime(
+                identity=identity,
+                environ=os.environ,
+                persistent_runtime=persistent_runtime,
+            )
+            if persistent_runtime is not None
+            else None
+        )
     except (
         RuntimeConfigurationBlocked,
         DesktopPersistentRuntimeBlocked,
         DesktopOfficialCaptureRuntimeBlocked,
+        DesktopAgentDraftRuntimeBlocked,
     ):
         server_socket.close()
         print("本机受控服务的持久化前置条件未通过。", file=sys.stderr, flush=True)
@@ -666,6 +685,11 @@ def run() -> int:
                     "persistence": (
                         "CONFIGURED"
                         if persistent_runtime is not None
+                        else "NOT_CONFIGURED"
+                    ),
+                    "agent_draft_executor": (
+                        "ASSEMBLED"
+                        if agent_draft_runtime is not None
                         else "NOT_CONFIGURED"
                     ),
                     "enrollment_trust": trust.phase,
