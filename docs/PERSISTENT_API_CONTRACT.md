@@ -30,6 +30,8 @@
 
 登记生命周期编排也已实现为独立接口：一次性激活请求只含激活秘密、设备绑定摘要和 nonce；返回签名凭证先验证再 CAS 保存；续期保持同一登记号、用户和律所且必须延长有效期；远程撤销只有在匹配的接受回执后才删除本机凭证；“仅停用本机”可清除损坏或过期凭证，但明确标为远程撤销未确认。当前签名凭证保存链只用合成 issuer/vault 测试，未配置真实网络。
 
+续期和远程撤销现已装配原生网络链：HTTPS Origin 与最多四个 TLS SPKI pin 只从当前签名目录读取；系统 CA/主机名与 SPKI 双重核验，固定路径、严格 JSON、大小/超时限制且不自动重试。sidecar 从固定 Keychain 项读取当前材料并在内存 staging，续期 envelope 再验签后只把精确字节/哈希交给 Rust CAS；远程撤销还必须通过 macOS 原生警告框，只有匹配、接受且时效有效的回执才使 Rust 停止会话并按旧哈希删除本机凭证。WebView 只能触发命令和读取脱敏状态，不能绕过原生确认，也不能看到 envelope、安装秘密或远程回执细节。
+
 Tauri 原生层现可通过系统 Keychain API 显式生成、保存并回读 32 字节安装秘密，以及读取脱敏状态和只删除本机登记凭证；秘密不进入命令参数或 WebView。安装包固定离线目录根公钥，sidecar 验证门限签名、到期、连续版本、前序哈希、TLS pin 和签发公钥状态；原生层只从系统文件选择器读取 `.lawenroll`，以父进程私有令牌发送精确凭证字节和 Keychain 内秘密的摘要，验签成功后按回执哈希与当前凭证哈希 CAS 保存。仓库 bootstrap 为 `NOT_CONFIGURED`，不生成生产信任或假登录。
 
 每次 sidecar 启动还必须重新验签 Keychain 登记：信任目录未就绪时不读 Keychain，返回码 44 仅表示 `NOT_ENROLLED`，其他凭证/绑定/时效错误为 `BLOCKED`。有效登记才建立一次性父进程 bootstrap，并由 Rust 立即交换最长 30 分钟 Bearer；普通运行状态不包含 bearer、bootstrap 或 session ID。WebView 会话 grant 还要求专用数据库同时 `CONFIGURED`，当前禁用 sidecar 不挂载案件路由。
@@ -42,7 +44,7 @@ API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数�
 
 ## 未完成门槛
 
-- 律所真实签发/续期/撤销服务、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；
+- 律所真实签发/续期/撤销服务及断线状态查询、生产根运营、专用数据库下的桌面 identity authority/Store/Worker 正式装配，或真实 OIDC/MFA；
 - 专用 `_test` PostgreSQL 的迁移与整链集成执行；
 - 大案件分页、按角色最小展示与字段级脱敏；
 - 速率限制、CSRF/本机 IPC 来源绑定、Keychain 初始化/轮换、迁移部署与备份恢复；

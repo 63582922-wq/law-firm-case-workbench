@@ -28,6 +28,7 @@ declare global {
           | "CREDENTIAL_SAVED_VERIFIED"
           | "CREDENTIAL_PRESENT_UNVERIFIED"
           | "BROKEN_LOCAL_CREDENTIAL"
+          | "REMOTE_REVOKED_CONFIRMED"
           | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
           | "UNAVAILABLE";
         message: string;
@@ -41,6 +42,18 @@ declare global {
         enrollmentEnvelopePresent: boolean;
       }>;
       importSignedEnrollmentPackage(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
+      renewEnrollment(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
+      revokeEnrollment(): Promise<{
         phase: string;
         message: string;
         installationInitialized: boolean;

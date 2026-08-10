@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_shell::{ShellExt, process::CommandChild, process::CommandEvent};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -100,6 +100,27 @@ struct EnrollmentVerificationResponse {
     envelope_sha256: String,
     enrollment_id: String,
     expires_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollmentRenewalResponse {
+    status: String,
+    enrollment_id: String,
+    envelope_text: String,
+    envelope_sha256: String,
+    expected_current_sha256: String,
+    installation_binding_sha256: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollmentRevocationResponse {
+    status: String,
+    enrollment_id: String,
+    expected_current_sha256: String,
+    remote_revocation_confirmed: bool,
 }
 
 #[derive(Deserialize)]
@@ -467,6 +488,150 @@ fn import_signed_enrollment_package(
     Ok(status)
 }
 
+#[tauri::command]
+async fn renew_desktop_enrollment(
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, EnrollmentVault>,
+) -> Result<EnrollmentVaultStatus, String> {
+    let (port, token) = enrollment_verification_channel(&runtime)?;
+    let context = vault.verification_context()?;
+    let expected_current = context
+        .expected_current_sha256
+        .as_deref()
+        .ok_or_else(|| "当前没有可续期的律所登记。".to_string())?;
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        parent_lifecycle_request(port, token.as_str(), "/v1/desktop-enrollment/renew", &[])
+    })
+    .await
+    .map_err(|_| "律所登记续期任务异常结束；未写入 Keychain。".to_string())??;
+    let renewed: EnrollmentRenewalResponse = serde_json::from_slice(&response)
+        .map_err(|_| "律所登记续期回执内容无效；未写入 Keychain。".to_string())?;
+    if renewed.status != "RENEWED"
+        || Uuid::parse_str(&renewed.enrollment_id).is_err()
+        || renewed.expected_current_sha256 != expected_current
+        || renewed.installation_binding_sha256 != context.installation_binding_sha256
+        || renewed.envelope_text.is_empty()
+        || renewed.envelope_text.len() as u64 > MAX_ENROLLMENT_PACKAGE_BYTES
+        || renewed.expires_at.len() < 20
+        || !renewed.expires_at.ends_with('Z')
+    {
+        return Err("律所登记续期回执与当前本机状态不一致；未写入 Keychain。".to_string());
+    }
+    let mut status = vault.commit_enrollment_after_verification(
+        &renewed.envelope_text,
+        &renewed.envelope_sha256,
+        &renewed.installation_binding_sha256,
+        Some(expected_current),
+    )?;
+    status.phase = "CREDENTIAL_SAVED_VERIFIED".to_string();
+    status.message = "律所签名登记已续期并保存；请重启桌面应用重新验签。".to_string();
+    Ok(status)
+}
+
+#[tauri::command]
+async fn revoke_desktop_enrollment(
+    app: AppHandle,
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, EnrollmentVault>,
+) -> Result<EnrollmentVaultStatus, String> {
+    let confirmation_app = app.clone();
+    let confirmed = tauri::async_runtime::spawn_blocking(move || {
+        confirmation_app
+            .dialog()
+            .message("这会联系律所服务端撤销当前律师登记，并立即停止本机案件会话。只有服务端确认后才删除本机凭证。是否继续？")
+            .title("确认远程撤销律师登记")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "确认远程撤销".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show()
+    })
+    .await
+    .map_err(|_| "无法显示原生远程撤销确认框；未执行任何操作。".to_string())?;
+    if !confirmed {
+        return Err("未确认远程撤销；未联系律所服务或删除本机登记。".to_string());
+    }
+    let (port, token) = enrollment_verification_channel(&runtime)?;
+    let context = vault.verification_context()?;
+    let expected_current = context
+        .expected_current_sha256
+        .as_deref()
+        .ok_or_else(|| "当前没有可撤销的律所登记。".to_string())?;
+    let body =
+        serde_json::to_vec(&serde_json::json!({"confirmation": "CONFIRM_REMOTE_REVOCATION"}))
+            .map_err(|_| "无法构造远程撤销请求。".to_string())?;
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        parent_lifecycle_request(port, token.as_str(), "/v1/desktop-enrollment/revoke", &body)
+    })
+    .await
+    .map_err(|_| "律所远程撤销任务异常结束；未删除本机登记。".to_string())??;
+    let revoked: EnrollmentRevocationResponse = serde_json::from_slice(&response)
+        .map_err(|_| "律所远程撤销回执内容无效；未删除本机登记。".to_string())?;
+    if revoked.status != "REVOKED"
+        || Uuid::parse_str(&revoked.enrollment_id).is_err()
+        || revoked.expected_current_sha256 != expected_current
+        || !revoked.remote_revocation_confirmed
+    {
+        return Err("律所远程撤销回执与当前本机登记不一致；未删除本机登记。".to_string());
+    }
+    mark_runtime_blocked(&runtime, "律所登记已远程撤销；本机会话已停止。");
+    vault.commit_remote_revocation(expected_current)
+}
+
+fn parent_lifecycle_request(
+    port: u16,
+    parent_api_token: &str,
+    path: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, String> {
+    if parent_api_token.len() != 64
+        || !parent_api_token
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        || !matches!(
+            path,
+            "/v1/desktop-enrollment/renew" | "/v1/desktop-enrollment/revoke"
+        )
+        || body.len() > 1024
+    {
+        return Err("本机登记生命周期请求格式无效。".to_string());
+    }
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_secs(3))
+        .map_err(|_| "无法连接本机登记生命周期服务。".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .map_err(|_| "无法限制登记生命周期读取时长。".to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "无法限制登记生命周期写入时长。".to_string())?;
+    let content_type = if body.is_empty() {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {parent_api_token}\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .map_err(|_| "无法发送本机登记生命周期请求。".to_string())?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_LOCAL_API_RESPONSE_BYTES + 1)
+        .read_to_end(&mut response)
+        .map_err(|_| "无法读取本机登记生命周期回执。".to_string())?;
+    if response.len() as u64 > MAX_LOCAL_API_RESPONSE_BYTES {
+        return Err("本机登记生命周期回执过长。".to_string());
+    }
+    let body = successful_http_body(&response, "律所登记生命周期操作未完成。")?;
+    Ok(body.to_vec())
+}
+
 fn enrollment_verification_channel(
     runtime: &LocalApiRuntime,
 ) -> Result<(u16, Zeroizing<String>), String> {
@@ -701,6 +866,8 @@ pub fn run() {
             desktop_enrollment_vault_status,
             initialize_desktop_installation,
             import_signed_enrollment_package,
+            renew_desktop_enrollment,
+            revoke_desktop_enrollment,
             disable_local_enrollment,
             select_case_folder
         ])
@@ -716,8 +883,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOCAL_API_PROTOCOL, LocalApiRuntime, enrollment_verification_channel,
-        exchange_desktop_session_with_sidecar, parse_enrollment_verification_response,
+        EnrollmentRenewalResponse, EnrollmentRevocationResponse, LOCAL_API_PROTOCOL,
+        LocalApiRuntime, enrollment_verification_channel, exchange_desktop_session_with_sidecar,
+        parent_lifecycle_request, parse_enrollment_verification_response,
         snapshot_desktop_session_grant, validate_matter_id, validate_selected_root,
         verify_ready_payload,
     };
@@ -890,6 +1058,46 @@ mod tests {
         server.join().unwrap();
         assert_eq!(grant.status, "SESSION_READY");
         assert_eq!(grant.access_token, "s".repeat(64));
+    }
+
+    #[test]
+    fn native_parent_lifecycle_request_is_token_bound_and_strictly_parsed() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..size]).unwrap();
+            assert!(request.starts_with("POST /v1/desktop-enrollment/renew HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("Authorization: Bearer {}\r\n", "d".repeat(64))));
+            assert!(request.contains("Content-Length: 0\r\n"));
+            let body = serde_json::json!({
+                "status": "RENEWED",
+                "enrollment_id": "11111111-1111-4111-8111-111111111111",
+                "envelope_text": "signed-envelope",
+                "envelope_sha256": "a".repeat(64),
+                "expected_current_sha256": "b".repeat(64),
+                "installation_binding_sha256": "c".repeat(64),
+                "expires_at": "2026-08-20T12:00:00Z"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let body =
+            parent_lifecycle_request(port, &"d".repeat(64), "/v1/desktop-enrollment/renew", &[])
+                .unwrap();
+        let response: EnrollmentRenewalResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.status, "RENEWED");
+        server.join().unwrap();
+
+        let extra = br#"{"status":"REVOKED","enrollment_id":"11111111-1111-4111-8111-111111111111","expected_current_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","remote_revocation_confirmed":true,"role":"ADMIN"}"#;
+        assert!(serde_json::from_slice::<EnrollmentRevocationResponse>(extra).is_err());
     }
 
     #[test]

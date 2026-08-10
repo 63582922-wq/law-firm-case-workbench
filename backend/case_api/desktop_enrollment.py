@@ -94,6 +94,12 @@ class DesktopEnrollment:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class DesktopEnrollmentMaterial:
+    envelope_text: str = field(repr=False)
+    installation_secret: bytes = field(repr=False)
+
+
 class DesktopEnrollmentProvider(Protocol):
     def load(self) -> DesktopEnrollment: ...
 
@@ -311,6 +317,17 @@ class MacOSKeychainDesktopEnrollmentProvider:
         return enrollment
 
     def load_optional(self) -> DesktopEnrollment | None:
+        material = self.load_material_optional()
+        if material is None:
+            return None
+        return self._verifier.verify(
+            envelope_text=material.envelope_text,
+            installation_secret=material.installation_secret,
+        )
+
+    def load_material_optional(self) -> DesktopEnrollmentMaterial | None:
+        """Read exact lifecycle material for a parent-token-protected sidecar action."""
+
         envelope_text = self._read_item(
             account=self._enrollment_account,
             maximum_bytes=MAX_ENROLLMENT_BYTES,
@@ -334,7 +351,11 @@ class MacOSKeychainDesktopEnrollmentProvider:
             installation_secret = b64decode(encoded_secret, validate=True)
         except (ValueError, UnicodeEncodeError) as error:
             raise DesktopEnrollmentBlocked("desktop installation binding has invalid encoding") from error
-        return self._verifier.verify(
+        self._verifier.verify(
+            envelope_text=envelope_text,
+            installation_secret=installation_secret,
+        )
+        return DesktopEnrollmentMaterial(
             envelope_text=envelope_text,
             installation_secret=installation_secret,
         )

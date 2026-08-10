@@ -237,6 +237,43 @@ impl EnrollmentVault {
         Ok(self.status_locked())
     }
 
+    /// Delete the current envelope only after the parent-protected sidecar has
+    /// returned an accepted remote revocation receipt bound to its exact hash.
+    pub(crate) fn commit_remote_revocation(
+        &self,
+        expected_current_sha256: &str,
+    ) -> Result<EnrollmentVaultStatus, String> {
+        if !valid_sha256(expected_current_sha256) {
+            return Err("远程撤销回执格式无效；未删除本机登记。".to_string());
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未完成远程撤销。".to_string())?
+            .ok_or_else(|| "当前没有可撤销的本机登记凭证。".to_string())?;
+        if envelope_sha256(&current) != expected_current_sha256 {
+            return Err("当前登记凭证已变化；未删除较新的本机状态。".to_string());
+        }
+        self.store
+            .delete(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "律所已接受撤销，但本机凭证删除失败；请立即联系管理员。".to_string())?;
+        match self.store.get(ENROLLMENT_ACCOUNT) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => {
+                let _ = self.store.set(ENROLLMENT_ACCOUNT, &current);
+                return Err("本机凭证删除后复核失败；已尝试恢复并请联系管理员。".to_string());
+            }
+        }
+        let mut status = self.status_locked();
+        status.phase = "REMOTE_REVOKED_CONFIRMED".to_string();
+        status.message = "律所服务端已接受撤销，本机登记凭证也已清除。".to_string();
+        Ok(status)
+    }
+
     fn status_locked(&self) -> EnrollmentVaultStatus {
         let secret = match self.read_installation_secret() {
             Ok(secret) => secret,
@@ -563,6 +600,40 @@ mod tests {
         assert_eq!(
             context.expected_current_sha256,
             Some(envelope_sha256(envelope))
+        );
+    }
+
+    #[test]
+    fn remote_revocation_delete_is_exact_hash_bound() {
+        let store = Arc::new(MemoryStore::default());
+        let vault = EnrollmentVault::with_store(store.clone());
+        vault
+            .initialize_installation_with_secret(INITIALIZE_CONFIRMATION, Some([7_u8; 32]))
+            .unwrap();
+        let envelope = r#"{"credential":{},"signature":"x"}"#;
+        store
+            .values
+            .lock()
+            .unwrap()
+            .insert(ENROLLMENT_ACCOUNT.to_string(), envelope.to_string());
+        assert!(vault.commit_remote_revocation(&"0".repeat(64)).is_err());
+        assert!(
+            store
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(ENROLLMENT_ACCOUNT)
+        );
+        let status = vault
+            .commit_remote_revocation(&envelope_sha256(envelope))
+            .unwrap();
+        assert_eq!(status.phase, "REMOTE_REVOKED_CONFIRMED");
+        assert!(
+            !store
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(ENROLLMENT_ACCOUNT)
         );
     }
 }

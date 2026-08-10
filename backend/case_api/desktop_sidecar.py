@@ -25,7 +25,20 @@ import uvicorn
 
 from case_api.desktop_enrollment import (
     DesktopEnrollmentBlocked,
+    MACOS_KEYCHAIN_ENROLLMENT_ACCOUNT,
+    MACOS_KEYCHAIN_INSTALLATION_ACCOUNT,
+    MACOS_KEYCHAIN_SERVICE,
+    MacOSKeychainDesktopEnrollmentProvider,
     SignedDesktopEnrollmentVerifier,
+)
+from case_api.desktop_enrollment_http import (
+    JsonFirmEnrollmentIssuer,
+    PinnedHttpsJsonTransport,
+)
+from case_api.desktop_enrollment_lifecycle import (
+    AuthenticatedFirmEnrollmentIssuer,
+    DesktopEnrollmentLifecycle,
+    DesktopEnrollmentLifecycleBlocked,
 )
 from case_api.desktop_identity_runtime import (
     DesktopIdentityRuntime,
@@ -46,6 +59,8 @@ _PARENT_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _BINDING_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _VERIFY_REQUEST_FIELDS = frozenset({"envelope_text", "installation_binding_sha256"})
 _MAX_VERIFY_REQUEST_BYTES = 20_000
+_REMOTE_REVOCATION_FIELDS = frozenset({"confirmation"})
+_REMOTE_REVOCATION_CONFIRMATION = "CONFIRM_REMOTE_REVOCATION"
 
 
 class DesktopSidecarBlocked(RuntimeError):
@@ -88,6 +103,8 @@ def create_desktop_sidecar_app(
     *,
     parent_api_token: str | None = None,
     identity: DesktopIdentityRuntime | None = None,
+    enrollment_issuer: AuthenticatedFirmEnrollmentIssuer | None = None,
+    keychain_runner=None,
 ) -> FastAPI:
     trust = trust or load_desktop_enrollment_trust()
     identity = identity or DesktopIdentityRuntime(
@@ -180,7 +197,132 @@ def create_desktop_sidecar_app(
                 "expires_at": grant.expires_at.isoformat().replace("+00:00", "Z"),
             }
 
+    if (
+        trust.phase == "READY"
+        and trust.catalog is not None
+        and parent_api_token is not None
+        and enrollment_issuer is not None
+    ):
+
+        @app.post("/v1/desktop-enrollment/renew")
+        async def renew_desktop_enrollment(request: Request) -> dict[str, str]:
+            _require_parent_authorization(request, parent_api_token)
+            if await request.body():
+                raise HTTPException(status_code=422, detail="invalid renewal request")
+            try:
+                lifecycle, vault = _staged_lifecycle(
+                    trust=trust,
+                    issuer=enrollment_issuer,
+                    keychain_runner=keychain_runner,
+                )
+                result = lifecycle.renew()
+            except (DesktopEnrollmentBlocked, DesktopEnrollmentLifecycleBlocked):
+                raise HTTPException(status_code=422, detail="renewal unavailable") from None
+            envelope_text = vault.current_envelope()
+            return {
+                "status": "RENEWED",
+                "enrollment_id": result.enrollment_id or "",
+                "envelope_text": envelope_text,
+                "envelope_sha256": sha256(envelope_text.encode("utf-8")).hexdigest(),
+                "expected_current_sha256": vault.initial_envelope_sha256,
+                "installation_binding_sha256": vault.installation_binding_sha256,
+                "expires_at": result.expires_at.isoformat().replace("+00:00", "Z")
+                if result.expires_at is not None
+                else "",
+            }
+
+        @app.post("/v1/desktop-enrollment/revoke")
+        async def revoke_desktop_enrollment(request: Request) -> dict[str, str | bool]:
+            _require_parent_authorization(request, parent_api_token)
+            body = await request.body()
+            if not body or len(body) > 256:
+                raise HTTPException(status_code=422, detail="invalid revocation request")
+            try:
+                payload = _strict_request_json(body)
+                if frozenset(payload) != _REMOTE_REVOCATION_FIELDS:
+                    raise ValueError("invalid fields")
+                if payload.get("confirmation") != _REMOTE_REVOCATION_CONFIRMATION:
+                    raise ValueError("invalid confirmation")
+                lifecycle, vault = _staged_lifecycle(
+                    trust=trust,
+                    issuer=enrollment_issuer,
+                    keychain_runner=keychain_runner,
+                )
+                result = lifecycle.revoke(reason="用户在本机主动请求撤销登记")
+            except (DesktopEnrollmentBlocked, DesktopEnrollmentLifecycleBlocked, ValueError):
+                raise HTTPException(status_code=422, detail="revocation unavailable") from None
+            return {
+                "status": "REVOKED",
+                "enrollment_id": result.enrollment_id or "",
+                "expected_current_sha256": vault.initial_envelope_sha256,
+                "remote_revocation_confirmed": result.remote_revocation_confirmed,
+            }
+
     return app
+
+
+def _require_parent_authorization(request: Request, parent_api_token: str) -> None:
+    authorization = request.headers.get("authorization", "")
+    if not compare_digest(authorization, f"Bearer {parent_api_token}"):
+        raise HTTPException(status_code=404, detail="not found")
+
+
+class _StagedEnrollmentVault:
+    def __init__(self, *, envelope_text: str, installation_secret: bytes) -> None:
+        self._envelope = envelope_text
+        self._installation_secret = installation_secret
+        self.initial_envelope_sha256 = sha256(envelope_text.encode("utf-8")).hexdigest()
+        self.installation_binding_sha256 = sha256(installation_secret).hexdigest()
+
+    def installation_secret(self) -> bytes:
+        return self._installation_secret
+
+    def current_envelope(self) -> str:
+        if self._envelope is None:
+            raise KeyError("missing")
+        return self._envelope
+
+    def replace_enrollment(self, *, expected_sha256: str | None, envelope_text: str) -> None:
+        current = sha256(self.current_envelope().encode("utf-8")).hexdigest()
+        if current != expected_sha256:
+            raise RuntimeError("staged enrollment changed")
+        self._envelope = envelope_text
+
+    def delete_enrollment(self, *, expected_sha256: str) -> None:
+        current = sha256(self.current_envelope().encode("utf-8")).hexdigest()
+        if current != expected_sha256:
+            raise RuntimeError("staged enrollment changed")
+        self._envelope = None
+
+
+def _staged_lifecycle(
+    *,
+    trust: DesktopEnrollmentTrustRuntime,
+    issuer: AuthenticatedFirmEnrollmentIssuer,
+    keychain_runner=None,
+) -> tuple[DesktopEnrollmentLifecycle, _StagedEnrollmentVault]:
+    if trust.catalog is None:
+        raise DesktopEnrollmentLifecycleBlocked("trust catalog is unavailable")
+    verifier = SignedDesktopEnrollmentVerifier(trusted_catalog=trust.catalog)
+    provider = MacOSKeychainDesktopEnrollmentProvider(
+        service=MACOS_KEYCHAIN_SERVICE,
+        enrollment_account=MACOS_KEYCHAIN_ENROLLMENT_ACCOUNT,
+        installation_secret_account=MACOS_KEYCHAIN_INSTALLATION_ACCOUNT,
+        verifier=verifier,
+        runner=keychain_runner,
+    )
+    material = provider.load_material_optional()
+    if material is None:
+        raise DesktopEnrollmentLifecycleBlocked("current enrollment is unavailable")
+    vault = _StagedEnrollmentVault(
+        envelope_text=material.envelope_text,
+        installation_secret=material.installation_secret,
+    )
+    return DesktopEnrollmentLifecycle(
+        issuer=issuer,
+        vault=vault,
+        verifier=verifier,
+    ), vault
 
 
 def _strict_request_json(body: bytes) -> dict[str, object]:
@@ -258,8 +400,17 @@ def run() -> int:
         trust=trust,
         bootstrap_token=parent_api_token,
     )
+    enrollment_issuer = None
+    if trust.phase == "READY" and trust.catalog is not None:
+        enrollment_issuer = JsonFirmEnrollmentIssuer(
+            PinnedHttpsJsonTransport(
+                origin=trust.catalog.enrollment_api_origin,
+                tls_spki_sha256=trust.catalog.tls_spki_sha256,
+            )
+        )
 
     port = int(server_socket.getsockname()[1])
+
     def announce_ready() -> None:
         print(
             json.dumps(
@@ -283,6 +434,7 @@ def run() -> int:
             trust,
             parent_api_token=parent_api_token,
             identity=identity,
+            enrollment_issuer=enrollment_issuer,
         ),
         host="127.0.0.1",
         port=port,

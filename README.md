@@ -19,6 +19,7 @@
 - Tauri 桌面端已实现安装秘密初始化/回读、脱敏状态、本机停用和受信验签后凭证保存；秘密不进入命令参数或 WebView。真实律所生产信任根和签发服务未部署，中文页面因此继续禁用导入与真实案件。
 - 已实现“每次启动重新验签”状态机：信任目录未就绪时不读 Keychain，缺少登记与无效登记分开显示；有效登记才以一次性父进程引导交换最长 30 分钟本机会话。令牌只在 Rust 内存中，运行状态不含令牌/session ID，专用数据库未配置时 WebView 不能取得授权，案件路由继续关闭。
 - WebView 正式案件读写已统一使用原生短时 grant 和 sidecar 动态数字 loopback；浏览器不能覆盖身份 Bearer，PDF/ZIP/PNG 仍需各自一次性读取许可。Rust 在向 WebView 返回前再次阻断并清除过期会话，服务端 CORS 只允许 `tauri://localhost` 的必要方法和头。
+- 律所登记续期与远程撤销已接入由签名目录固定的 HTTPS/SPKI 通道：sidecar 重新验签并在内存 staging，Rust 再按当前凭证哈希 CAS 写入或删除 Keychain；远程撤销需页面二次点击、macOS 原生确认和已接受回执，并立即停止本机会话。“只停用本机”仍明确不代表远程撤销。
 - 代码默认只运行合成 Alpha；持久化预览需要显式配置，缺失时停止读取而不回退到假数据。
 - 提交材料已具备 PDF-only 编译、依赖锁定、ZIP/内部清单分离、加密对象登记和本机一次性下载的合成实现；不会自动向法院提交。
 - 官方法源已具备律师授权队列、一次执行本机 Worker、原字节加密、确定性解析、律师复核、许可核验和正式快照登记 UI；尚未在专用 PostgreSQL 实库和真实桌面身份/Keychain 环境装配运行。
@@ -49,6 +50,7 @@
 - [门限签名与回滚防护的生产登记信任决策](./decisions/ADR-0012-rollback-protected-enrollment-trust.md)
 - [每次启动重新验签与短时会话决策](./decisions/ADR-0013-reverified-desktop-session.md)
 - [WebView 持久 API 短时会话决策](./decisions/ADR-0014-webview-persistent-api-session.md)
+- [固定 HTTPS 登记续期与远程撤销决策](./decisions/ADR-0015-pinned-enrollment-renewal-revocation.md)
 - [官方案例与真实数据接入目录](./research/OFFICIAL_CASE_DATA_CATALOG.md)
 
 ## 不可突破的产品红线

@@ -37,5 +37,5 @@
 
 - 律所确定离线根保管人、门限、轮换/应急撤销仪式和生产服务域名；
 - 正式 TLS 证书及 SPKI 轮换窗口、签发后台、MFA/管理员双人复核与审计；
-- 专用 PostgreSQL 实迁移、sidecar 持久 API/Store/Worker 正式装配和离职/撤销演练；
+- 专用 PostgreSQL 实迁移、sidecar 持久 API/Store/Worker 正式装配和真实离职/撤销演练；
 - Apple Developer ID 签名、公证、自动更新信任链和真实律所安全验收。

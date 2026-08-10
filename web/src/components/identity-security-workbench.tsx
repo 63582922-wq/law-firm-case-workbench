@@ -6,6 +6,8 @@ import {
   importSignedEnrollmentPackage,
   initializeDesktopInstallation,
   readDesktopEnrollmentVaultStatus,
+  renewDesktopEnrollment,
+  revokeDesktopEnrollment,
 } from "@/lib/desktop-bridge";
 import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import styles from "./case-workbench.module.css";
@@ -16,9 +18,10 @@ export function IdentitySecurityWorkbench({
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
   const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
-  const [vaultBusy, setVaultBusy] = useState<"initialize" | "import" | "disable" | null>(null);
+  const [vaultBusy, setVaultBusy] = useState<"initialize" | "import" | "renew" | "revoke" | "disable" | null>(null);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
+  const [revokeArmed, setRevokeArmed] = useState(false);
   const processReady = desktopRuntime?.phase === "READY";
   const trustReady = desktopRuntime?.enrollmentTrustPhase === "READY";
   const identityEnrolled = desktopRuntime?.identityPhase === "ENROLLED";
@@ -92,6 +95,41 @@ export function IdentitySecurityWorkbench({
       setVaultMessage(status.message);
     } catch (error) {
       setVaultMessage(readableError(error, "律所登记包未能通过验签；未写入 Keychain。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
+  async function renewEnrollment() {
+    setVaultBusy("renew");
+    setVaultMessage(null);
+    try {
+      const status = await renewDesktopEnrollment();
+      setVaultStatus(status);
+      setVaultMessage(status.message);
+    } catch (error) {
+      setVaultMessage(readableError(error, "律所签名登记未能续期；当前凭证没有被覆盖。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
+  async function revokeEnrollment() {
+    if (!revokeArmed) {
+      setRevokeArmed(true);
+      setDisableArmed(false);
+      setVaultMessage("再次点击将联系律所服务端撤销当前登记；只有收到匹配回执后才删除本机凭证并停止会话。");
+      return;
+    }
+    setVaultBusy("revoke");
+    setVaultMessage(null);
+    try {
+      const status = await revokeDesktopEnrollment();
+      setVaultStatus(status);
+      setVaultMessage(`${status.message} 请重新启动桌面应用。`);
+      setRevokeArmed(false);
+    } catch (error) {
+      setVaultMessage(readableError(error, "远程撤销未取得有效回执；本机凭证没有被当作已撤销。"));
     } finally {
       setVaultBusy(null);
     }
@@ -209,9 +247,31 @@ export function IdentitySecurityWorkbench({
           </button>
           {vaultStatus?.enrollmentEnvelopePresent ? (
             <button
+              disabled={!trustReady || vaultBusy !== null}
+              onClick={() => void renewEnrollment()}
+              type="button"
+            >
+              {vaultBusy === "renew" ? "正在联系律所续期…" : "续期律所签名登记"}
+            </button>
+          ) : null}
+          {vaultStatus?.enrollmentEnvelopePresent ? (
+            <button
+              className={styles.securityDangerButton}
+              disabled={!trustReady || vaultBusy !== null}
+              onClick={() => void revokeEnrollment()}
+              type="button"
+            >
+              {vaultBusy === "revoke" ? "正在确认远程撤销…" : revokeArmed ? "确认远程撤销登记" : "远程撤销登记"}
+            </button>
+          ) : null}
+          {vaultStatus?.enrollmentEnvelopePresent ? (
+            <button
               className={styles.securityDangerButton}
               disabled={vaultBusy !== null}
-              onClick={() => void clearLocalEnrollment()}
+              onClick={() => {
+                setRevokeArmed(false);
+                void clearLocalEnrollment();
+              }}
               type="button"
             >
               {vaultBusy === "disable" ? "正在清除…" : disableArmed ? "确认只停用本机" : "只停用本机登记"}

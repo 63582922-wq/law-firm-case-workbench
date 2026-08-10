@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from base64 import urlsafe_b64encode
+from base64 import b64encode, urlsafe_b64encode
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from io import StringIO
 import json
+from subprocess import CompletedProcess
 import unittest
 
 from cryptography.hazmat.primitives import serialization
@@ -13,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from case_api.desktop_enrollment import TrustedEnrollmentIssuer
 from case_api.desktop_identity_runtime import DesktopIdentityRuntime
+from case_api.desktop_enrollment_lifecycle import EnrollmentRevocationReceipt
 from case_api.desktop_sidecar import (
     DesktopSidecarBlocked,
     PROTOCOL,
@@ -99,6 +101,8 @@ class DesktopSidecarTests(unittest.TestCase):
         self.assertEqual(client.get("/docs").status_code, 404)
         self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/v1/matters/example/snapshot").status_code, 404)
+        self.assertEqual(client.post("/v1/desktop-enrollment/renew").status_code, 404)
+        self.assertEqual(client.post("/v1/desktop-enrollment/revoke").status_code, 404)
 
     def test_invalid_trust_bootstrap_is_visible_but_never_opens_case_routes(self) -> None:
         client = TestClient(
@@ -214,6 +218,116 @@ class DesktopSidecarTests(unittest.TestCase):
         self.assertEqual(exchanged.headers["cache-control"], "no-store")
         self.assertEqual(client.post(endpoint, headers=headers).status_code, 401)
         self.assertEqual(client.get("/v1/matters/example/snapshot").status_code, 404)
+
+    def test_parent_only_renewal_and_remote_revocation_are_staged_for_native_cas(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        private = Ed25519PrivateKey.generate()
+        issuer = TrustedEnrollmentIssuer(
+            key_id="synthetic-issuer-a",
+            issuer="synthetic-law-firm-admin",
+            public_key_bytes=private.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            ),
+        )
+        trust = DesktopEnrollmentTrustRuntime(
+            phase="READY",
+            message="synthetic test trust",
+            catalog=SyntheticCurrentCatalog(issuer),  # type: ignore[arg-type]
+        )
+        installation_secret = b"i" * 32
+
+        def signed(expires_at: datetime, issued_at: datetime) -> str:
+            credential = {
+                "version": 1,
+                "key_id": issuer.key_id,
+                "issuer": issuer.issuer,
+                "enrollment_id": "11111111-1111-4111-8111-111111111111",
+                "actor_id": "22222222-2222-4222-8222-222222222222",
+                "firm_id": "33333333-3333-4333-8333-333333333333",
+                "roles": ["LEAD_LAWYER"],
+                "installation_binding_sha256": sha256(installation_secret).hexdigest(),
+                "issued_at": issued_at.isoformat().replace("+00:00", "Z"),
+                "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            }
+            return json.dumps(
+                {
+                    "credential": credential,
+                    "signature": urlsafe_b64encode(private.sign(canonical(credential)))
+                    .decode("ascii")
+                    .rstrip("="),
+                },
+                ensure_ascii=False,
+            )
+
+        current = signed(now + timedelta(days=5), now - timedelta(minutes=1))
+        renewed = signed(now + timedelta(days=10), now)
+
+        class Issuer:
+            def register(self, request):
+                raise AssertionError(request)
+
+            def renew(self, request):
+                self.renew_request = request
+                return renewed
+
+            def revoke(self, request):
+                self.revoke_request = request
+                return EnrollmentRevocationReceipt(
+                    revocation_id="44444444-4444-4444-8444-444444444444",
+                    enrollment_id="11111111-1111-4111-8111-111111111111",
+                    issuer=issuer.issuer,
+                    effective_at=now,
+                    accepted=True,
+                )
+
+        lifecycle_issuer = Issuer()
+
+        def keychain_runner(command, **kwargs):
+            del kwargs
+            account = command[command.index("-a") + 1]
+            value = current if account == "signed-enrollment-v1" else b64encode(installation_secret).decode("ascii")
+            return CompletedProcess(command, 0, stdout=value + "\n", stderr="")
+
+        client = TestClient(
+            create_desktop_sidecar_app(
+                trust,
+                parent_api_token="c" * 64,
+                enrollment_issuer=lifecycle_issuer,
+                keychain_runner=keychain_runner,
+            )
+        )
+        authorization = {"Authorization": f"Bearer {'c' * 64}"}
+        self.assertEqual(client.post("/v1/desktop-enrollment/renew").status_code, 404)
+        renewal = client.post("/v1/desktop-enrollment/renew", headers=authorization)
+        self.assertEqual(renewal.status_code, 200, renewal.text)
+        self.assertEqual(renewal.json()["status"], "RENEWED")
+        self.assertEqual(renewal.json()["envelope_text"], renewed)
+        self.assertEqual(
+            renewal.json()["expected_current_sha256"],
+            sha256(current.encode("utf-8")).hexdigest(),
+        )
+        self.assertNotIn("installation_secret", renewal.text)
+
+        self.assertEqual(
+            client.post(
+                "/v1/desktop-enrollment/revoke",
+                headers=authorization,
+                json={"confirmation": "wrong"},
+            ).status_code,
+            422,
+        )
+        revocation = client.post(
+            "/v1/desktop-enrollment/revoke",
+            headers=authorization,
+            json={"confirmation": "CONFIRM_REMOTE_REVOCATION"},
+        )
+        self.assertEqual(revocation.status_code, 200, revocation.text)
+        self.assertTrue(revocation.json()["remote_revocation_confirmed"])
+        self.assertEqual(
+            revocation.json()["expected_current_sha256"],
+            sha256(current.encode("utf-8")).hexdigest(),
+        )
 
 
 if __name__ == "__main__":
