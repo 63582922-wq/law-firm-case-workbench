@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID, uuid4
 import unittest
 
 from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
+from case_kernel.errors import VersionConflict
 from case_kernel.evidence_refs import EvidenceLink
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.request_context import reset_request_id, set_request_id
+from case_kernel.stable_pagination import StablePaginationBlocked, encode_page_cursor
 from case_kernel.transaction_ledger import DatePrecision, TransactionChannel, TransactionDirection
 from case_kernel.transaction_ledger import ClassificationOrigin, ObligationAllocation, PaymentNature
 
@@ -36,10 +38,26 @@ class FakeConnection:
         permitted: bool = True,
         fact_status: str = "CANDIDATE",
         duplicate_members: tuple[str, ...] = (),
+        projection_version: int = 7,
+        fact_page_rows: tuple[dict, ...] = (),
+        transaction_page_rows: tuple[dict, ...] = (),
+        summary_claim_rows: tuple[dict, ...] = (),
+        summary_issue_rows: tuple[dict, ...] = (),
+        fact_total_count: int = 0,
+        fact_candidate_count: int = 0,
+        transaction_total_count: int = 0,
     ) -> None:
         self.permitted = permitted
         self.fact_status = fact_status
         self.duplicate_members = duplicate_members
+        self.projection_version = projection_version
+        self.fact_page_rows = fact_page_rows
+        self.transaction_page_rows = transaction_page_rows
+        self.summary_claim_rows = summary_claim_rows
+        self.summary_issue_rows = summary_issue_rows
+        self.fact_total_count = fact_total_count
+        self.fact_candidate_count = fact_candidate_count
+        self.transaction_total_count = transaction_total_count
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -55,6 +73,33 @@ class FakeConnection:
             return FakeResult(
                 row={"matter_id": params[0], "title": "[合成] 持久化快照案件", "stage": "FACT_REVIEW", "version": 7}
             )
+        if normalized.startswith("SELECT version FROM matters"):
+            return FakeResult(row={"version": self.projection_version})
+        if "COUNT(*) FILTER (WHERE status = 'CANDIDATE')" in normalized:
+            return FakeResult(
+                row={
+                    "total_count": self.fact_total_count,
+                    "candidate_count": self.fact_candidate_count,
+                }
+            )
+        if normalized.startswith("SELECT COUNT(*) AS total_count FROM case_transactions"):
+            return FakeResult(row={"total_count": self.transaction_total_count})
+        if normalized.startswith("SELECT fact_id, original_text, origin, status, jsonb_array_length(evidence_links)"):
+            return FakeResult(rows=list(self.fact_page_rows))
+        if normalized.startswith("SELECT transaction.transaction_id, transaction.local_date"):
+            return FakeResult(rows=list(self.transaction_page_rows))
+        if normalized.startswith("SELECT (SELECT COUNT(*) FROM case_facts"):
+            return FakeResult(
+                row={
+                    "fact_count": self.fact_total_count,
+                    "candidate_fact_count": self.fact_candidate_count,
+                    "transaction_count": self.transaction_total_count,
+                }
+            )
+        if normalized.startswith("SELECT claim.claim_id, claim.original_claim_text"):
+            return FakeResult(rows=list(self.summary_claim_rows))
+        if normalized.startswith("SELECT issue.issue_id, issue.question, issue.status"):
+            return FakeResult(rows=list(self.summary_issue_rows))
         if "SELECT status FROM case_facts" in normalized:
             return FakeResult(row={"status": self.fact_status})
         if "SELECT status, claimed_amount, currency FROM case_claims" in normalized:
@@ -400,6 +445,238 @@ class PostgresCaseLedgerStoreTests(unittest.TestCase):
         self.assertEqual(snapshot.facts, ())
         self.assertTrue(connection.executed[0][0].startswith("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"))
         self.assertTrue(connection.executed[1][0].startswith("SELECT set_config"))
+
+    def test_fact_page_is_version_bound_keyset_paged_and_minimal(self) -> None:
+        first_id = str(uuid4())
+        second_id = str(uuid4())
+        third_id = str(uuid4())
+        created_at = datetime(2026, 8, 10, 3, 0, tzinfo=timezone.utc)
+        connection = FakeConnection(
+            fact_total_count=3,
+            fact_candidate_count=1,
+            fact_page_rows=(
+                {
+                    "fact_id": first_id,
+                    "original_text": "[合成] 已确认事实一",
+                    "origin": "DEFENDANT_STATEMENT",
+                    "status": "CONFIRMED",
+                    "evidence_count": 2,
+                    "created_at": created_at,
+                },
+                {
+                    "fact_id": second_id,
+                    "original_text": "[合成] 待确认事实二",
+                    "origin": "AGENT_CANDIDATE",
+                    "status": "CANDIDATE",
+                    "evidence_count": 1,
+                    "created_at": created_at,
+                },
+                {
+                    "fact_id": third_id,
+                    "original_text": "[合成] 已确认事实三",
+                    "origin": "LAWYER_ENTRY",
+                    "status": "CONFIRMED",
+                    "evidence_count": 1,
+                    "created_at": created_at,
+                },
+            ),
+        )
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            page = self.store.list_fact_page(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                limit=2,
+                cursor=None,
+            )
+
+        self.assertEqual(page.total_count, 3)
+        self.assertEqual(page.candidate_count, 1)
+        self.assertEqual(len(page.items), 2)
+        self.assertTrue(page.has_more)
+        self.assertIsNotNone(page.next_cursor)
+        self.assertEqual(
+            frozenset(page.items[0]),
+            frozenset({"fact_id", "original_text", "origin", "status", "evidence_count"}),
+        )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("ORDER BY created_at ASC, fact_id ASC", sql)
+        self.assertNotIn("decision_hash", sql)
+        self.assertNotIn("decided_by", sql)
+
+        continuation = FakeConnection(fact_total_count=3, fact_candidate_count=1)
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(continuation),
+        ):
+            self.store.list_fact_page(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                limit=2,
+                cursor=page.next_cursor,
+            )
+        continuation_sql = "\n".join(statement for statement, _ in continuation.executed)
+        self.assertIn("AND (created_at, fact_id) >", continuation_sql)
+
+    def test_fact_page_rejects_changed_version_before_reading_rows(self) -> None:
+        cursor = encode_page_cursor(
+            kind="FACTS",
+            matter_id=self.matter_id,
+            matter_version=7,
+            sort_values=("2026-08-10T03:00:00Z", str(uuid4())),
+        )
+        connection = FakeConnection(projection_version=8)
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            with self.assertRaisesRegex(VersionConflict, "restart from the first page"):
+                self.store.list_fact_page(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    limit=50,
+                    cursor=cursor,
+                )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("FROM case_facts", sql)
+
+    def test_first_page_can_be_bound_to_the_summary_version(self) -> None:
+        connection = FakeConnection(projection_version=8)
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            with self.assertRaisesRegex(VersionConflict, "expected paged projection version 7"):
+                self.store.list_fact_page(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    limit=50,
+                    cursor=None,
+                    expected_version=7,
+                )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("FROM case_facts", sql)
+
+    def test_case_review_summary_does_not_load_fact_or_transaction_rows(self) -> None:
+        claim_id = str(uuid4())
+        issue_id = str(uuid4())
+        connection = FakeConnection(
+            fact_total_count=41,
+            fact_candidate_count=3,
+            transaction_total_count=112,
+            summary_claim_rows=(
+                {
+                    "claim_id": claim_id,
+                    "original_claim_text": "[合成] 请求偿还本金",
+                    "claimed_amount": Decimal("1000.00"),
+                    "currency": "CNY",
+                    "status": "CONFIRMED_SCOPE",
+                    "position": "ADMIT",
+                    "partial_amount": None,
+                    "response_currency": None,
+                },
+            ),
+            summary_issue_rows=(
+                {
+                    "issue_id": issue_id,
+                    "question": "[合成] 利息标准如何确定？",
+                    "status": "CONFIRMED",
+                    "claim_count": 1,
+                    "fact_count": 2,
+                },
+            ),
+        )
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            summary = self.store.get_case_review_summary(matter_id=self.matter_id, actor=self.actor)
+
+        self.assertEqual(summary.version, 7)
+        self.assertEqual(summary.fact_count, 41)
+        self.assertEqual(summary.candidate_fact_count, 3)
+        self.assertEqual(summary.transaction_count, 112)
+        self.assertEqual(summary.claims[0]["response"]["position"], "ADMIT")
+        self.assertEqual(summary.issues[0]["fact_count"], 2)
+        self.assertEqual(len(summary.summary_hash), 64)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("SELECT fact_id, original_text", sql)
+        self.assertNotIn("SELECT transaction_id, local_date", sql)
+
+    def test_transaction_page_omits_private_detail_and_uses_stable_order(self) -> None:
+        transaction_ids = (str(uuid4()), str(uuid4()))
+        created_at = datetime(2026, 8, 10, 4, 0, tzinfo=timezone.utc)
+        connection = FakeConnection(
+            transaction_total_count=2,
+            transaction_page_rows=(
+                {
+                    "transaction_id": transaction_ids[0],
+                    "local_date": date(2020, 8, 20),
+                    "amount": Decimal("1000.00"),
+                    "currency": "CNY",
+                    "status": "CONFIRMED",
+                    "evidence_count": 1,
+                    "created_at": created_at,
+                    "classification_nature": "INTEREST_PAYMENT",
+                    "classification_status": "APPROVED",
+                },
+                {
+                    "transaction_id": transaction_ids[1],
+                    "local_date": None,
+                    "amount": Decimal("200.00"),
+                    "currency": "CNY",
+                    "status": "CANDIDATE",
+                    "evidence_count": 1,
+                    "created_at": created_at,
+                    "classification_nature": None,
+                    "classification_status": None,
+                },
+            ),
+        )
+        with patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            page = self.store.list_transaction_page(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                limit=50,
+                cursor=None,
+            )
+
+        self.assertEqual(page.total_count, 2)
+        self.assertFalse(page.has_more)
+        self.assertEqual(page.items[0]["classification_nature"], "INTEREST_PAYMENT")
+        self.assertTrue(
+            frozenset({"payer_label", "payee_label", "transaction_reference", "evidence_links"}).isdisjoint(
+                page.items[0]
+            )
+        )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("LEFT JOIN LATERAL", sql)
+        self.assertIn("ORDER BY (transaction.local_date IS NULL) ASC", sql)
+        self.assertNotIn("payer_label", sql)
+        self.assertNotIn("payee_label", sql)
+        self.assertNotIn("transaction_reference", sql)
+
+    def test_cross_matter_page_cursor_is_rejected_before_connection(self) -> None:
+        cursor = encode_page_cursor(
+            kind="FACTS",
+            matter_id=str(uuid4()),
+            matter_version=7,
+            sort_values=("2026-08-10T03:00:00Z", str(uuid4())),
+        )
+        with patch("case_kernel.case_ledger_postgres.psycopg.connect") as connect:
+            with self.assertRaisesRegex(StablePaginationBlocked, "scope"):
+                self.store.list_fact_page(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    limit=50,
+                    cursor=cursor,
+                )
+        connect.assert_not_called()
 
     def test_alpha_identifiers_are_rejected_before_connection(self) -> None:
         with patch("case_kernel.case_ledger_postgres.psycopg.connect") as connect:

@@ -8,14 +8,17 @@ export type PersistentApiTarget = {
 };
 
 export type PersistentApiAuthorization = "desktop-session" | "provided-bearer";
+export type PersistentApiQuery = Readonly<Record<string, string>>;
 
 export async function persistentApiFetch(
   target: PersistentApiTarget,
   path: string,
   init: RequestInit = {},
   authorization: PersistentApiAuthorization = "desktop-session",
+  query: PersistentApiQuery = {},
 ): Promise<Response> {
   const normalizedPath = normalizeApiPath(path);
+  const normalizedQuery = normalizeApiQuery(query);
   const headers = new Headers(init.headers);
   const desktop = isTauriDesktop();
   let apiBase: string;
@@ -44,7 +47,7 @@ export async function persistentApiFetch(
     }
   }
 
-  const response = await fetch(`${apiBase}${normalizedPath}`, {
+  const response = await fetch(`${apiBase}${normalizedPath}${normalizedQuery}`, {
     ...init,
     headers,
     cache: "no-store",
@@ -79,6 +82,22 @@ function normalizeApiPath(path: string): string {
     throw new Error("持久 API 路径不符合受控边界。");
   }
   return path;
+}
+
+function normalizeApiQuery(query: PersistentApiQuery): string {
+  const entries = Object.entries(query);
+  if (entries.length === 0) return "";
+  if (entries.length > 10) throw new Error("持久 API 查询参数过多，案件请求已停止。");
+  const parameters = new URLSearchParams();
+  for (const [key, value] of entries.sort(([left], [right]) => left.localeCompare(right))) {
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(key) || typeof value !== "string" || value.length < 1 || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
+      throw new Error("持久 API 查询参数无效，案件请求已停止。");
+    }
+    parameters.append(key, value);
+  }
+  const encoded = parameters.toString();
+  if (encoded.length > 2_048) throw new Error("持久 API 查询参数过长，案件请求已停止。");
+  return `?${encoded}`;
 }
 
 function normalizeDesktopApiBase(value: string): string {

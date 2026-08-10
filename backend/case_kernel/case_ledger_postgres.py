@@ -33,6 +33,13 @@ from .fact_claim_ledger import (
 )
 from .models import Actor, Role
 from .request_context import current_request_id
+from .stable_pagination import (
+    StablePageCursor,
+    StablePaginationBlocked,
+    decode_page_cursor,
+    encode_page_cursor,
+    validate_page_limit,
+)
 from .transaction_ledger import (
     ClassificationOrigin,
     ClassificationStatus,
@@ -75,6 +82,41 @@ class PersistentCaseSnapshot:
     transactions: tuple[dict[str, Any], ...]
     payment_classifications: tuple[dict[str, Any], ...]
     duplicate_groups: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PersistentCaseReviewSummary:
+    matter_id: str
+    title: str
+    stage: str
+    version: int
+    summary_hash: str
+    fact_count: int
+    candidate_fact_count: int
+    transaction_count: int
+    claims: tuple[dict[str, Any], ...]
+    issues: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class PersistentFactListPage:
+    matter_id: str
+    matter_version: int
+    total_count: int
+    candidate_count: int
+    items: tuple[dict[str, Any], ...]
+    next_cursor: str | None
+    has_more: bool
+
+
+@dataclass(frozen=True)
+class PersistentTransactionListPage:
+    matter_id: str
+    matter_version: int
+    total_count: int
+    items: tuple[dict[str, Any], ...]
+    next_cursor: str | None
+    has_more: bool
 
 
 class PostgresCaseLedgerStore:
@@ -1460,6 +1502,395 @@ class PostgresCaseLedgerStore:
             for row in rows
         )
 
+    def list_fact_page(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        limit: int,
+        cursor: str | None,
+        expected_version: int | None = None,
+    ) -> PersistentFactListPage:
+        """Return a minimal, keyset-paged fact projection bound to one matter version."""
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        page_limit = validate_page_limit(limit)
+        decoded = (
+            decode_page_cursor(
+                cursor,
+                expected_kind="FACTS",
+                expected_matter_id=matter_id,
+            )
+            if cursor is not None
+            else None
+        )
+        after_created_at, after_fact_id = _fact_cursor_values(decoded)
+        with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._CANDIDATE_ROLES,
+            )
+            matter_version = _read_projection_version(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+            )
+            _require_expected_projection_version(expected_version, matter_version)
+            _require_cursor_version(decoded, matter_version)
+            counts = connection.execute(
+                """
+                SELECT COUNT(*) AS total_count,
+                       COUNT(*) FILTER (WHERE status = 'CANDIDATE') AS candidate_count
+                FROM case_facts
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if after_created_at is None:
+                rows = connection.execute(
+                    """
+                    SELECT fact_id, original_text, origin, status,
+                           jsonb_array_length(evidence_links) AS evidence_count,
+                           created_at
+                    FROM case_facts
+                    WHERE matter_id = %s AND firm_id = %s
+                    ORDER BY created_at ASC, fact_id ASC
+                    LIMIT %s
+                    """,
+                    (matter_id, actor.firm_id, page_limit + 1),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT fact_id, original_text, origin, status,
+                           jsonb_array_length(evidence_links) AS evidence_count,
+                           created_at
+                    FROM case_facts
+                    WHERE matter_id = %s AND firm_id = %s
+                      AND (created_at, fact_id) > (%s, %s)
+                    ORDER BY created_at ASC, fact_id ASC
+                    LIMIT %s
+                    """,
+                    (
+                        matter_id,
+                        actor.firm_id,
+                        after_created_at,
+                        after_fact_id,
+                        page_limit + 1,
+                    ),
+                ).fetchall()
+        visible = rows[:page_limit]
+        has_more = len(rows) > page_limit
+        next_cursor = None
+        if has_more and visible:
+            tail = visible[-1]
+            next_cursor = encode_page_cursor(
+                kind="FACTS",
+                matter_id=matter_id,
+                matter_version=matter_version,
+                sort_values=(
+                    _utc_cursor_timestamp(tail["created_at"]),
+                    str(tail["fact_id"]),
+                ),
+            )
+        return PersistentFactListPage(
+            matter_id=matter_id,
+            matter_version=matter_version,
+            total_count=int(counts["total_count"] if counts else 0),
+            candidate_count=int(counts["candidate_count"] if counts else 0),
+            items=tuple(
+                {
+                    "fact_id": str(row["fact_id"]),
+                    "original_text": row["original_text"],
+                    "origin": row["origin"],
+                    "status": row["status"],
+                    "evidence_count": int(row["evidence_count"]),
+                }
+                for row in visible
+            ),
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    def list_transaction_page(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        limit: int,
+        cursor: str | None,
+        expected_version: int | None = None,
+    ) -> PersistentTransactionListPage:
+        """Return only the transaction fields required by the ledger list UI."""
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        page_limit = validate_page_limit(limit)
+        decoded = (
+            decode_page_cursor(
+                cursor,
+                expected_kind="TRANSACTIONS",
+                expected_matter_id=matter_id,
+            )
+            if cursor is not None
+            else None
+        )
+        after_local_date, after_created_at, after_transaction_id = _transaction_cursor_values(decoded)
+        base_select = """
+            SELECT transaction.transaction_id, transaction.local_date,
+                   transaction.amount, transaction.currency, transaction.status,
+                   jsonb_array_length(transaction.evidence_links) AS evidence_count,
+                   transaction.created_at,
+                   classification.nature AS classification_nature,
+                   classification.status AS classification_status
+            FROM case_transactions transaction
+            LEFT JOIN LATERAL (
+                SELECT nature, status
+                FROM case_payment_classifications candidate
+                WHERE candidate.matter_id = transaction.matter_id
+                  AND candidate.firm_id = transaction.firm_id
+                  AND candidate.transaction_id = transaction.transaction_id
+                  AND candidate.status = 'APPROVED'
+                ORDER BY candidate.created_at DESC, candidate.classification_id DESC
+                LIMIT 1
+            ) classification ON TRUE
+        """
+        with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._CANDIDATE_ROLES,
+            )
+            matter_version = _read_projection_version(
+                connection,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+            )
+            _require_expected_projection_version(expected_version, matter_version)
+            _require_cursor_version(decoded, matter_version)
+            count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total_count
+                FROM case_transactions
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if after_created_at is None:
+                rows = connection.execute(
+                    base_select
+                    + """
+                    WHERE transaction.matter_id = %s AND transaction.firm_id = %s
+                    ORDER BY (transaction.local_date IS NULL) ASC,
+                             transaction.local_date ASC NULLS LAST,
+                             transaction.created_at ASC, transaction.transaction_id ASC
+                    LIMIT %s
+                    """,
+                    (matter_id, actor.firm_id, page_limit + 1),
+                ).fetchall()
+            elif after_local_date is None:
+                rows = connection.execute(
+                    base_select
+                    + """
+                    WHERE transaction.matter_id = %s AND transaction.firm_id = %s
+                      AND transaction.local_date IS NULL
+                      AND (transaction.created_at, transaction.transaction_id) > (%s, %s)
+                    ORDER BY transaction.created_at ASC, transaction.transaction_id ASC
+                    LIMIT %s
+                    """,
+                    (
+                        matter_id,
+                        actor.firm_id,
+                        after_created_at,
+                        after_transaction_id,
+                        page_limit + 1,
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    base_select
+                    + """
+                    WHERE transaction.matter_id = %s AND transaction.firm_id = %s
+                      AND (
+                        transaction.local_date IS NULL
+                        OR transaction.local_date > %s
+                        OR (
+                          transaction.local_date = %s
+                          AND (transaction.created_at, transaction.transaction_id) > (%s, %s)
+                        )
+                      )
+                    ORDER BY (transaction.local_date IS NULL) ASC,
+                             transaction.local_date ASC NULLS LAST,
+                             transaction.created_at ASC, transaction.transaction_id ASC
+                    LIMIT %s
+                    """,
+                    (
+                        matter_id,
+                        actor.firm_id,
+                        after_local_date,
+                        after_local_date,
+                        after_created_at,
+                        after_transaction_id,
+                        page_limit + 1,
+                    ),
+                ).fetchall()
+        visible = rows[:page_limit]
+        has_more = len(rows) > page_limit
+        next_cursor = None
+        if has_more and visible:
+            tail = visible[-1]
+            next_cursor = encode_page_cursor(
+                kind="TRANSACTIONS",
+                matter_id=matter_id,
+                matter_version=matter_version,
+                sort_values=(
+                    tail["local_date"].isoformat() if tail["local_date"] is not None else "NONE",
+                    _utc_cursor_timestamp(tail["created_at"]),
+                    str(tail["transaction_id"]),
+                ),
+            )
+        return PersistentTransactionListPage(
+            matter_id=matter_id,
+            matter_version=matter_version,
+            total_count=int(count_row["total_count"] if count_row else 0),
+            items=tuple(
+                {
+                    "transaction_id": str(row["transaction_id"]),
+                    "local_date": row["local_date"],
+                    "amount": Decimal(row["amount"]),
+                    "currency": row["currency"],
+                    "status": row["status"],
+                    "evidence_count": int(row["evidence_count"]),
+                    "classification_nature": row["classification_nature"],
+                    "classification_status": row["classification_status"],
+                }
+                for row in visible
+            ),
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+    def get_case_review_summary(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+    ) -> PersistentCaseReviewSummary:
+        """Read the workbench header, claims and issues without loading long ledgers."""
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._CANDIDATE_ROLES,
+            )
+            matter = connection.execute(
+                """
+                SELECT matter_id, title, stage, version
+                FROM matters
+                WHERE matter_id = %s AND firm_id = %s
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
+            if matter is None:
+                raise KeyError(matter_id)
+            counts = connection.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM case_facts WHERE matter_id = %s AND firm_id = %s) AS fact_count,
+                  (SELECT COUNT(*) FROM case_facts WHERE matter_id = %s AND firm_id = %s AND status = 'CANDIDATE') AS candidate_fact_count,
+                  (SELECT COUNT(*) FROM case_transactions WHERE matter_id = %s AND firm_id = %s) AS transaction_count
+                """,
+                (
+                    matter_id,
+                    actor.firm_id,
+                    matter_id,
+                    actor.firm_id,
+                    matter_id,
+                    actor.firm_id,
+                ),
+            ).fetchone()
+            claim_rows = connection.execute(
+                """
+                SELECT claim.claim_id, claim.original_claim_text, claim.claimed_amount,
+                       claim.currency, claim.status, response.position,
+                       response.partial_amount, response.currency AS response_currency
+                FROM case_claims claim
+                LEFT JOIN case_claim_responses response
+                  ON response.claim_id = claim.claim_id
+                 AND response.matter_id = claim.matter_id
+                 AND response.firm_id = claim.firm_id
+                WHERE claim.matter_id = %s AND claim.firm_id = %s
+                ORDER BY claim.created_at ASC, claim.claim_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+            issue_rows = connection.execute(
+                """
+                SELECT issue.issue_id, issue.question, issue.status,
+                       (SELECT COUNT(*) FROM case_dispute_issue_claims link
+                        WHERE link.issue_id = issue.issue_id
+                          AND link.matter_id = issue.matter_id
+                          AND link.firm_id = issue.firm_id) AS claim_count,
+                       (SELECT COUNT(*) FROM case_dispute_issue_facts link
+                        WHERE link.issue_id = issue.issue_id
+                          AND link.matter_id = issue.matter_id
+                          AND link.firm_id = issue.firm_id) AS fact_count
+                FROM case_dispute_issues issue
+                WHERE issue.matter_id = %s AND issue.firm_id = %s
+                ORDER BY issue.created_at ASC, issue.issue_id ASC
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchall()
+        claims = tuple(
+            {
+                "claim_id": str(row["claim_id"]),
+                "original_claim_text": row["original_claim_text"],
+                "claimed_amount": row["claimed_amount"],
+                "currency": row["currency"],
+                "status": row["status"],
+                "response": (
+                    {
+                        "position": row["position"],
+                        "partial_amount": row["partial_amount"],
+                        "currency": row["response_currency"],
+                    }
+                    if row["position"] is not None
+                    else None
+                ),
+            }
+            for row in claim_rows
+        )
+        issues = tuple(
+            {
+                "issue_id": str(row["issue_id"]),
+                "question": row["question"],
+                "status": row["status"],
+                "claim_count": int(row["claim_count"]),
+                "fact_count": int(row["fact_count"]),
+            }
+            for row in issue_rows
+        )
+        payload = {
+            "matter_id": str(matter["matter_id"]),
+            "title": matter["title"],
+            "stage": matter["stage"],
+            "version": matter["version"],
+            "fact_count": int(counts["fact_count"] if counts else 0),
+            "candidate_fact_count": int(counts["candidate_fact_count"] if counts else 0),
+            "transaction_count": int(counts["transaction_count"] if counts else 0),
+            "claims": claims,
+            "issues": issues,
+        }
+        return PersistentCaseReviewSummary(summary_hash=_payload_hash(payload), **payload)
+
     def get_case_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentCaseSnapshot:
         """Read one repeatable-read, tenant-authorized projection for the workbench."""
         _validate_read_identity(matter_id=matter_id, actor=actor)
@@ -1722,6 +2153,102 @@ class PostgresCaseLedgerStore:
 
     def _transaction(self, firm_id: str) -> Iterator[psycopg.Connection]:
         return _TenantTransaction(self._dsn, firm_id)
+
+
+def _read_projection_version(connection: Any, *, matter_id: str, firm_id: str) -> int:
+    row = connection.execute(
+        """
+        SELECT version
+        FROM matters
+        WHERE matter_id = %s AND firm_id = %s
+        """,
+        (matter_id, firm_id),
+    ).fetchone()
+    if row is None or type(row.get("version")) is not int or row["version"] < 1:
+        raise KeyError(matter_id)
+    return row["version"]
+
+
+def _require_cursor_version(cursor: StablePageCursor | None, matter_version: int) -> None:
+    if cursor is not None and cursor.matter_version != matter_version:
+        raise VersionConflict(
+            f"paged projection changed from version {cursor.matter_version} to {matter_version}; restart from the first page"
+        )
+
+
+def _require_expected_projection_version(expected_version: int | None, matter_version: int) -> None:
+    if expected_version is None:
+        return
+    if type(expected_version) is not int or expected_version < 1:
+        raise StablePaginationBlocked("expected projection version is invalid")
+    if expected_version != matter_version:
+        raise VersionConflict(
+            f"expected paged projection version {expected_version}, current version is {matter_version}"
+        )
+
+
+def _fact_cursor_values(
+    cursor: StablePageCursor | None,
+) -> tuple[datetime | None, str | None]:
+    if cursor is None:
+        return None, None
+    if len(cursor.sort_values) != 2:
+        raise StablePaginationBlocked("fact page cursor sort key is invalid")
+    created_at = _parse_utc_cursor_timestamp(cursor.sort_values[0])
+    fact_id = _canonical_cursor_uuid(cursor.sort_values[1])
+    return created_at, fact_id
+
+
+def _transaction_cursor_values(
+    cursor: StablePageCursor | None,
+) -> tuple[date | None, datetime | None, str | None]:
+    if cursor is None:
+        return None, None, None
+    if len(cursor.sort_values) != 3:
+        raise StablePaginationBlocked("transaction page cursor sort key is invalid")
+    local_date_text, created_at_text, transaction_id_text = cursor.sort_values
+    if local_date_text == "NONE":
+        local_date = None
+    else:
+        try:
+            local_date = date.fromisoformat(local_date_text)
+        except ValueError as error:
+            raise StablePaginationBlocked("transaction page cursor date is invalid") from error
+        if local_date.isoformat() != local_date_text:
+            raise StablePaginationBlocked("transaction page cursor date is invalid")
+    return (
+        local_date,
+        _parse_utc_cursor_timestamp(created_at_text),
+        _canonical_cursor_uuid(transaction_id_text),
+    )
+
+
+def _parse_utc_cursor_timestamp(value: str) -> datetime:
+    if not value.endswith("Z"):
+        raise StablePaginationBlocked("page cursor timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+    except ValueError as error:
+        raise StablePaginationBlocked("page cursor timestamp is invalid") from error
+    if parsed.utcoffset() is None or parsed.utcoffset().total_seconds() != 0:
+        raise StablePaginationBlocked("page cursor timestamp is invalid")
+    return parsed
+
+
+def _utc_cursor_timestamp(value: object) -> str:
+    if not isinstance(value, datetime) or value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+        raise CaseLedgerPersistenceBlocked("paged projection timestamp must use UTC")
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _canonical_cursor_uuid(value: str) -> str:
+    try:
+        parsed = str(UUID(value))
+    except ValueError as error:
+        raise StablePaginationBlocked("page cursor object identifier is invalid") from error
+    if parsed != value:
+        raise StablePaginationBlocked("page cursor object identifier is invalid")
+    return parsed
 
 
 class _TenantTransaction:

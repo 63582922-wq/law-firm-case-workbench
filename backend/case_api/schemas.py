@@ -437,6 +437,80 @@ class PersistentCaseSnapshotResponse(BaseModel):
     duplicate_groups: tuple[PersistentSnapshotDuplicateGroup, ...]
 
 
+class PersistentCaseReviewClaimResponse(BaseModel):
+    position: str
+    partial_amount: Decimal | None
+    currency: str | None
+
+
+class PersistentCaseReviewClaim(BaseModel):
+    claim_id: UUID
+    original_claim_text: str
+    claimed_amount: Decimal | None
+    currency: str | None
+    status: str
+    response: PersistentCaseReviewClaimResponse | None
+
+
+class PersistentCaseReviewIssue(BaseModel):
+    issue_id: UUID
+    question: str
+    status: str
+    claim_count: int = Field(ge=0)
+    fact_count: int = Field(ge=0)
+
+
+class PersistentCaseReviewSummaryResponse(BaseModel):
+    matter_id: UUID
+    title: str
+    stage: str
+    version: int = Field(ge=1)
+    summary_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    fact_count: int = Field(ge=0)
+    candidate_fact_count: int = Field(ge=0)
+    transaction_count: int = Field(ge=0)
+    claims: tuple[PersistentCaseReviewClaim, ...]
+    issues: tuple[PersistentCaseReviewIssue, ...]
+
+
+class PersistentFactPageItem(BaseModel):
+    fact_id: UUID
+    original_text: str
+    origin: str
+    status: str
+    evidence_count: int = Field(ge=0)
+
+
+class PersistentFactPageResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    total_count: int = Field(ge=0)
+    candidate_count: int = Field(ge=0)
+    items: tuple[PersistentFactPageItem, ...]
+    next_cursor: str | None = Field(default=None, min_length=20, max_length=512)
+    has_more: bool
+
+
+class PersistentTransactionPageItem(BaseModel):
+    transaction_id: UUID
+    local_date: date | None
+    amount: Decimal
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    status: str
+    evidence_count: int = Field(ge=0)
+    classification_nature: str | None
+    classification_status: str | None
+
+
+class PersistentTransactionPageResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    total_count: int = Field(ge=0)
+    items: tuple[PersistentTransactionPageItem, ...]
+    next_cursor: str | None = Field(default=None, min_length=20, max_length=512)
+    has_more: bool
+
+
 class PersistentEvidenceOriginalRequest(BaseModel):
     expected_version: int = Field(ge=1)
     original_label: str = Field(min_length=1, max_length=500)

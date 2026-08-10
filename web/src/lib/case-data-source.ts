@@ -24,6 +24,8 @@ export type CaseReviewView = {
   issues: { issueId: string; question: string; claimCount: number; factCount: number; status: string }[];
   transactions: { transactionId: string; date: string | null; amount: string; currency: string; nature: string; application: string; status: string }[];
   pendingFacts: { factId: string; text: string; origin: string; evidenceCount: number }[];
+  factPage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
+  transactionPage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
 };
 
 export type EvidenceReviewPage = {
@@ -322,18 +324,36 @@ type SyntheticReview = {
   pending_facts: { fact_id: string; original_text: string; origin: string; evidence_count: number }[];
 };
 
-type PersistentSnapshot = {
+type PersistentReviewSummary = {
   matter_id: string;
   title: string;
   stage: string;
   version: number;
-  snapshot_hash: string;
-  facts: { fact_id: string; original_text: string; origin: string; status: string; evidence_count: number }[];
-  claims: { claim_id: string; original_claim_text: string; claimed_amount: string | null; currency: string | null; status: string; response: { position: string; partial_amount: string | null } | null }[];
-  issues: { issue_id: string; question: string; status: string; claim_ids: string[]; confirmed_fact_ids: string[] }[];
-  transactions: { transaction_id: string; local_date: string | null; amount: string; currency: string; status: string }[];
-  payment_classifications: { transaction_id: string; nature: string; status: string }[];
-  duplicate_groups: { duplicate_group_id: string; status: string; transaction_ids: string[]; canonical_transaction_id: string | null }[];
+  summary_hash: string;
+  fact_count: number;
+  candidate_fact_count: number;
+  transaction_count: number;
+  claims: { claim_id: string; original_claim_text: string; claimed_amount: string | null; currency: string | null; status: string; response: { position: string; partial_amount: string | null; currency: string | null } | null }[];
+  issues: { issue_id: string; question: string; status: string; claim_count: number; fact_count: number }[];
+};
+
+type PersistentFactPage = {
+  matter_id: string;
+  matter_version: number;
+  total_count: number;
+  candidate_count: number;
+  items: { fact_id: string; original_text: string; origin: string; status: string; evidence_count: number }[];
+  next_cursor: string | null;
+  has_more: boolean;
+};
+
+type PersistentTransactionPage = {
+  matter_id: string;
+  matter_version: number;
+  total_count: number;
+  items: { transaction_id: string; local_date: string | null; amount: string; currency: string; status: string; evidence_count: number; classification_nature: string | null; classification_status: string | null }[];
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 type PersistentEvidenceSnapshot = {
@@ -597,12 +617,111 @@ export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSour
     if (!response.ok || !("facts" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "本机合成台账快照不可用"));
     return mapSyntheticReview(payload, response.headers.get("X-Request-ID"));
   }
-  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/snapshot`, {
+  const response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/review-summary`, {
     headers: { Accept: "application/json" },
   });
-  const payload = (await response.json()) as PersistentSnapshot | ErrorEnvelope;
-  if (!response.ok || !("facts" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化案件快照不可用"));
-  return mapPersistentSnapshot(payload, response.headers.get("X-Request-ID"));
+  const payload = (await response.json()) as PersistentReviewSummary | ErrorEnvelope;
+  if (!response.ok || !("summary_hash" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "持久化案件摘要不可用"));
+  const versionQuery = { limit: "50", expected_version: String(payload.version) };
+  const [factResponse, transactionResponse] = await Promise.all([
+    persistentApiFetch(config, `/v1/matters/${config.matterId}/fact-pages`, { headers: { Accept: "application/json" } }, "desktop-session", versionQuery),
+    persistentApiFetch(config, `/v1/matters/${config.matterId}/transaction-pages`, { headers: { Accept: "application/json" } }, "desktop-session", versionQuery),
+  ]);
+  const [factPayload, transactionPayload] = await Promise.all([
+    factResponse.json() as Promise<PersistentFactPage | ErrorEnvelope>,
+    transactionResponse.json() as Promise<PersistentTransactionPage | ErrorEnvelope>,
+  ]);
+  if (!factResponse.ok || !("items" in factPayload)) throw new Error(errorMessage(factPayload as ErrorEnvelope, "事实分页不可用"));
+  if (!transactionResponse.ok || !("items" in transactionPayload)) throw new Error(errorMessage(transactionPayload as ErrorEnvelope, "交易分页不可用"));
+  return mapPersistentReview(
+    payload,
+    factPayload,
+    transactionPayload,
+    response.headers.get("X-Request-ID"),
+  );
+}
+
+export async function loadMoreCaseFacts(
+  review: CaseReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<CaseReviewView> {
+  if (review.sourceKind !== "persistent-preview" || !review.factPage.hasMore || !review.factPage.nextCursor) return review;
+  const persistent = requirePersistentReviewConfig(review, config);
+  const page = await loadPersistentLedgerPage<PersistentFactPage>(
+    persistent,
+    "fact-pages",
+    review.factPage.nextCursor,
+    review.matterVersion,
+    "事实后续页不可用",
+  );
+  const mapped = mapPersistentFacts(page.items);
+  return {
+    ...review,
+    facts: mergeById(review.facts, mapped.facts, (item) => item.factId),
+    pendingFacts: mergeById(review.pendingFacts, mapped.pendingFacts, (item) => item.factId),
+    factPage: { loadedCount: review.factPage.loadedCount + page.items.length, totalCount: page.total_count, nextCursor: page.next_cursor, hasMore: page.has_more },
+  };
+}
+
+export async function loadMoreCaseTransactions(
+  review: CaseReviewView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<CaseReviewView> {
+  if (review.sourceKind !== "persistent-preview" || !review.transactionPage.hasMore || !review.transactionPage.nextCursor) return review;
+  const persistent = requirePersistentReviewConfig(review, config);
+  const page = await loadPersistentLedgerPage<PersistentTransactionPage>(
+    persistent,
+    "transaction-pages",
+    review.transactionPage.nextCursor,
+    review.matterVersion,
+    "交易后续页不可用",
+  );
+  return {
+    ...review,
+    transactions: mergeById(review.transactions, mapPersistentTransactions(page.items), (item) => item.transactionId),
+    transactionPage: { loadedCount: review.transactionPage.loadedCount + page.items.length, totalCount: page.total_count, nextCursor: page.next_cursor, hasMore: page.has_more },
+  };
+}
+
+async function loadPersistentLedgerPage<T extends { matter_version: number; items: unknown[] }>(
+  config: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>,
+  projection: "fact-pages" | "transaction-pages",
+  cursor: string,
+  matterVersion: number | null,
+  fallback: string,
+): Promise<T> {
+  if (matterVersion === null) throw new Error("当前案件版本无效，不能继续加载。");
+  const query = {
+    limit: "50",
+    expected_version: String(matterVersion),
+    cursor,
+  };
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/${projection}`,
+    { headers: { Accept: "application/json" } },
+    "desktop-session",
+    query,
+  );
+  const payload = (await response.json()) as T | ErrorEnvelope;
+  if (!response.ok || !("items" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, fallback));
+  if (payload.matter_version !== matterVersion) throw new Error("案件在加载后续记录期间已变化，请重新载入。");
+  return payload;
+}
+
+function requirePersistentReviewConfig(
+  review: CaseReviewView,
+  config: CaseDataSourceConfig,
+): Extract<CaseDataSourceConfig, { kind: "persistent-preview" }> {
+  if (review.sourceKind !== "persistent-preview" || config.kind !== "persistent-preview") {
+    throw new Error("当前案件不是可继续加载的持久化案件。");
+  }
+  return config;
+}
+
+function mergeById<T>(existing: T[], incoming: T[], identifier: (item: T) => string): T[] {
+  const seen = new Set(existing.map(identifier));
+  return existing.concat(incoming.filter((item) => !seen.has(identifier(item))));
 }
 
 export async function loadEvidenceReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<EvidenceReviewView> {
@@ -1447,28 +1566,56 @@ function mapSyntheticReview(payload: SyntheticReview, requestId: string | null):
     issues: payload.issues.map((item) => ({ issueId: item.issue_id, question: item.question, claimCount: item.claim_count, factCount: item.fact_count, status: "CONFIRMED" })),
     transactions: payload.transactions.map((item) => ({ transactionId: item.event_id, date: item.effective_date, amount: item.amount, currency: item.currency, nature: item.kind, application: item.payment_application, status: "APPROVED" })),
     pendingFacts: payload.pending_facts.map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, evidenceCount: item.evidence_count })),
+    factPage: { loadedCount: payload.facts.length + payload.pending_facts.length, totalCount: payload.facts.length + payload.pending_facts.length, nextCursor: null, hasMore: false },
+    transactionPage: { loadedCount: payload.transactions.length, totalCount: payload.transactions.length, nextCursor: null, hasMore: false },
   };
 }
 
-function mapPersistentSnapshot(payload: PersistentSnapshot, requestId: string | null): CaseReviewView {
-  const classifications = new Map(payload.payment_classifications.map((item) => [item.transaction_id, item]));
+function mapPersistentReview(
+  summary: PersistentReviewSummary,
+  factPage: PersistentFactPage,
+  transactionPage: PersistentTransactionPage,
+  requestId: string | null,
+): CaseReviewView {
+  if (factPage.matter_version !== summary.version || transactionPage.matter_version !== summary.version) {
+    throw new Error("案件在读取分页期间已变化，请重新载入当前案件。");
+  }
+  const mappedFacts = mapPersistentFacts(factPage.items);
   return {
     sourceKind: "persistent-preview",
     sourceLabel: "持久化内部预览",
-    matterTitle: payload.title,
-    matterVersion: payload.version,
-    snapshotHash: payload.snapshot_hash,
+    matterTitle: summary.title,
+    matterVersion: summary.version,
+    snapshotHash: summary.summary_hash,
     transactionSnapshotHash: null,
     requestId,
-    facts: payload.facts.filter((item) => item.status !== "CANDIDATE").map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, status: item.status, evidenceCount: item.evidence_count })),
-    claims: payload.claims.map((item) => ({ claimId: item.claim_id, text: item.original_claim_text, amount: item.claimed_amount, currency: item.currency, position: item.response?.position ?? "待律师回应", responseAmount: item.response?.partial_amount ?? null })),
-    issues: payload.issues.map((item) => ({ issueId: item.issue_id, question: item.question, claimCount: item.claim_ids.length, factCount: item.confirmed_fact_ids.length, status: item.status })),
-    transactions: payload.transactions.map((item) => {
-      const classification = classifications.get(item.transaction_id);
-      return { transactionId: item.transaction_id, date: item.local_date, amount: item.amount, currency: item.currency, nature: classification?.nature ?? "待分类", application: paymentApplication(classification?.nature), status: classification?.status ?? item.status };
-    }),
-    pendingFacts: payload.facts.filter((item) => item.status === "CANDIDATE").map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, evidenceCount: item.evidence_count })),
+    facts: mappedFacts.facts,
+    claims: summary.claims.map((item) => ({ claimId: item.claim_id, text: item.original_claim_text, amount: item.claimed_amount, currency: item.currency, position: item.response?.position ?? "待律师回应", responseAmount: item.response?.partial_amount ?? null })),
+    issues: summary.issues.map((item) => ({ issueId: item.issue_id, question: item.question, claimCount: item.claim_count, factCount: item.fact_count, status: item.status })),
+    transactions: mapPersistentTransactions(transactionPage.items),
+    pendingFacts: mappedFacts.pendingFacts,
+    factPage: { loadedCount: factPage.items.length, totalCount: factPage.total_count, nextCursor: factPage.next_cursor, hasMore: factPage.has_more },
+    transactionPage: { loadedCount: transactionPage.items.length, totalCount: transactionPage.total_count, nextCursor: transactionPage.next_cursor, hasMore: transactionPage.has_more },
   };
+}
+
+function mapPersistentFacts(items: PersistentFactPage["items"]) {
+  return {
+    facts: items.filter((item) => item.status !== "CANDIDATE").map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, status: item.status, evidenceCount: item.evidence_count })),
+    pendingFacts: items.filter((item) => item.status === "CANDIDATE").map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, evidenceCount: item.evidence_count })),
+  };
+}
+
+function mapPersistentTransactions(items: PersistentTransactionPage["items"]): CaseReviewView["transactions"] {
+  return items.map((item) => ({
+    transactionId: item.transaction_id,
+    date: item.local_date,
+    amount: item.amount,
+    currency: item.currency,
+    nature: item.classification_nature ?? "待分类",
+    application: paymentApplication(item.classification_nature ?? undefined),
+    status: item.classification_status ?? item.status,
+  }));
 }
 
 function mapSyntheticEvidence(): EvidenceReviewView {

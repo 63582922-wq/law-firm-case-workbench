@@ -18,7 +18,13 @@ from case_api.persistent_identity import (
     ServerIdentityContext,
 )
 from case_kernel.artifact_access import EphemeralArtifactAccessBroker, VerifiedDerivativeLocator
-from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt, PersistentCaseSnapshot
+from case_kernel.case_ledger_postgres import (
+    CaseLedgerCommandReceipt,
+    PersistentCaseSnapshot,
+    PersistentCaseReviewSummary,
+    PersistentFactListPage,
+    PersistentTransactionListPage,
+)
 from case_kernel.evidence_manifest_postgres import PersistentEvidenceSnapshot
 from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
@@ -76,6 +82,63 @@ class FakePersistentFactStore:
     def list_facts(self, *, matter_id: str, actor: Actor):
         self.calls.append(("list", {"matter_id": matter_id, "actor": actor}))
         return ()
+
+    def list_fact_page(self, **kwargs):
+        self.calls.append(("fact_page", kwargs))
+        return PersistentFactListPage(
+            matter_id=kwargs["matter_id"],
+            matter_version=4,
+            total_count=1,
+            candidate_count=0,
+            items=(
+                {
+                    "fact_id": str(uuid4()),
+                    "original_text": "[合成] 分页事实",
+                    "origin": "LAWYER_ENTRY",
+                    "status": "CONFIRMED",
+                    "evidence_count": 1,
+                },
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def list_transaction_page(self, **kwargs):
+        self.calls.append(("transaction_page", kwargs))
+        return PersistentTransactionListPage(
+            matter_id=kwargs["matter_id"],
+            matter_version=4,
+            total_count=1,
+            items=(
+                {
+                    "transaction_id": str(uuid4()),
+                    "local_date": None,
+                    "amount": "1000.00",
+                    "currency": "CNY",
+                    "status": "CONFIRMED",
+                    "evidence_count": 1,
+                    "classification_nature": "PRINCIPAL_PAYMENT",
+                    "classification_status": "APPROVED",
+                },
+            ),
+            next_cursor=None,
+            has_more=False,
+        )
+
+    def get_case_review_summary(self, *, matter_id: str, actor: Actor):
+        self.calls.append(("review_summary", {"matter_id": matter_id, "actor": actor}))
+        return PersistentCaseReviewSummary(
+            matter_id=matter_id,
+            title="[合成] 持久化案件摘要",
+            stage="FACT_REVIEW",
+            version=4,
+            summary_hash="d" * 64,
+            fact_count=1,
+            candidate_fact_count=0,
+            transaction_count=1,
+            claims=(),
+            issues=(),
+        )
 
     def create_transaction_candidate(self, **kwargs):
         self.calls.append(("create_transaction", kwargs))
@@ -675,6 +738,52 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(payload["version"], 4)
         self.assertEqual(payload["snapshot_hash"], "c" * 64)
         self.assertEqual(payload["payment_classifications"], [])
+
+    def test_case_fact_and_transaction_pages_are_bounded_minimal_projections(self) -> None:
+        store = FakePersistentFactStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=store,
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        summary = client.get(f"/v1/matters/{self.matter_id}/review-summary")
+        facts = client.get(f"/v1/matters/{self.matter_id}/fact-pages?limit=25&expected_version=4")
+        transactions = client.get(
+            f"/v1/matters/{self.matter_id}/transaction-pages?limit=25&expected_version=4"
+        )
+
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertEqual(facts.status_code, 200, facts.text)
+        self.assertEqual(transactions.status_code, 200, transactions.text)
+        self.assertEqual(summary.json()["summary_hash"], "d" * 64)
+        self.assertNotIn("facts", summary.json())
+        self.assertNotIn("transactions", summary.json())
+        self.assertEqual(facts.json()["matter_version"], 4)
+        self.assertEqual(transactions.json()["matter_version"], 4)
+        self.assertEqual(
+            frozenset(facts.json()["items"][0]),
+            frozenset({"fact_id", "original_text", "origin", "status", "evidence_count"}),
+        )
+        self.assertTrue(
+            frozenset({"payer_label", "payee_label", "transaction_reference", "evidence_links"}).isdisjoint(
+                transactions.json()["items"][0]
+            )
+        )
+        fact_call = next(call for call in store.calls if call[0] == "fact_page")[1]
+        transaction_call = next(call for call in store.calls if call[0] == "transaction_page")[1]
+        self.assertEqual(fact_call["limit"], 25)
+        self.assertIsNone(fact_call["cursor"])
+        self.assertEqual(fact_call["expected_version"], 4)
+        self.assertEqual(transaction_call["limit"], 25)
+        self.assertEqual(transaction_call["expected_version"], 4)
+
+        too_large = client.get(f"/v1/matters/{self.matter_id}/fact-pages?limit=101")
+        self.assertEqual(too_large.status_code, 422)
+        self.assertEqual(too_large.json()["code"], "REQUEST_VALIDATION_FAILED")
 
     def test_evidence_routes_fail_closed_when_evidence_store_is_not_configured(self) -> None:
         client = TestClient(

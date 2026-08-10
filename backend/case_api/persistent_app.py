@@ -11,7 +11,7 @@ from typing import Annotated, Protocol
 from uuid import UUID
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, Header, Request, Response, status
+from fastapi import Depends, FastAPI, Header, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +20,7 @@ from case_kernel.case_ledger_postgres import (
     CaseLedgerPersistenceBlocked,
     PostgresCaseLedgerStore,
 )
+from case_kernel.stable_pagination import DEFAULT_PAGE_SIZE, StablePaginationBlocked
 from case_kernel.artifact_access import (
     ArtifactAccessPurpose,
     EphemeralArtifactAccessBroker,
@@ -97,6 +98,7 @@ from .schemas import (
     PersistentLocalFolderSelectionResponse,
     PersistentOriginalPageAccessRequest,
     PersistentOriginalPageAccessResponse,
+    PersistentCaseReviewSummaryResponse,
     PersistentCaseSnapshotResponse,
     PersistentApprovalRequest,
     PersistentClaimCandidateRequest,
@@ -122,6 +124,7 @@ from .schemas import (
     PersistentEvidenceSnapshotResponse,
     PersistentFactCandidateRequest,
     PersistentFactDecisionRequest,
+    PersistentFactPageResponse,
     PersistentFactResponse,
     PersistentCaseLegalBundleApprovalRequest,
     PersistentCaseLegalEventRequest,
@@ -142,6 +145,7 @@ from .schemas import (
     PersistentSubmissionWorkProductRequest,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
+    PersistentTransactionPageResponse,
 )
 
 
@@ -151,6 +155,12 @@ class PersistentFactLedgerPort(Protocol):
     def decide_fact(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def list_facts(self, *, matter_id: str, actor: Actor): ...
+
+    def list_fact_page(self, **kwargs): ...
+
+    def list_transaction_page(self, **kwargs): ...
+
+    def get_case_review_summary(self, *, matter_id: str, actor: Actor): ...
 
     def create_claim_candidate(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -517,7 +527,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
 
     @app.exception_handler(CaseLedgerPersistenceBlocked)
     @app.exception_handler(EvidenceReferenceBlocked)
-    async def ledger_handler(_: Request, exc: CaseLedgerPersistenceBlocked | EvidenceReferenceBlocked):
+    @app.exception_handler(StablePaginationBlocked)
+    async def ledger_handler(
+        _: Request,
+        exc: CaseLedgerPersistenceBlocked | EvidenceReferenceBlocked | StablePaginationBlocked,
+    ):
         del exc
         return _error(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -661,6 +675,21 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
         return PersistentCaseSnapshotResponse.model_validate(snapshot.__dict__)
 
     @app.get(
+        "/v1/matters/{matter_id}/review-summary",
+        response_model=PersistentCaseReviewSummaryResponse,
+        tags=["matters"],
+    )
+    async def get_case_review_summary(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+    ) -> PersistentCaseReviewSummaryResponse:
+        summary = dependencies.case_ledger_store.get_case_review_summary(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+        )
+        return PersistentCaseReviewSummaryResponse.model_validate(summary.__dict__)
+
+    @app.get(
         "/v1/matters/{matter_id}/facts",
         response_model=tuple[PersistentFactResponse, ...],
         tags=["facts"],
@@ -681,6 +710,48 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             )
             for fact in facts
         )
+
+    @app.get(
+        "/v1/matters/{matter_id}/fact-pages",
+        response_model=PersistentFactPageResponse,
+        tags=["facts"],
+    )
+    async def list_fact_page(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(min_length=20, max_length=512)] = None,
+        expected_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> PersistentFactPageResponse:
+        page = dependencies.case_ledger_store.list_fact_page(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+            limit=limit,
+            cursor=cursor,
+            expected_version=expected_version,
+        )
+        return PersistentFactPageResponse.model_validate(page.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/transaction-pages",
+        response_model=PersistentTransactionPageResponse,
+        tags=["transactions"],
+    )
+    async def list_transaction_page(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(min_length=20, max_length=512)] = None,
+        expected_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> PersistentTransactionPageResponse:
+        page = dependencies.case_ledger_store.list_transaction_page(
+            matter_id=str(matter_id),
+            actor=identity.actor,
+            limit=limit,
+            cursor=cursor,
+            expected_version=expected_version,
+        )
+        return PersistentTransactionPageResponse.model_validate(page.__dict__)
 
     @app.get(
         "/v1/matters/{matter_id}/calculations/{obligation_id}/current",
