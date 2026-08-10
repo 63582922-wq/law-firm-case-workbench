@@ -37,6 +37,8 @@ test_fixtures:
 change_log:
 ```
 
+模型输出进入任何文书 Tool 前，必须先经 `agent_structured_draft.py` 严格解码为结构化候选：只接受固定 JSON Schema、受限字段类型和可追溯的内部来源标识。模型不能携带路径、工具指令、任意 Office 二进制、公式对象或“已经律师批准”的标记；解码后仍只是候选，必须进入加密暂存、律师确认和内部 Worker 链。
+
 共同要求：
 
 - 输入输出必须结构化；
