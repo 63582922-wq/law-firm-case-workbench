@@ -151,6 +151,7 @@ class FakeSubmissionConnection:
                     "document_kind": "DEFENCE_STATEMENT",
                     "audience": "COURT_SUBMISSION",
                     "artifact_sha256": "a" * 64,
+                    "review_input_hash": "f" * 64,
                     "status": "CANDIDATE",
                 }
             )
@@ -325,6 +326,7 @@ class SubmissionStoreTests(unittest.TestCase):
                 byte_size=len(self.pdf),
                 page_count=1,
                 semantic_text_sha256="d" * 64,
+                review_input_hash="f" * 64,
             ),
         )
         self.assertEqual(receipt.matter_version, 2)
@@ -348,6 +350,7 @@ class SubmissionStoreTests(unittest.TestCase):
                 byte_size=len(self.pdf),
                 page_count=1,
                 semantic_text_sha256="d" * 64,
+                review_input_hash="f" * 64,
             )
 
     def test_approval_stales_old_submission_but_not_verified_calculation(self) -> None:
@@ -368,6 +371,21 @@ class SubmissionStoreTests(unittest.TestCase):
         self.assertIn("UPDATE submission_work_products", sql)
         self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
         self.assertNotIn("UPDATE calculation_runs", sql)
+
+    def test_approval_rejects_a_hash_not_bound_to_the_candidate_output(self) -> None:
+        connection = FakeSubmissionConnection()
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "exact candidate review hash"):
+            self.run_with(
+                connection,
+                lambda: self.store.approve_work_product(
+                    matter_id=self.matter_id,
+                    actor=self.lead,
+                    expected_version=1,
+                    idempotency_key="work-product-approve-mismatch-001",
+                    work_product_id=connection.work_product_ids[0],
+                    approval_hash="e" * 64,
+                ),
+            )
 
     def test_qa_bundle_binds_exact_filenames_and_all_current_dependencies(self) -> None:
         connection = FakeSubmissionConnection()

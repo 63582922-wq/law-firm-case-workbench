@@ -110,6 +110,7 @@ class PostgresSubmissionStore:
         byte_size: int,
         page_count: int | None,
         semantic_text_sha256: str | None,
+        review_input_hash: str,
     ) -> CaseLedgerCommandReceipt:
         self._validate_command(
             matter_id, actor, expected_version, idempotency_key, self._REGISTER_ROLES
@@ -121,6 +122,7 @@ class PostgresSubmissionStore:
         if media_type != _PDF_MEDIA_TYPE:
             raise CaseLedgerPersistenceBlocked("v1 court work products must be PDF")
         _validate_sha256("artifact_sha256", artifact_sha256)
+        _validate_sha256("review_input_hash", review_input_hash)
         if semantic_text_sha256 is not None:
             _validate_sha256("semantic_text_sha256", semantic_text_sha256)
         if normalized_kind == "DEFENCE_STATEMENT" and semantic_text_sha256 is None:
@@ -150,6 +152,7 @@ class PostgresSubmissionStore:
             "byte_size": byte_size,
             "page_count": page_count,
             "semantic_text_sha256": semantic_text_sha256,
+            "review_input_hash": review_input_hash,
         }
         payload_hash = _payload_hash(payload)
         with self._transaction(actor.firm_id) as connection:
@@ -170,8 +173,8 @@ class PostgresSubmissionStore:
                 INSERT INTO submission_work_products (
                     work_product_id, firm_id, matter_id, document_kind, audience,
                     media_type, storage_object_key, artifact_sha256, byte_size,
-                    page_count, semantic_text_sha256, status, registered_by
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    page_count, semantic_text_sha256, review_input_hash, status, registered_by
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                           'CANDIDATE', %s)
                 """,
                 (
@@ -186,6 +189,7 @@ class PostgresSubmissionStore:
                     byte_size,
                     page_count,
                     semantic_text_sha256,
+                    review_input_hash,
                     actor.actor_id,
                 ),
             )
@@ -205,6 +209,7 @@ class PostgresSubmissionStore:
                     "document_kind": normalized_kind,
                     "audience": audience,
                     "artifact_sha256": artifact_sha256,
+                    "review_input_hash": review_input_hash,
                 },
                 stale_submission=False,
                 stale_calculations=False,
@@ -248,7 +253,7 @@ class PostgresSubmissionStore:
                 return prior
             product = connection.execute(
                 """
-                SELECT document_kind, audience, artifact_sha256, status
+                SELECT document_kind, audience, artifact_sha256, review_input_hash, status
                 FROM submission_work_products
                 WHERE work_product_id = %s AND matter_id = %s AND firm_id = %s
                 FOR UPDATE
@@ -259,6 +264,14 @@ class PostgresSubmissionStore:
                 raise KeyError(work_product_id)
             if product["status"] != "CANDIDATE":
                 raise CaseLedgerPersistenceBlocked("only a candidate work product can be approved")
+            if product["review_input_hash"] is None:
+                raise CaseLedgerPersistenceBlocked(
+                    "legacy work product has no review binding and must be regenerated"
+                )
+            if approval_hash != product["review_input_hash"]:
+                raise CaseLedgerPersistenceBlocked(
+                    "work-product approval must bind to the exact candidate review hash"
+                )
             connection.execute(
                 """
                 UPDATE submission_work_products

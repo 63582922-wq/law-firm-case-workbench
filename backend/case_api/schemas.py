@@ -1275,6 +1275,7 @@ class PersistentSubmissionWorkProductRequest(BaseModel):
     byte_size: int = Field(gt=0, le=134_217_728)
     page_count: int = Field(gt=0, le=20_000)
     semantic_text_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    review_input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class PersistentSubmissionComponentSelectionRequest(BaseModel):

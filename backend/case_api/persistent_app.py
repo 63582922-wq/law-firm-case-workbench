@@ -1179,6 +1179,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 byte_size=body.byte_size,
                 page_count=body.page_count,
                 semantic_text_sha256=body.semantic_text_sha256,
+                review_input_hash=body.review_input_hash,
             )
         )
 
