@@ -17,6 +17,7 @@ from .approved_draft_worker import ApprovedDraft, create_docx_draft, create_pdf_
 from .evidence_normalization_worker import normalize_authorized_material
 from .local_access_grants import AuthorizedOriginalFile
 from .office_reading_worker import read_authorized_office_document
+from .office_pdf_conversion_worker import SandboxedOfficePdfConverter
 from .skill_registry import CapabilityScope, CaseSkillRegistry, SkillRegistryBlocked
 
 
@@ -25,8 +26,11 @@ class SkillToolGatewayBlocked(PermissionError):
 
 
 class CaseSkillToolGateway:
-    def __init__(self, *, registry: CaseSkillRegistry) -> None:
+    def __init__(
+        self, *, registry: CaseSkillRegistry, office_pdf_converter: SandboxedOfficePdfConverter | None = None
+    ) -> None:
         self._registry = registry
+        self._office_pdf_converter = office_pdf_converter
 
     def execute(
         self,
@@ -59,6 +63,11 @@ class CaseSkillToolGateway:
         elif tool_id == "normalize_image_or_text_pdf":
             source = _authorized_source(payload)
             result = normalize_authorized_material(source, detected_kind=_text(payload, "detected_kind"))
+        elif tool_id == "render_office_to_pdf":
+            source = _authorized_source(payload)
+            if self._office_pdf_converter is None:
+                raise SkillToolGatewayBlocked("the isolated Office PDF converter is not configured for this desktop")
+            result = self._office_pdf_converter.convert(source, detected_kind=_text(payload, "detected_kind"))
         elif tool_id == "create_docx_draft":
             result = create_docx_draft(_approved_draft(payload))
         elif tool_id == "create_pdf_derivative":

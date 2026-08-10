@@ -19,6 +19,7 @@ from .evidence_intake_postgres import PostgresEvidenceIntakeStore
 from .formal_calculation_postgres import PostgresFormalCalculationStore
 from .legal_source_postgres import PostgresLegalSourceStore
 from .managed_artifact_store import LocalEncryptedArtifactStore
+from .office_pdf_conversion_worker import OfficePdfConversionBlocked, SandboxedOfficePdfConverter
 from .official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from .postgres_store import PostgresMatterStore
 from .submission_postgres import PostgresSubmissionStore
@@ -38,10 +39,16 @@ class RuntimeMode(str, Enum):
 class RuntimeSettings:
     mode: RuntimeMode
     _postgres_dsn: str | None = field(default=None, repr=False, compare=False)
+    _office_soffice_executable: str | None = field(default=None, repr=False, compare=False)
+    _office_pdf_renderer_executable: str | None = field(default=None, repr=False, compare=False)
 
     @property
     def postgres_dsn(self) -> str | None:
         return self._postgres_dsn
+
+    @property
+    def office_conversion_enabled(self) -> bool:
+        return self._office_soffice_executable is not None
 
     @classmethod
     def from_environment(cls, environ: Mapping[str, str]) -> "RuntimeSettings":
@@ -52,11 +59,15 @@ class RuntimeSettings:
             raise RuntimeConfigurationBlocked("unsupported CASE_WORKBENCH_RUNTIME_MODE") from error
         dsn = environ.get("CASE_WORKBENCH_POSTGRES_DSN", "").strip()
         acknowledgement = environ.get("CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW", "")
+        office_acknowledgement = environ.get("CASE_WORKBENCH_ENABLE_OFFICE_CONVERSION", "").strip()
+        office_soffice = environ.get("CASE_WORKBENCH_OFFICE_SOFFICE", "").strip()
+        office_renderer = environ.get("CASE_WORKBENCH_OFFICE_PDF_RENDERER", "").strip()
+        office_configured = bool(office_acknowledgement or office_soffice or office_renderer)
 
         if mode is RuntimeMode.SYNTHETIC_ALPHA:
-            if dsn or acknowledgement:
+            if dsn or acknowledgement or office_configured:
                 raise RuntimeConfigurationBlocked(
-                    "persistent settings cannot be present while runtime mode is synthetic-alpha"
+                    "persistent or Office-conversion settings cannot be present while runtime mode is synthetic-alpha"
                 )
             return cls(mode=mode)
 
@@ -74,7 +85,21 @@ class RuntimeSettings:
             raise RuntimeConfigurationBlocked(
                 "internal preview only accepts a dedicated database name ending in _preview or _test"
             )
-        return cls(mode=mode, _postgres_dsn=dsn)
+        if office_configured:
+            if office_acknowledgement != "YES":
+                raise RuntimeConfigurationBlocked(
+                    "Office conversion requires CASE_WORKBENCH_ENABLE_OFFICE_CONVERSION=YES"
+                )
+            if not office_soffice or not office_renderer:
+                raise RuntimeConfigurationBlocked(
+                    "Office conversion requires CASE_WORKBENCH_OFFICE_SOFFICE and CASE_WORKBENCH_OFFICE_PDF_RENDERER"
+                )
+        return cls(
+            mode=mode,
+            _postgres_dsn=dsn,
+            _office_soffice_executable=office_soffice or None,
+            _office_pdf_renderer_executable=office_renderer or None,
+        )
 
 
 @dataclass(frozen=True)
@@ -88,6 +113,7 @@ class RuntimeServices:
     official_source_capture_store: PostgresOfficialSourceCaptureStore | None
     submission_store: PostgresSubmissionStore | None
     artifact_store: LocalEncryptedArtifactStore | None
+    office_pdf_converter: SandboxedOfficePdfConverter | None
     persistence_label: str
 
 
@@ -116,11 +142,13 @@ def build_runtime_services(
             official_source_capture_store=None,
             submission_store=None,
             artifact_store=None,
+            office_pdf_converter=None,
             persistence_label="in-memory-synthetic-only",
         )
     dsn = settings.postgres_dsn
     if dsn is None:
         raise RuntimeConfigurationBlocked("persistent runtime settings lost their PostgreSQL DSN")
+    office_converter = _build_office_converter(settings, artifact_store=artifact_store)
     artifact_reader = (
         (lambda object_key, expected_hash: artifact_store.read_bytes(
             object_key, expected_sha256=expected_hash
@@ -142,5 +170,24 @@ def build_runtime_services(
         ),
         submission_store=PostgresSubmissionStore(dsn, artifact_reader=artifact_reader),
         artifact_store=artifact_store,
+        office_pdf_converter=office_converter,
         persistence_label="postgres-internal-preview",
     )
+
+
+def _build_office_converter(
+    settings: RuntimeSettings, *, artifact_store: LocalEncryptedArtifactStore | None
+) -> SandboxedOfficePdfConverter | None:
+    if not settings.office_conversion_enabled:
+        return None
+    if artifact_store is None:
+        raise RuntimeConfigurationBlocked("Office conversion requires the persistent encrypted artifact store")
+    if settings._office_soffice_executable is None or settings._office_pdf_renderer_executable is None:
+        raise RuntimeConfigurationBlocked("Office conversion runtime configuration is incomplete")
+    try:
+        return SandboxedOfficePdfConverter(
+            soffice_executable=settings._office_soffice_executable,
+            pdf_renderer_executable=settings._office_pdf_renderer_executable,
+        )
+    except OfficePdfConversionBlocked as error:
+        raise RuntimeConfigurationBlocked("Office conversion executables failed the local safety check") from error

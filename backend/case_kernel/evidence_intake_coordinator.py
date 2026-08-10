@@ -15,6 +15,7 @@ from .evidence_normalization_worker import EvidenceNormalizationBlocked, normali
 from .local_access_grants import AuthorizedOriginalFile, LocalFolderGrantRegistry, LocalSessionProof
 from .managed_artifact_store import LocalEncryptedArtifactStore, ManagedArtifactBlocked
 from .models import Actor, Role
+from .office_pdf_conversion_worker import OfficePdfConversionBlocked, SandboxedOfficePdfConverter
 
 
 class EvidenceIntakeCoordinationBlocked(ValueError):
@@ -53,6 +54,7 @@ def coordinate_claimed_evidence_intake_item(
     persistence: EvidenceIntakePersistencePort,
     system_actor: Actor,
     artifact_store: LocalEncryptedArtifactStore | None = None,
+    office_converter: SandboxedOfficePdfConverter | None = None,
 ) -> CoordinatedEvidenceIntakeResult:
     if system_actor.roles != frozenset({Role.SYSTEM_WORKER}) or system_actor.firm_id != grant_actor.firm_id:
         raise EvidenceIntakeCoordinationBlocked("material intake requires a dedicated same-firm SYSTEM_WORKER")
@@ -103,15 +105,26 @@ def coordinate_claimed_evidence_intake_item(
             idempotency_key=f"{prefix}:complete",
         )
         final_version = completed.matter_version
-    elif inspection.outcome == "REVIEW_REQUIRED" and lease.detected_kind in {"IMAGE", "TEXT"} and artifact_store:
+    elif (
+        inspection.outcome == "REVIEW_REQUIRED"
+        and artifact_store is not None
+        and (
+            lease.detected_kind in {"IMAGE", "TEXT"}
+            or (lease.detected_kind in {"WORD_DOCUMENT", "SPREADSHEET"} and office_converter is not None)
+        )
+    ):
         try:
-            normalized = normalize_authorized_material(source, detected_kind=lease.detected_kind)
+            normalized = (
+                normalize_authorized_material(source, detected_kind=lease.detected_kind)
+                if lease.detected_kind in {"IMAGE", "TEXT"}
+                else office_converter.convert(source, detected_kind=lease.detected_kind)
+            )
             stored = artifact_store.put_bytes(
                 normalized.pdf_content,
                 expected_sha256=normalized.pdf_sha256,
                 case_root=_case_root_for(source),
             )
-        except (EvidenceNormalizationBlocked, ManagedArtifactBlocked) as error:
+        except (EvidenceNormalizationBlocked, OfficePdfConversionBlocked, ManagedArtifactBlocked) as error:
             raise EvidenceIntakeCoordinationBlocked("eligible evidence normalization failed safely") from error
         registered = persistence.register_normalized_original_file(
             matter_id=lease.matter_id,
@@ -121,12 +134,13 @@ def coordinate_claimed_evidence_intake_item(
             original_label=lease.relative_path,
             original_file_sha256=lease.expected_sha256,
             byte_size=lease.expected_byte_size,
-            source_media_type=normalized.source_media_type,
+            source_media_type=_source_media_type(normalized, detected_kind=lease.detected_kind),
             page_count=normalized.page_count,
             source_scan_fingerprint=lease.scan_manifest_hash,
-            normalizer_id=normalized.normalizer_id,
-            normalizer_version=normalized.normalizer_version,
+            normalizer_id=_normalizer_id(normalized),
+            normalizer_version=_normalizer_version(normalized),
             transform_hash=normalized.transform_hash,
+            render_verification_hash=_render_verification_hash(normalized),
             normalized_pdf_sha256=normalized.pdf_sha256,
             normalized_pdf_bytes=normalized.pdf_bytes,
             normalized_pdf_object_key=stored.object_key,
@@ -207,3 +221,26 @@ def _normalization_receipt_hash(*, inspection_hash: str, normalized_pdf_sha256: 
         "transform_hash": transform_hash,
     }
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _source_media_type(normalized: object, *, detected_kind: str) -> str:
+    value = getattr(normalized, "source_media_type", None)
+    if isinstance(value, str) and value:
+        return value
+    return {
+        "WORD_DOCUMENT": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "SPREADSHEET": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }.get(detected_kind, "")
+
+
+def _normalizer_id(normalized: object) -> str:
+    return str(getattr(normalized, "normalizer_id", getattr(normalized, "converter_id", "")))
+
+
+def _normalizer_version(normalized: object) -> str:
+    return str(getattr(normalized, "normalizer_version", getattr(normalized, "converter_version", "")))
+
+
+def _render_verification_hash(normalized: object) -> str | None:
+    value = getattr(normalized, "render_verification_hash", None)
+    return value if isinstance(value, str) and value else None

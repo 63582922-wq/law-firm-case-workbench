@@ -68,7 +68,7 @@ PUBLIC_SOURCES: tuple[PublicSource, ...] = (
         source_id="SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
         publisher="最高人民法院",
         source_tier="JUDICIAL_INTERPRETATION",
-        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn", "wb.flk.npc.gov.cn"}),
+        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn", "cicc.court.gov.cn", "wb.flk.npc.gov.cn"}),
         topics=frozenset({"民间借贷", "利率保护", "过渡规则", "预扣利息", "逾期利息"}),
     ),
     PublicSource(

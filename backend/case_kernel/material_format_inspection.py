@@ -307,8 +307,16 @@ def _target_has_external_scheme(target: str) -> bool:
 
 def _relationship_target_escapes_package(relationship_name: str, target: str) -> bool:
     normalized_target = target.replace("\\", "/")
-    if not normalized_target or normalized_target.startswith("/"):
-        return bool(normalized_target.startswith("/"))
+    if not normalized_target:
+        return False
+    if normalized_target.startswith("//"):
+        return True
+    if normalized_target.startswith("/"):
+        # OOXML writers (including openpyxl) legitimately use a package-root
+        # target such as /xl/worksheets/sheet1.xml.  It is not a filesystem
+        # path: retain it only when it stays inside the ZIP package.
+        package_target = PurePosixPath(normalized_target.lstrip("/"))
+        return not package_target.parts or any(part in {"", ".", ".."} for part in package_target.parts)
     relationship_path = PurePosixPath(relationship_name)
     if relationship_path == PurePosixPath("_rels/.rels"):
         base_parts: list[str] = []

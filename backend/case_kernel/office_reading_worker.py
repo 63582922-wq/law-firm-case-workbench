@@ -162,9 +162,18 @@ def _xlsx_relationships(archive: zipfile.ZipFile) -> dict[str, str]:
         target = str(relation.attrib.get("Target", ""))
         relation_type = str(relation.attrib.get("Type", ""))
         if relation_type.endswith("/worksheet"):
-            if not relation_id or not target or target.startswith("/") or ".." in target.split("/"):
+            normalized_target = target.replace("\\", "/")
+            if (
+                not relation_id
+                or not normalized_target
+                or normalized_target.startswith("//")
+                or ".." in normalized_target.split("/")
+            ):
                 raise OfficeReadingBlocked("XLSX worksheet relationship is unsafe")
-            mappings[relation_id] = f"xl/{target.lstrip('./')}"
+            member = normalized_target.lstrip("/") if normalized_target.startswith("/") else f"xl/{normalized_target.lstrip('./')}"
+            if not member.startswith("xl/"):
+                raise OfficeReadingBlocked("XLSX worksheet relationship is outside its package")
+            mappings[relation_id] = member
     return mappings
 
 

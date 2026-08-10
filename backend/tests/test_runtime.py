@@ -34,6 +34,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNone(services.official_source_capture_store)
         self.assertIsNone(services.submission_store)
         self.assertIsNone(services.artifact_store)
+        self.assertIsNone(services.office_pdf_converter)
         matter_connect.assert_not_called()
         ledger_connect.assert_not_called()
 
@@ -111,6 +112,28 @@ class RuntimeSettingsTests(unittest.TestCase):
                 build_runtime_services(
                     RuntimeSettings(mode=RuntimeMode.SYNTHETIC_ALPHA), artifact_store=store
                 )
+
+    def test_office_conversion_requires_explicit_preview_acknowledgement_and_both_bundled_paths(self) -> None:
+        base = {
+            "CASE_WORKBENCH_RUNTIME_MODE": "postgres-internal-preview",
+            "CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW": "YES",
+            "CASE_WORKBENCH_POSTGRES_DSN": "postgresql://localhost/lawcase_preview",
+            "CASE_WORKBENCH_OFFICE_SOFFICE": "/opt/lawcase/soffice",
+        }
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "ENABLE_OFFICE_CONVERSION"):
+            RuntimeSettings.from_environment(base)
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "OFFICE_SOFFICE and CASE_WORKBENCH_OFFICE_PDF_RENDERER"):
+            RuntimeSettings.from_environment({**base, "CASE_WORKBENCH_ENABLE_OFFICE_CONVERSION": "YES"})
+
+    def test_office_conversion_never_becomes_available_without_managed_encrypted_storage(self) -> None:
+        settings = RuntimeSettings(
+            mode=RuntimeMode.POSTGRES_INTERNAL_PREVIEW,
+            _postgres_dsn="postgresql://localhost/lawcase_preview",
+            _office_soffice_executable="/opt/lawcase/soffice",
+            _office_pdf_renderer_executable="/opt/lawcase/pdftoppm",
+        )
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "encrypted artifact store"):
+            build_runtime_services(settings)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import unittest
 import zipfile
 
 from PIL import Image
+from openpyxl import Workbook
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, TextStringObject
 from reportlab.pdfgen import canvas
@@ -95,6 +96,18 @@ class EvidenceIntakeWorkerTests(unittest.TestCase):
         self.assertEqual(macro_result.reason_code, "OFFICE_ACTIVE_CONTENT")
         self.assertEqual(external_result.outcome, "BLOCKED")
         self.assertEqual(external_result.reason_code, "OFFICE_EXTERNAL_RELATIONSHIP")
+
+    def test_standard_xlsx_package_root_worksheet_relationship_is_not_mistaken_for_an_escape(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "标准台账.xlsx"
+            workbook = Workbook()
+            workbook.active["A1"] = "付款"
+            workbook.save(path)
+            result = inspect_authorized_original(
+                self.authorized(path, path.name), detected_kind="SPREADSHEET", scanner=CleanScanner()
+            )
+        self.assertEqual(result.outcome, "REVIEW_REQUIRED")
+        self.assertEqual(result.reason_code, "SPREADSHEET_CONVERSION_REQUIRED")
 
     def test_archive_path_traversal_is_blocked_without_extraction(self) -> None:
         with TemporaryDirectory() as temporary:

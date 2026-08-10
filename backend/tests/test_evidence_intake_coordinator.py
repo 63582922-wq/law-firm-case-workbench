@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -8,6 +9,7 @@ import zipfile
 
 from reportlab.pdfgen import canvas
 from PIL import Image
+from openpyxl import Workbook
 
 from case_kernel.case_ledger_postgres import CaseLedgerCommandReceipt
 from case_kernel.evidence_intake_coordinator import coordinate_claimed_evidence_intake_item
@@ -17,6 +19,7 @@ from case_kernel.local_access_grants import LocalFolderGrantRegistry, LocalSessi
 from case_kernel.local_case_folder import root_fingerprint
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.models import Actor, Role
+from case_kernel.office_pdf_conversion_worker import ConvertedOfficePdf
 
 
 class CleanScanner:
@@ -49,6 +52,27 @@ class FakePersistence:
         return self.receipt("FINALIZE", kwargs["expected_version"] + 1, "EVIDENCE_INTAKE_ITEM")
 
 
+class FakeOfficeConverter:
+    def convert(self, source, *, detected_kind: str) -> ConvertedOfficePdf:
+        output = BytesIO()
+        document = canvas.Canvas(output)
+        document.drawString(30, 700, "synthetic converted office PDF")
+        document.save()
+        content = output.getvalue()
+        return ConvertedOfficePdf(
+            source_sha256=source.sha256,
+            detected_kind=detected_kind,
+            converter_id="fake-office-converter",
+            converter_version="test-v1",
+            transform_hash="d" * 64,
+            pdf_sha256=sha256(content).hexdigest(),
+            pdf_bytes=len(content),
+            page_count=1,
+            render_verification_hash="e" * 64,
+            pdf_content=content,
+        )
+
+
 class EvidenceIntakeCoordinatorTests(unittest.TestCase):
     def setUp(self) -> None:
         self.now = datetime.now(timezone.utc)
@@ -60,7 +84,7 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
             str(uuid4()), "OS_BOUND_LOCAL_SESSION", self.now - timedelta(minutes=1), self.now + timedelta(minutes=15)
         )
 
-    def coordinate(self, root: Path, source: Path, detected_kind: str, *, artifact_store=None):
+    def coordinate(self, root: Path, source: Path, detected_kind: str, *, artifact_store=None, office_converter=None):
         registry = LocalFolderGrantRegistry()
         grant = registry.issue_read_grant(
             selected_root=root,
@@ -96,6 +120,7 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
             persistence=persistence,
             system_actor=self.worker,
             artifact_store=artifact_store,
+            office_converter=office_converter,
         )
         return result, persistence
 
@@ -151,6 +176,36 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
         self.assertEqual([name for name, _ in persistence.calls], ["register_normalized", "complete"])
         self.assertEqual(persistence.calls[0][1]["source_media_type"], "image/png")
         self.assertEqual(persistence.calls[0][1]["page_count"], 1)
+
+    def test_clean_xlsx_is_converted_to_encrypted_pdf_then_registered(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "案卷"
+            root.mkdir()
+            source = root / "微信转账记录" / "付款台账.xlsx"
+            source.parent.mkdir()
+            workbook = Workbook()
+            workbook.active["A1"] = "付款"
+            workbook.save(source)
+            store = LocalEncryptedArtifactStore(
+                Path(temporary) / "managed-artifacts",
+                key_id="test-key-v1",
+                encryption_key=b"x" * 32,
+            )
+            result, persistence = self.coordinate(
+                root,
+                source,
+                "SPREADSHEET",
+                artifact_store=store,
+                office_converter=FakeOfficeConverter(),
+            )
+        self.assertEqual(result.outcome, "REGISTERABLE")
+        self.assertEqual([name for name, _ in persistence.calls], ["register_normalized", "complete"])
+        self.assertEqual(
+            persistence.calls[0][1]["source_media_type"],
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        self.assertEqual(persistence.calls[0][1]["normalizer_id"], "fake-office-converter")
+        self.assertEqual(persistence.calls[0][1]["render_verification_hash"], "e" * 64)
 
 
 if __name__ == "__main__":

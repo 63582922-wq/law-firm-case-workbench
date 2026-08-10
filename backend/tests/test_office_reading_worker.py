@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 import zipfile
 
+from openpyxl import Workbook
+
 from case_kernel.local_access_grants import AuthorizedOriginalFile
 from case_kernel.office_reading_worker import OfficeReadingBlocked, read_authorized_office_document
 
@@ -62,6 +64,17 @@ class OfficeReadingWorkerTests(unittest.TestCase):
                 archive.writestr("word/vbaProject.bin", b"macro")
             with self.assertRaisesRegex(OfficeReadingBlocked, "structural inspection"):
                 read_authorized_office_document(self._source(path), detected_kind="WORD_DOCUMENT")
+
+    def test_standard_xlsx_with_package_root_relationship_is_readable(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "标准台账.xlsx"
+            workbook = Workbook()
+            workbook.active.title = "付款"
+            workbook.active["A1"] = "已付利息"
+            workbook.save(path)
+            result = read_authorized_office_document(self._source(path), detected_kind="SPREADSHEET")
+        self.assertEqual(result.spreadsheet_cells[0].sheet_name, "付款")
+        self.assertEqual(result.spreadsheet_cells[0].value, "已付利息")
 
 
 if __name__ == "__main__":

@@ -290,6 +290,7 @@ class PostgresEvidenceManifestStore:
         normalized_pdf_sha256: str,
         normalized_pdf_bytes: int,
         normalized_pdf_object_key: str,
+        render_verification_hash: str | None = None,
     ) -> CaseLedgerCommandReceipt:
         """Atomically register a non-PDF original and its encrypted PDF view."""
         _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
@@ -309,6 +310,8 @@ class PostgresEvidenceManifestStore:
             ("normalized_pdf_sha256", normalized_pdf_sha256),
         ):
             _validate_sha256(label, value)
+        if render_verification_hash is not None:
+            _validate_sha256("render_verification_hash", render_verification_hash)
         _validate_normalized_object_key(normalized_pdf_object_key, normalized_pdf_sha256)
         if source_media_type.strip() == "application/pdf":
             raise CaseLedgerPersistenceBlocked("normalized registration is only for a non-PDF original")
@@ -333,6 +336,7 @@ class PostgresEvidenceManifestStore:
             "normalizer_id": normalizer_id.strip(),
             "normalizer_version": normalizer_version.strip(),
             "transform_hash": transform_hash,
+            "render_verification_hash": render_verification_hash,
             "normalized_pdf_sha256": normalized_pdf_sha256,
             "normalized_pdf_bytes": normalized_pdf_bytes,
             "normalized_pdf_object_key": normalized_pdf_object_key,
@@ -397,9 +401,9 @@ class PostgresEvidenceManifestStore:
                 INSERT INTO evidence_normalized_representations (
                     representation_id, firm_id, matter_id, evidence_file_id,
                     source_media_type, normalized_media_type, normalizer_id,
-                    normalizer_version, transform_hash, artifact_sha256,
+                    normalizer_version, transform_hash, render_verification_hash, artifact_sha256,
                     storage_object_key, pdf_bytes, page_count
-                ) VALUES (%s, %s, %s, %s, %s, 'application/pdf', %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, 'application/pdf', %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     representation_id,
@@ -410,6 +414,7 @@ class PostgresEvidenceManifestStore:
                     normalizer_id.strip(),
                     normalizer_version.strip(),
                     transform_hash,
+                    render_verification_hash,
                     normalized_pdf_sha256,
                     normalized_pdf_object_key,
                     normalized_pdf_bytes,
@@ -439,6 +444,7 @@ class PostgresEvidenceManifestStore:
                     "original_file_sha256": original_file_sha256,
                     "normalized_pdf_sha256": normalized_pdf_sha256,
                     "transform_hash": transform_hash,
+                    "render_verification_hash": render_verification_hash,
                     "page_count": page_count,
                 },
                 stale_submission=True,
