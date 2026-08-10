@@ -200,6 +200,35 @@ class PostgresOfficialSourceCaptureStore:
                 stale_calculations=False,
             )
 
+    def find_next_claimable_capture(self, *, actor: Actor) -> tuple[str, str, int] | None:
+        """Return one same-firm, still-authorized queued run for a system worker.
+
+        This deliberately does not claim the task.  The caller must pass the
+        returned version to ``claim_capture``, which rechecks membership, locks
+        the matter and atomically changes the run to RUNNING.
+        """
+        _require_roles(actor, self._WORKER_ROLES)
+        with self._read_transaction(actor.firm_id) as connection:
+            row = connection.execute(
+                """
+                SELECT r.run_id, r.matter_id, m.version
+                FROM official_source_capture_runs r
+                JOIN matters m ON m.matter_id = r.matter_id AND m.firm_id = r.firm_id
+                JOIN users u ON u.user_id = %s AND u.firm_id = r.firm_id AND u.status = 'ACTIVE'
+                JOIN matter_actor_roles mar ON mar.matter_id = r.matter_id
+                    AND mar.firm_id = r.firm_id AND mar.user_id = %s
+                    AND mar.role = 'SYSTEM_WORKER' AND mar.revoked_at IS NULL
+                WHERE r.firm_id = %s AND r.status = 'QUEUED' AND r.attempt_count = 0
+                    AND r.authorization_expires_at > now()
+                ORDER BY r.authorized_at ASC, r.run_id ASC
+                LIMIT 1
+                """,
+                (actor.actor_id, actor.actor_id, actor.firm_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["matter_id"]), str(row["run_id"]), int(row["version"])
+
     def claim_capture(
         self,
         *,

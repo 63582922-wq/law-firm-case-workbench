@@ -14,6 +14,7 @@ from case_kernel.official_source_capture_postgres import OfficialSourceCaptureRu
 from case_kernel.official_source_capture_worker import (
     OfficialSourceCaptureWorkerBlocked,
     run_authorized_official_source_capture,
+    run_next_authorized_official_source_capture,
 )
 
 
@@ -21,6 +22,11 @@ class CaptureStore:
     def __init__(self, lease: OfficialSourceCaptureRunLease) -> None:
         self.lease = lease
         self.claim_kwargs = None
+        self.next_candidate = None
+
+    def find_next_claimable_capture(self, *, actor):
+        self.next_actor = actor
+        return self.next_candidate
 
     def claim_capture(self, **kwargs):
         self.claim_kwargs = kwargs
@@ -109,6 +115,18 @@ class OfficialSourceCaptureWorkerTests(unittest.TestCase):
                     store=store,
                 )
         self.assertIsNone(store.claim_kwargs)
+
+    def test_next_run_executes_at_most_one_claimable_candidate(self) -> None:
+        store = CaptureStore(self.lease)
+        store.next_candidate = (self.matter_id, self.run_id, 3)
+        with TemporaryDirectory(prefix="official-capture-worker-") as temporary:
+            root = Path(temporary) / "case"; root.mkdir()
+            artifact_store = LocalEncryptedArtifactStore(Path(temporary) / "managed", key_id="test", encryption_key=b"k" * 32)
+            with patch("case_kernel.official_source_capture_worker.run_authorized_official_source_capture", return_value="done") as run:
+                self.assertEqual(run_next_authorized_official_source_capture(worker=self.worker, case_root=root, artifact_store=artifact_store, store=store), "done")
+                run.assert_called_once()
+            store.next_candidate = None
+            self.assertIsNone(run_next_authorized_official_source_capture(worker=self.worker, case_root=root, artifact_store=artifact_store, store=store))
 
 
 if __name__ == "__main__":

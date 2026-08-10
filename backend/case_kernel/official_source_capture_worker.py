@@ -28,6 +28,8 @@ class OfficialSourceCaptureWorkerBlocked(PermissionError):
 
 
 class OfficialSourceCaptureWorkerStore(Protocol):
+    def find_next_claimable_capture(self, *, actor: Actor) -> tuple[str, str, int] | None: ...
+
     def claim_capture(self, **kwargs) -> OfficialSourceCaptureRunLease: ...
 
     def complete_capture(self, **kwargs): ...
@@ -89,6 +91,22 @@ def run_authorized_official_source_capture(
         persistence=store,
         system_actor=worker,
         transport=transport,
+    )
+
+
+def run_next_authorized_official_source_capture(
+    *, worker: Actor, case_root: str | Path, artifact_store: LocalEncryptedArtifactStore,
+    store: OfficialSourceCaptureWorkerStore, transport: OfficialSourceTransport | None = None,
+) -> OfficialSourceCaptureCoordinationResult | None:
+    """Run at most one eligible, same-firm queued capture; never bulk-drain a queue."""
+    candidate = store.find_next_claimable_capture(actor=worker)
+    if candidate is None:
+        return None
+    matter_id, run_id, version = candidate
+    return run_authorized_official_source_capture(
+        matter_id=matter_id, run_id=run_id, expected_version=version, worker=worker,
+        claim_idempotency_key=f"official-worker:{run_id}:claim", case_root=case_root,
+        artifact_store=artifact_store, store=store, transport=transport,
     )
 
 
