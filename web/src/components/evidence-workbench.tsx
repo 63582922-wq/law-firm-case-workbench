@@ -136,6 +136,39 @@ export function EvidenceWorkbench() {
     () => review?.pages.find((page) => page.pageId === selectedPageId) ?? review?.pages[0] ?? null,
     [review, selectedPageId],
   );
+  const activeFolderScan = folderIntake?.candidateScan ?? folderIntake?.approvedScan ?? null;
+  const activeIntakeRun = folderIntake?.intakeRun ?? null;
+
+  useEffect(() => {
+    if (
+      review?.sourceKind !== "persistent-preview"
+      || !activeIntakeRun
+      || !["QUEUED", "RUNNING"].includes(activeIntakeRun.status)
+    ) {
+      return;
+    }
+    let active = true;
+    const refresh = async () => {
+      try {
+        const [nextIntake, nextReview] = await Promise.all([
+          loadLocalFolderIntake(),
+          loadEvidenceReview(),
+        ]);
+        if (!active) return;
+        setFolderIntake(nextIntake);
+        setReview(nextReview);
+      } catch {
+        // An in-flight local worker may be restarting or the desktop session
+        // may be expiring.  Keep the last durable queue snapshot visible and
+        // let an explicit subsequent user action surface a recoverable error.
+      }
+    };
+    const timer = window.setInterval(() => void refresh(), 3000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [activeIntakeRun, review?.sourceKind]);
 
   if (error) {
     return (
@@ -156,11 +189,99 @@ export function EvidenceWorkbench() {
   if (!selected) {
     return (
       <section className={styles.evidenceArea} aria-label="证据核验台">
+        <header className={styles.evidenceHeading}>
+          <div>
+            <p className={styles.eyebrow}>证据工作台</p>
+            <h2>从本案文件夹开始接收材料</h2>
+          </div>
+          <div className={styles.evidenceSnapshotState}>
+            <strong>{review.sourceLabel}</strong>
+            <span>尚未登记来源页</span>
+            <small>系统不会以演示案卷替代真实材料</small>
+          </div>
+        </header>
         <div className={styles.evidenceBlocked} role="status">
           <p className={styles.eyebrow}>证据工作台</p>
           <h2>本案尚无来源页</h2>
-          <p>请选择并导入本案原始证据文件后，再进行逐页核验；系统不会显示演示案卷代替真实材料。</p>
+          <p>先选择本案文件夹并建立只读盘点范围。系统不会上传、删除、改名或覆盖原件。</p>
         </div>
+        {review.sourceKind === "persistent-preview" && (
+          <>
+            <div className={styles.folderAccessBar}>
+              <div>
+                <strong>{folderGrant ? `已授权：${folderGrant.displayName}` : folderSelection ? `待确认：${folderSelection.displayName}` : "尚未选择本案案卷文件夹"}</strong>
+                <span>{folderGrant ? `短时只读授权至 ${new Date(folderGrant.expiresAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}` : "绝对路径不会写入案卷数据库。"}</span>
+              </div>
+              <div>
+                <button disabled={folderBusy !== null} onClick={() => void selectCaseFolder()} type="button">
+                  {folderBusy === "select" ? "正在选择…" : folderGrant ? "重新选择文件夹" : "选择案卷文件夹"}
+                </button>
+                {folderSelection && !folderGrant && (
+                  <button disabled={folderBusy !== null} onClick={() => void confirmCaseFolder()} type="button">
+                    {folderBusy === "grant" ? "正在授权…" : "确认短时只读授权"}
+                  </button>
+                )}
+                {folderGrant && folderIntake && (
+                  <button disabled={folderBusy !== null || intakeBusy !== null} onClick={() => void scanCaseFolder()} type="button">
+                    {intakeBusy === "scan" ? "正在只读盘点…" : activeFolderScan ? "重新盘点文件夹" : "盘点全部文件"}
+                  </button>
+                )}
+              </div>
+              {folderNotice && <p role="status">{folderNotice}</p>}
+            </div>
+            {folderIntake && activeFolderScan && (
+              <section className={styles.intakePanel} aria-label="首次案卷文件盘点">
+                <div className={styles.intakeHeading}>
+                  <div>
+                    <p className={styles.eyebrow}>案卷收件</p>
+                    <h3>{activeFolderScan.status === "CANDIDATE" ? "待律师确认的文件范围" : "当前已批准文件范围"}</h3>
+                  </div>
+                  <div>
+                    <strong>{activeFolderScan.totalFiles} 个文件 · {formatBytes(activeFolderScan.totalBytes)}</strong>
+                    <small>盘点哈希 {activeFolderScan.manifestHash.slice(0, 16)}…</small>
+                  </div>
+                </div>
+                {folderIntake.candidateScan && (
+                  <div className={styles.intakeApproval}>
+                    <label className={styles.confirmLine}>
+                      <input checked={intakeConfirmed} onChange={(event) => setIntakeConfirmed(event.target.checked)} type="checkbox" />
+                      我已核对本次文件范围，确认以此作为后续案卷整理范围
+                    </label>
+                    <button disabled={!intakeConfirmed || intakeBusy !== null} onClick={() => void approveCaseFolderScan()} type="button">
+                      {intakeBusy === "approve" ? "正在记录批准…" : "主办律师批准案卷范围"}
+                    </button>
+                  </div>
+                )}
+                {!folderIntake.candidateScan && folderIntake.approvedScan && !folderIntake.intakeRun && (
+                  <div className={styles.intakeApproval}>
+                    <label className={styles.confirmLine}>
+                      <input checked={intakeRunConfirmed} onChange={(event) => setIntakeRunConfirmed(event.target.checked)} type="checkbox" />
+                      我确认从当前已批准范围建立材料接收任务；系统只读原件并逐文件进行安全检查
+                    </label>
+                    <button disabled={!folderGrant || !intakeRunConfirmed || intakeBusy !== null} onClick={() => void enqueueFolderIntake()} type="button">
+                      {intakeBusy === "enqueue" ? "正在建立任务…" : "开始材料接收"}
+                    </button>
+                  </div>
+                )}
+                {folderIntake.intakeRun && (
+                  <div className={styles.intakeRunPanel}>
+                    <div>
+                      <strong>{intakeRunStatusLabel(folderIntake.intakeRun.status)}</strong>
+                      <small>每 3 秒刷新一次持久化处理状态；关闭本页不会中断已经写入队列的安全检查。</small>
+                    </div>
+                    <div className={styles.intakeRunCounts}>
+                      <span><strong>{folderIntake.intakeRun.registeredItems}</strong>已登记</span>
+                      <span><strong>{folderIntake.intakeRun.queuedItems + folderIntake.intakeRun.runningItems}</strong>等待/处理中</span>
+                      <span><strong>{folderIntake.intakeRun.reviewRequiredItems}</strong>待转换</span>
+                      <span><strong>{folderIntake.intakeRun.blockedItems + folderIntake.intakeRun.failedItems}</strong>已阻断/失败</span>
+                    </div>
+                  </div>
+                )}
+                {intakeNotice && <p className={styles.auditNotice} role="status">{intakeNotice}</p>}
+              </section>
+            )}
+          </>
+        )}
       </section>
     );
   }
@@ -177,7 +298,6 @@ export function EvidenceWorkbench() {
   const duplicatePagesLoaded = duplicateGroup
     ? duplicateGroup.pageIds.every((pageId) => review.pages.some((page) => page.pageId === pageId))
     : true;
-  const activeFolderScan = folderIntake?.candidateScan ?? folderIntake?.approvedScan ?? null;
 
   function recordSyntheticDecision() {
     if (duplicateDecision === "pending") {
@@ -369,7 +489,7 @@ export function EvidenceWorkbench() {
       setReview(refreshedReview);
       setFolderIntake(refreshedIntake);
       setIntakeRunConfirmed(false);
-      setIntakeNotice(`材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。只有本机安全扫描器与材料 Worker 已配置时才会逐文件处理，未配置时保持等待。`);
+      setIntakeNotice(`材料接收任务已建立；案件版本更新为 ${receipt.matterVersion}。处理状态会自动刷新；若本机接收服务尚未安装，任务会明确保持等待。`);
     } catch (reason: unknown) {
       setIntakeNotice(reason instanceof Error ? reason.message : "材料接收任务未建立");
     } finally {
