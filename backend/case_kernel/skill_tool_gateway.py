@@ -13,11 +13,12 @@ from hashlib import sha256
 import json
 from typing import Any
 
-from .approved_draft_worker import ApprovedDraft, create_docx_draft, create_pdf_draft, create_xlsx_ledger
+from .approved_draft_worker import ApprovedDraft, create_pdf_draft
 from .evidence_normalization_worker import normalize_authorized_material
 from .local_access_grants import AuthorizedOriginalFile
 from .office_reading_worker import read_authorized_office_document
 from .office_pdf_conversion_worker import SandboxedOfficePdfConverter
+from .reviewable_draft_worker import create_reviewable_docx_draft, create_reviewable_xlsx_ledger
 from .skill_registry import CapabilityScope, CaseSkillRegistry, SkillRegistryBlocked
 
 
@@ -68,16 +69,19 @@ class CaseSkillToolGateway:
             if self._office_pdf_converter is None:
                 raise SkillToolGatewayBlocked("the isolated Office PDF converter is not configured for this desktop")
             result = self._office_pdf_converter.convert(source, detected_kind=_text(payload, "detected_kind"))
-        elif tool_id == "create_docx_draft":
-            result = create_docx_draft(_approved_draft(payload))
+        elif tool_id == "create_reviewable_docx_draft":
+            result = create_reviewable_docx_draft(
+                _approved_draft(payload), converter=_required_office_converter(self._office_pdf_converter)
+            )
         elif tool_id == "create_pdf_derivative":
             result = create_pdf_draft(_approved_draft(payload))
-        elif tool_id == "create_xlsx_ledger":
-            result = create_xlsx_ledger(
+        elif tool_id == "create_reviewable_xlsx_ledger":
+            result = create_reviewable_xlsx_ledger(
                 approval_hash=_text(payload, "approval_hash"),
                 sheet_name=_text(payload, "sheet_name"),
                 columns=_text_tuple(payload, "columns"),
                 rows=_ledger_rows(payload),
+                converter=_required_office_converter(self._office_pdf_converter),
             )
         else:
             raise SkillToolGatewayBlocked("registered tool has no local execution adapter")
@@ -96,6 +100,14 @@ def _approved_draft(payload: dict[str, Any]) -> ApprovedDraft:
     if not isinstance(draft, ApprovedDraft):
         raise SkillToolGatewayBlocked("tool requires an approved structured draft snapshot")
     return draft
+
+
+def _required_office_converter(
+    converter: SandboxedOfficePdfConverter | None,
+) -> SandboxedOfficePdfConverter:
+    if converter is None:
+        raise SkillToolGatewayBlocked("the isolated Office PDF converter is not configured for this desktop")
+    return converter
 
 
 def _text(payload: dict[str, Any], key: str) -> str:
@@ -136,5 +148,11 @@ def _result_hash(result: Any) -> str:
     if is_dataclass(result):
         payload = asdict(result)
         payload.pop("pdf_content", None)
+        editable = payload.get("editable_artifact")
+        if isinstance(editable, dict):
+            editable.pop("content", None)
+        review_pdf = payload.get("review_pdf")
+        if isinstance(review_pdf, dict):
+            review_pdf.pop("pdf_content", None)
         return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")).hexdigest()
     raise SkillToolGatewayBlocked("tool result does not have a stable audit hash")
