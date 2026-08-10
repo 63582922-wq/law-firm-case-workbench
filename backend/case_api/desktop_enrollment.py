@@ -336,6 +336,32 @@ class MacOSKeychainDesktopEnrollmentProvider:
         )
         if envelope_text is None:
             return None
+        installation_secret = self.load_installation_secret()
+        self._verifier.verify(
+            envelope_text=envelope_text,
+            installation_secret=installation_secret,
+        )
+        return DesktopEnrollmentMaterial(
+            envelope_text=envelope_text,
+            installation_secret=installation_secret,
+        )
+
+    def load_registration_installation_secret(self) -> bytes:
+        """Read the device binding only when no enrollment can be overwritten."""
+
+        envelope_text = self._read_item(
+            account=self._enrollment_account,
+            maximum_bytes=MAX_ENROLLMENT_BYTES,
+            unavailable_message="desktop enrollment is unavailable in macOS Keychain",
+            missing_is_none=True,
+        )
+        if envelope_text is not None:
+            raise DesktopEnrollmentBlocked("desktop enrollment already exists in macOS Keychain")
+        return self.load_installation_secret()
+
+    def load_installation_secret(self) -> bytes:
+        """Read and validate the fixed installation binding without exposing it to WebView."""
+
         encoded_secret = self._read_item(
             account=self._installation_secret_account,
             maximum_bytes=128,
@@ -351,14 +377,9 @@ class MacOSKeychainDesktopEnrollmentProvider:
             installation_secret = b64decode(encoded_secret, validate=True)
         except (ValueError, UnicodeEncodeError) as error:
             raise DesktopEnrollmentBlocked("desktop installation binding has invalid encoding") from error
-        self._verifier.verify(
-            envelope_text=envelope_text,
-            installation_secret=installation_secret,
-        )
-        return DesktopEnrollmentMaterial(
-            envelope_text=envelope_text,
-            installation_secret=installation_secret,
-        )
+        if len(installation_secret) != INSTALLATION_SECRET_BYTES:
+            raise DesktopEnrollmentBlocked("desktop installation binding has invalid length")
+        return installation_secret
 
     def _read_item(
         self,

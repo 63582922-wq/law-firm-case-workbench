@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  activateDesktopEnrollment,
   disableLocalEnrollment,
   importSignedEnrollmentPackage,
   initializeDesktopInstallation,
@@ -18,7 +19,7 @@ export function IdentitySecurityWorkbench({
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
   const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
-  const [vaultBusy, setVaultBusy] = useState<"initialize" | "import" | "renew" | "revoke" | "disable" | null>(null);
+  const [vaultBusy, setVaultBusy] = useState<"initialize" | "activate" | "import" | "renew" | "revoke" | "disable" | null>(null);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
   const [revokeArmed, setRevokeArmed] = useState(false);
@@ -95,6 +96,20 @@ export function IdentitySecurityWorkbench({
       setVaultMessage(status.message);
     } catch (error) {
       setVaultMessage(readableError(error, "律所登记包未能通过验签；未写入 Keychain。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
+  async function activateEnrollment() {
+    setVaultBusy("activate");
+    setVaultMessage(null);
+    try {
+      const status = await activateDesktopEnrollment();
+      setVaultStatus(status);
+      setVaultMessage(status.message);
+    } catch (error) {
+      setVaultMessage(readableError(error, "律所登记未能激活；激活码和签名凭证均未写入页面状态。"));
     } finally {
       setVaultBusy(null);
     }
@@ -226,8 +241,8 @@ export function IdentitySecurityWorkbench({
       <section className={styles.securityActions} aria-labelledby="security-actions-title">
         <div>
           <p className={styles.eyebrow}>本机操作</p>
-          <h3 id="security-actions-title">先准备安全存储，再等待律所签发</h3>
-          <p>初始化只在本机 Keychain 生成并保存安装秘密，不会创建律师身份、选择角色、连接数据库或上传案卷。</p>
+          <h3 id="security-actions-title">先准备安全存储，再由律所安全签发</h3>
+          <p>初始化只在本机 Keychain 生成安装秘密；一次性激活码只进入 macOS 原生密码框，并由受信律所服务决定身份和角色。</p>
         </div>
         <div className={styles.securityActionButtons}>
           <button
@@ -237,6 +252,16 @@ export function IdentitySecurityWorkbench({
           >
             {vaultBusy === "initialize" ? "正在写入并复核…" : vaultStatus?.installationInitialized ? "本机安全存储已就绪" : "初始化本机安全存储"}
           </button>
+          {vaultStatus?.installationInitialized && !vaultStatus.enrollmentEnvelopePresent ? (
+            <button
+              disabled={!trustReady || vaultBusy !== null}
+              onClick={() => void activateEnrollment()}
+              type="button"
+              title={trustReady ? "激活码只进入 macOS 原生安全输入框" : "需要生产信任目录和律所签发服务"}
+            >
+              {vaultBusy === "activate" ? "正在等待原生安全输入…" : "使用一次性激活码登记"}
+            </button>
+          ) : null}
           <button
             disabled={!trustReady || !vaultStatus?.installationInitialized || vaultBusy !== null}
             onClick={() => void importEnrollment()}
@@ -283,7 +308,7 @@ export function IdentitySecurityWorkbench({
 
       <div className={styles.securityNotice} role="status">
         <strong>不需要你提供模型 API Key</strong>
-        <span>当前缺的是律所运营方的生产信任根和签发服务，不是普通用户的 OpenAI API Key。原生导入链已经实现：只有生产信任目录就绪后，才能从系统文件选择器读取 .lawenroll，受信验签成功后按当前凭证哈希原子写入 Keychain。</span>
+        <span>当前缺的是律所运营方的生产信任根和签发服务，不是普通用户的 OpenAI API Key。在线激活码只进入 macOS 原生密码框；离线登记包只由系统文件选择器读取。两条路径都必须先受信验签，再按当前 Keychain 状态原子写入。</span>
       </div>
     </section>
   );

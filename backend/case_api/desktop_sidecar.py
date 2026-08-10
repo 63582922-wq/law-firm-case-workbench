@@ -59,6 +59,8 @@ _PARENT_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _BINDING_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _VERIFY_REQUEST_FIELDS = frozenset({"envelope_text", "installation_binding_sha256"})
 _MAX_VERIFY_REQUEST_BYTES = 20_000
+_ACTIVATION_REQUEST_FIELDS = frozenset({"activation_secret"})
+_MAX_ACTIVATION_REQUEST_BYTES = 1_024
 _REMOTE_REVOCATION_FIELDS = frozenset({"confirmation"})
 _REMOTE_REVOCATION_CONFIRMATION = "CONFIRM_REMOTE_REVOCATION"
 
@@ -204,6 +206,44 @@ def create_desktop_sidecar_app(
         and enrollment_issuer is not None
     ):
 
+        @app.post("/v1/desktop-enrollment/activate")
+        async def activate_desktop_enrollment(request: Request) -> dict[str, str]:
+            _require_parent_authorization(request, parent_api_token)
+            body = await request.body()
+            if not body or len(body) > _MAX_ACTIVATION_REQUEST_BYTES:
+                raise HTTPException(status_code=422, detail="activation unavailable")
+            try:
+                payload = _strict_request_json(body)
+                if frozenset(payload) != _ACTIVATION_REQUEST_FIELDS:
+                    raise ValueError("invalid fields")
+                activation_secret = payload.get("activation_secret")
+                if not isinstance(activation_secret, str):
+                    raise ValueError("invalid secret")
+                lifecycle, vault = _staged_registration_lifecycle(
+                    trust=trust,
+                    issuer=enrollment_issuer,
+                    keychain_runner=keychain_runner,
+                )
+                result = lifecycle.register(activation_secret=activation_secret)
+            except (
+                DesktopEnrollmentBlocked,
+                DesktopEnrollmentLifecycleBlocked,
+                UnicodeDecodeError,
+                ValueError,
+            ):
+                raise HTTPException(status_code=422, detail="activation unavailable") from None
+            envelope_text = vault.current_envelope()
+            return {
+                "status": "REGISTERED",
+                "enrollment_id": result.enrollment_id or "",
+                "envelope_text": envelope_text,
+                "envelope_sha256": sha256(envelope_text.encode("utf-8")).hexdigest(),
+                "installation_binding_sha256": vault.installation_binding_sha256,
+                "expires_at": result.expires_at.isoformat().replace("+00:00", "Z")
+                if result.expires_at is not None
+                else "",
+            }
+
         @app.post("/v1/desktop-enrollment/renew")
         async def renew_desktop_enrollment(request: Request) -> dict[str, str]:
             _require_parent_authorization(request, parent_api_token)
@@ -268,10 +308,14 @@ def _require_parent_authorization(request: Request, parent_api_token: str) -> No
 
 
 class _StagedEnrollmentVault:
-    def __init__(self, *, envelope_text: str, installation_secret: bytes) -> None:
+    def __init__(self, *, envelope_text: str | None, installation_secret: bytes) -> None:
         self._envelope = envelope_text
         self._installation_secret = installation_secret
-        self.initial_envelope_sha256 = sha256(envelope_text.encode("utf-8")).hexdigest()
+        self.initial_envelope_sha256 = (
+            sha256(envelope_text.encode("utf-8")).hexdigest()
+            if envelope_text is not None
+            else None
+        )
         self.installation_binding_sha256 = sha256(installation_secret).hexdigest()
 
     def installation_secret(self) -> bytes:
@@ -283,7 +327,11 @@ class _StagedEnrollmentVault:
         return self._envelope
 
     def replace_enrollment(self, *, expected_sha256: str | None, envelope_text: str) -> None:
-        current = sha256(self.current_envelope().encode("utf-8")).hexdigest()
+        current = (
+            sha256(self._envelope.encode("utf-8")).hexdigest()
+            if self._envelope is not None
+            else None
+        )
         if current != expected_sha256:
             raise RuntimeError("staged enrollment changed")
         self._envelope = envelope_text
@@ -317,6 +365,34 @@ def _staged_lifecycle(
     vault = _StagedEnrollmentVault(
         envelope_text=material.envelope_text,
         installation_secret=material.installation_secret,
+    )
+    return DesktopEnrollmentLifecycle(
+        issuer=issuer,
+        vault=vault,
+        verifier=verifier,
+    ), vault
+
+
+def _staged_registration_lifecycle(
+    *,
+    trust: DesktopEnrollmentTrustRuntime,
+    issuer: AuthenticatedFirmEnrollmentIssuer,
+    keychain_runner=None,
+) -> tuple[DesktopEnrollmentLifecycle, _StagedEnrollmentVault]:
+    if trust.catalog is None:
+        raise DesktopEnrollmentLifecycleBlocked("trust catalog is unavailable")
+    verifier = SignedDesktopEnrollmentVerifier(trusted_catalog=trust.catalog)
+    provider = MacOSKeychainDesktopEnrollmentProvider(
+        service=MACOS_KEYCHAIN_SERVICE,
+        enrollment_account=MACOS_KEYCHAIN_ENROLLMENT_ACCOUNT,
+        installation_secret_account=MACOS_KEYCHAIN_INSTALLATION_ACCOUNT,
+        verifier=verifier,
+        runner=keychain_runner,
+    )
+    installation_secret = provider.load_registration_installation_secret()
+    vault = _StagedEnrollmentVault(
+        envelope_text=None,
+        installation_secret=installation_secret,
     )
     return DesktopEnrollmentLifecycle(
         issuer=issuer,

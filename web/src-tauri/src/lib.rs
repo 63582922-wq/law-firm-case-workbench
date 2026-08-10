@@ -104,6 +104,17 @@ struct EnrollmentVerificationResponse {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct EnrollmentActivationResponse {
+    status: String,
+    enrollment_id: String,
+    envelope_text: String,
+    envelope_sha256: String,
+    installation_binding_sha256: String,
+    expires_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EnrollmentRenewalResponse {
     status: String,
     enrollment_id: String,
@@ -489,6 +500,63 @@ fn import_signed_enrollment_package(
 }
 
 #[tauri::command]
+async fn activate_desktop_enrollment(
+    app: AppHandle,
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, EnrollmentVault>,
+) -> Result<EnrollmentVaultStatus, String> {
+    let (port, token) = enrollment_verification_channel(&runtime)?;
+    let context = vault.verification_context()?;
+    if context.expected_current_sha256.is_some() {
+        return Err("本机已有律所登记；不能用激活码覆盖，请使用续期或先由管理员撤销。".to_string());
+    }
+    let receiver = native_activation_prompt::schedule_activation_prompt(&app)?;
+    let prompt_result = tauri::async_runtime::spawn_blocking(move || {
+        receiver.recv_timeout(Duration::from_secs(300))
+    })
+    .await
+    .map_err(|_| "原生激活码输入任务异常结束；未联系律所服务。".to_string())?
+    .map_err(|_| "原生激活码输入已超时；未联系律所服务。".to_string())?;
+    let activation_secret =
+        prompt_result?.ok_or_else(|| "已取消激活；未联系律所服务或写入 Keychain。".to_string())?;
+    let body = Zeroizing::new(
+        serde_json::to_vec(&serde_json::json!({"activation_secret": activation_secret.as_str()}))
+            .map_err(|_| "无法构造本机激活请求；未联系律所服务。".to_string())?,
+    );
+    drop(activation_secret);
+    let response = tauri::async_runtime::spawn_blocking(move || {
+        parent_lifecycle_request(
+            port,
+            token.as_str(),
+            "/v1/desktop-enrollment/activate",
+            body.as_slice(),
+        )
+    })
+    .await
+    .map_err(|_| "律所登记激活任务异常结束；未写入 Keychain。".to_string())??;
+    let activated: EnrollmentActivationResponse = serde_json::from_slice(&response)
+        .map_err(|_| "律所登记激活回执内容无效；未写入 Keychain。".to_string())?;
+    if activated.status != "REGISTERED"
+        || Uuid::parse_str(&activated.enrollment_id).is_err()
+        || activated.installation_binding_sha256 != context.installation_binding_sha256
+        || activated.envelope_text.is_empty()
+        || activated.envelope_text.len() as u64 > MAX_ENROLLMENT_PACKAGE_BYTES
+        || !valid_enrollment_expiry(&activated.expires_at)
+    {
+        return Err("律所登记激活回执与当前本机状态不一致；未写入 Keychain。".to_string());
+    }
+    let mut status = vault.commit_enrollment_after_verification(
+        &activated.envelope_text,
+        &activated.envelope_sha256,
+        &activated.installation_binding_sha256,
+        None,
+    )?;
+    status.phase = "CREDENTIAL_SAVED_VERIFIED".to_string();
+    status.message = "律所签名登记已安全激活并保存；请重启桌面应用重新验签。".to_string();
+    Ok(status)
+}
+
+#[tauri::command]
 async fn renew_desktop_enrollment(
     runtime: State<'_, LocalApiRuntime>,
     vault: State<'_, EnrollmentVault>,
@@ -512,8 +580,7 @@ async fn renew_desktop_enrollment(
         || renewed.installation_binding_sha256 != context.installation_binding_sha256
         || renewed.envelope_text.is_empty()
         || renewed.envelope_text.len() as u64 > MAX_ENROLLMENT_PACKAGE_BYTES
-        || renewed.expires_at.len() < 20
-        || !renewed.expires_at.ends_with('Z')
+        || !valid_enrollment_expiry(&renewed.expires_at)
     {
         return Err("律所登记续期回执与当前本机状态不一致；未写入 Keychain。".to_string());
     }
@@ -592,7 +659,9 @@ fn parent_lifecycle_request(
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
         || !matches!(
             path,
-            "/v1/desktop-enrollment/renew" | "/v1/desktop-enrollment/revoke"
+            "/v1/desktop-enrollment/activate"
+                | "/v1/desktop-enrollment/renew"
+                | "/v1/desktop-enrollment/revoke"
         )
         || body.len() > 1024
     {
@@ -632,6 +701,18 @@ fn parent_lifecycle_request(
     Ok(body.to_vec())
 }
 
+fn valid_enrollment_expiry(value: &str) -> bool {
+    if !value.ends_with('Z') {
+        return false;
+    }
+    let Ok(parsed) = DateTime::parse_from_rfc3339(value) else {
+        return false;
+    };
+    let parsed = parsed.with_timezone(&Utc);
+    let now = Utc::now();
+    parsed > now && parsed <= now + ChronoDuration::days(31)
+}
+
 fn enrollment_verification_channel(
     runtime: &LocalApiRuntime,
 ) -> Result<(u16, Zeroizing<String>), String> {
@@ -640,7 +721,7 @@ fn enrollment_verification_channel(
         .lock()
         .map_err(|_| "本机受控服务状态锁定失败；未开始登记。".to_string())?;
     if state.phase != "READY" || state.enrollment_trust_phase != "READY" {
-        return Err("生产信任目录尚未通过核验；不能导入律所登记包。".to_string());
+        return Err("生产信任目录尚未通过核验；不能进行律所登记操作。".to_string());
     }
     let port = state
         .api_port
@@ -866,6 +947,7 @@ pub fn run() {
             desktop_enrollment_vault_status,
             initialize_desktop_installation,
             import_signed_enrollment_package,
+            activate_desktop_enrollment,
             renew_desktop_enrollment,
             revoke_desktop_enrollment,
             disable_local_enrollment,
@@ -883,11 +965,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnrollmentRenewalResponse, EnrollmentRevocationResponse, LOCAL_API_PROTOCOL,
-        LocalApiRuntime, enrollment_verification_channel, exchange_desktop_session_with_sidecar,
-        parent_lifecycle_request, parse_enrollment_verification_response,
-        snapshot_desktop_session_grant, validate_matter_id, validate_selected_root,
-        verify_ready_payload,
+        EnrollmentActivationResponse, EnrollmentRenewalResponse, EnrollmentRevocationResponse,
+        LOCAL_API_PROTOCOL, LocalApiRuntime, enrollment_verification_channel,
+        exchange_desktop_session_with_sidecar, parent_lifecycle_request,
+        parse_enrollment_verification_response, snapshot_desktop_session_grant, validate_matter_id,
+        validate_selected_root, verify_ready_payload,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use sha2::{Digest, Sha256};
@@ -1037,9 +1119,32 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4096];
-            let size = stream.read(&mut request).unwrap();
-            let request = std::str::from_utf8(&request[..size]).unwrap();
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 512];
+            loop {
+                let size = stream.read(&mut chunk).unwrap();
+                assert!(size > 0);
+                request_bytes.extend_from_slice(&chunk[..size]);
+                let Some(header_end) = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                else {
+                    continue;
+                };
+                let head = std::str::from_utf8(&request_bytes[..header_end]).unwrap();
+                let content_length = head
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if request_bytes.len() >= header_end + content_length {
+                    break;
+                }
+            }
+            let request = std::str::from_utf8(&request_bytes).unwrap();
             assert!(request.starts_with("POST /v1/desktop-sessions/exchange HTTP/1.1\r\n"));
             assert!(request.contains("Origin: tauri://localhost\r\n"));
             assert!(request.contains(&format!("X-Desktop-Bootstrap: {}\r\n", "d".repeat(64))));
@@ -1098,6 +1203,72 @@ mod tests {
 
         let extra = br#"{"status":"REVOKED","enrollment_id":"11111111-1111-4111-8111-111111111111","expected_current_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","remote_revocation_confirmed":true,"role":"ADMIN"}"#;
         assert!(serde_json::from_slice::<EnrollmentRevocationResponse>(extra).is_err());
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request_bytes = Vec::new();
+            let mut chunk = [0_u8; 512];
+            loop {
+                let size = stream.read(&mut chunk).unwrap();
+                assert!(size > 0);
+                request_bytes.extend_from_slice(&chunk[..size]);
+                let Some(header_end) = request_bytes
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|position| position + 4)
+                else {
+                    continue;
+                };
+                let head = std::str::from_utf8(&request_bytes[..header_end]).unwrap();
+                let content_length = head
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Content-Length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if request_bytes.len() >= header_end + content_length {
+                    break;
+                }
+            }
+            let request = std::str::from_utf8(&request_bytes).unwrap();
+            assert!(request.starts_with("POST /v1/desktop-enrollment/activate HTTP/1.1\r\n"));
+            assert!(request.contains(&format!("Authorization: Bearer {}\r\n", "d".repeat(64))));
+            assert!(
+                request.ends_with(&format!("{{\"activation_secret\":\"{}\"}}", "A".repeat(32)))
+            );
+            let body = serde_json::json!({
+                "status": "REGISTERED",
+                "enrollment_id": "11111111-1111-4111-8111-111111111111",
+                "envelope_text": "signed-envelope",
+                "envelope_sha256": "a".repeat(64),
+                "installation_binding_sha256": "c".repeat(64),
+                "expires_at": "2026-08-20T12:00:00Z"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "activation_secret": "A".repeat(32)
+        }))
+        .unwrap();
+        let body = parent_lifecycle_request(
+            port,
+            &"d".repeat(64),
+            "/v1/desktop-enrollment/activate",
+            &request_body,
+        )
+        .unwrap();
+        let response: EnrollmentActivationResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response.status, "REGISTERED");
+        server.join().unwrap();
     }
 
     #[test]
@@ -1111,5 +1282,6 @@ mod tests {
     }
 }
 mod enrollment_vault;
+mod native_activation_prompt;
 
 use enrollment_vault::{EnrollmentVault, EnrollmentVaultStatus};

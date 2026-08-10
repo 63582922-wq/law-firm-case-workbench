@@ -101,6 +101,7 @@ class DesktopSidecarTests(unittest.TestCase):
         self.assertEqual(client.get("/docs").status_code, 404)
         self.assertEqual(client.get("/openapi.json").status_code, 404)
         self.assertEqual(client.get("/v1/matters/example/snapshot").status_code, 404)
+        self.assertEqual(client.post("/v1/desktop-enrollment/activate").status_code, 404)
         self.assertEqual(client.post("/v1/desktop-enrollment/renew").status_code, 404)
         self.assertEqual(client.post("/v1/desktop-enrollment/revoke").status_code, 404)
 
@@ -110,6 +111,117 @@ class DesktopSidecarTests(unittest.TestCase):
         )
         self.assertEqual(client.get("/healthz").json()["enrollment_trust"], "blocked")
         self.assertEqual(client.get("/v1/matters/example/snapshot").status_code, 404)
+
+    def test_parent_only_activation_uses_keychain_binding_and_returns_staged_envelope(self) -> None:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        private = Ed25519PrivateKey.generate()
+        issuer = TrustedEnrollmentIssuer(
+            key_id="synthetic-issuer-a",
+            issuer="synthetic-law-firm-admin",
+            public_key_bytes=private.public_key().public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            ),
+        )
+        trust = DesktopEnrollmentTrustRuntime(
+            phase="READY",
+            message="synthetic test trust",
+            catalog=SyntheticCurrentCatalog(issuer),  # type: ignore[arg-type]
+        )
+        installation_secret = b"i" * 32
+        credential = {
+            "version": 1,
+            "key_id": issuer.key_id,
+            "issuer": issuer.issuer,
+            "enrollment_id": "11111111-1111-4111-8111-111111111111",
+            "actor_id": "22222222-2222-4222-8222-222222222222",
+            "firm_id": "33333333-3333-4333-8333-333333333333",
+            "roles": ["LEAD_LAWYER"],
+            "installation_binding_sha256": sha256(installation_secret).hexdigest(),
+            "issued_at": (now - timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+            "expires_at": (now + timedelta(days=5)).isoformat().replace("+00:00", "Z"),
+        }
+        envelope = json.dumps(
+            {
+                "credential": credential,
+                "signature": urlsafe_b64encode(private.sign(canonical(credential)))
+                .decode("ascii")
+                .rstrip("="),
+            },
+            ensure_ascii=False,
+        )
+
+        class Issuer:
+            register_request = None
+
+            def register(self, request):
+                self.register_request = request
+                return envelope
+
+            def renew(self, request):
+                raise AssertionError(request)
+
+            def revoke(self, request):
+                raise AssertionError(request)
+
+        lifecycle_issuer = Issuer()
+
+        def keychain_runner(command, **kwargs):
+            del kwargs
+            account = command[command.index("-a") + 1]
+            if account == "signed-enrollment-v1":
+                return CompletedProcess(command, 44, stdout="", stderr="not exposed")
+            return CompletedProcess(
+                command,
+                0,
+                stdout=b64encode(installation_secret).decode("ascii") + "\n",
+                stderr="",
+            )
+
+        client = TestClient(
+            create_desktop_sidecar_app(
+                trust,
+                parent_api_token="c" * 64,
+                enrollment_issuer=lifecycle_issuer,
+                keychain_runner=keychain_runner,
+            )
+        )
+        endpoint = "/v1/desktop-enrollment/activate"
+        authorization = {"Authorization": f"Bearer {'c' * 64}"}
+        activation_secret = "A" * 32
+        self.assertEqual(
+            client.post(endpoint, json={"activation_secret": activation_secret}).status_code,
+            404,
+        )
+        self.assertEqual(
+            client.post(
+                endpoint,
+                headers=authorization,
+                json={"activation_secret": activation_secret, "role": "ADMIN"},
+            ).status_code,
+            422,
+        )
+        activated = client.post(
+            endpoint,
+            headers=authorization,
+            json={"activation_secret": activation_secret},
+        )
+        self.assertEqual(activated.status_code, 200, activated.text)
+        self.assertEqual(activated.json()["status"], "REGISTERED")
+        self.assertEqual(activated.json()["envelope_text"], envelope)
+        self.assertEqual(
+            activated.json()["installation_binding_sha256"],
+            sha256(installation_secret).hexdigest(),
+        )
+        self.assertNotIn(activation_secret, activated.text)
+        request = lifecycle_issuer.register_request
+        self.assertIsNotNone(request)
+        self.assertEqual(request.activation_secret, activation_secret)
+        self.assertEqual(
+            set(request.__dict__),
+            {"activation_secret", "installation_binding_sha256", "client_nonce"},
+        )
+        self.assertNotIn(activation_secret, repr(request))
 
     def test_native_parent_token_guards_exact_signed_enrollment_verification(self) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0)

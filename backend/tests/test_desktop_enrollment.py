@@ -253,6 +253,22 @@ class DesktopEnrollmentTests(unittest.TestCase):
         )
         self.assertIsNone(provider(optional_missing).load_optional())
 
+        registration_ready = SequenceRunner(
+            [
+                CompletedProcess([], 44, "", "sensitive detail"),
+                CompletedProcess([], 0, b64encode(INSTALLATION_SECRET).decode("ascii"), ""),
+            ]
+        )
+        self.assertEqual(
+            provider(registration_ready).load_registration_installation_secret(),
+            INSTALLATION_SECRET,
+        )
+        registration_existing = SequenceRunner(
+            [CompletedProcess([], 0, self.envelope(), "")]
+        )
+        with self.assertRaisesRegex(DesktopEnrollmentBlocked, "already exists"):
+            provider(registration_existing).load_registration_installation_secret()
+
         lookup_failure = SequenceRunner(
             [CompletedProcess([], 1, "", "sensitive detail")]
         )

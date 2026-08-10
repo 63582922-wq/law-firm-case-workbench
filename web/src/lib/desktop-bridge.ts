@@ -70,6 +70,10 @@ export async function importSignedEnrollmentPackage(): Promise<DesktopEnrollment
   return invoke<DesktopEnrollmentVaultStatus>("import_signed_enrollment_package");
 }
 
+export async function activateDesktopEnrollment(): Promise<DesktopEnrollmentVaultStatus> {
+  return invoke<DesktopEnrollmentVaultStatus>("activate_desktop_enrollment");
+}
+
 export async function renewDesktopEnrollment(): Promise<DesktopEnrollmentVaultStatus> {
   return invoke<DesktopEnrollmentVaultStatus>("renew_desktop_enrollment");
 }
@@ -89,6 +93,7 @@ export function installDesktopBridge(): void {
     enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
     initializeInstallation: initializeDesktopInstallation,
     importSignedEnrollmentPackage,
+    activateEnrollment: activateDesktopEnrollment,
     renewEnrollment: renewDesktopEnrollment,
     revokeEnrollment: revokeDesktopEnrollment,
     disableLocalEnrollment,

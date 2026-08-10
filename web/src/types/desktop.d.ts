@@ -47,6 +47,12 @@ declare global {
         installationInitialized: boolean;
         enrollmentEnvelopePresent: boolean;
       }>;
+      activateEnrollment(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
       renewEnrollment(): Promise<{
         phase: string;
         message: string;
