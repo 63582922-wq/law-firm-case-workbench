@@ -2895,15 +2895,6 @@ function emptyPersistentCalculation(
 }
 
 function syntheticLegalDiscoveryView(): LegalReviewView {
-  const shared = {
-    snapshotId: null,
-    verificationStatus: "NOT_CAPTURED",
-    licenseStatus: "DISCOVERY_ONLY",
-    licenseBasis: null,
-    licenseReviewHash: null,
-    captureRunId: null,
-    contentSha256: null,
-  };
   return {
     sourceKind: "synthetic-alpha",
     sourceLabel: "官方来源发现清单",
@@ -2912,54 +2903,77 @@ function syntheticLegalDiscoveryView(): LegalReviewView {
     matterVersion: null,
     snapshotHash: null,
     requestId: null,
-    sources: [
-      {
-        ...shared,
-        sourceId: "CN-CIVIL-CODE-680",
-        publisher: "最高人民法院（公布民法典全文）",
-        authorityLevel: "PRIMARY_LAW",
-        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/233181.html",
-        provisionLocator: "《中华人民共和国民法典》第六百七十九条至第六百八十条",
-      },
-      {
-        ...shared,
-        sourceId: "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
-        publisher: "最高人民法院",
-        authorityLevel: "JUDICIAL_INTERPRETATION",
-        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/282621.html",
-        provisionLocator: "民间借贷司法解释第二十四条至第三十一条（2020年第二次修正）",
-      },
-      {
-        ...shared,
-        sourceId: "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
-        publisher: "最高人民法院",
-        authorityLevel: "JUDICIAL_INTERPRETATION",
-        officialUrl: "https://www.court.gov.cn/zixun/xiangqing/249031.html",
-        provisionLocator: "法释〔2020〕6号及修正后第二十五条至第三十二条",
-      },
-      {
-        ...shared,
-        sourceId: "SPC-PRIVATE-LENDING-2015-ORIGINAL",
-        publisher: "最高人民法院公报",
-        authorityLevel: "JUDICIAL_INTERPRETATION",
-        officialUrl: "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
-        provisionLocator: "法释〔2015〕18号第二十六条、第三十一条",
-      },
-      {
-        ...shared,
-        sourceId: "CFETS-LPR-HISTORY",
-        publisher: "全国银行间同业拆借中心（中国货币网）",
-        authorityLevel: "OFFICIAL_RATE_DATA",
-        officialUrl: "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
-        provisionLocator: "一年期贷款市场报价利率历史数据",
-      },
-    ],
+    sources: legalSourceDiscoveryRows(),
     ruleVersions: [],
     legalEvents: [],
     factBindings: [],
     currentBundle: null,
     bundleSegments: [],
   };
+}
+
+const OFFICIAL_LEGAL_SOURCE_DISCOVERY: ReadonlyArray<Pick<
+  LegalReviewView["sources"][number],
+  "sourceId" | "publisher" | "authorityLevel" | "officialUrl" | "provisionLocator"
+>> = [
+  {
+    sourceId: "CN-CIVIL-CODE-680",
+    publisher: "国家法律法规数据库 / 最高人民法院",
+    authorityLevel: "PRIMARY_LAW",
+    officialUrl: "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
+    provisionLocator: "《中华人民共和国民法典》第六百七十九条至第六百八十条",
+  },
+  {
+    sourceId: "SPC-PRIVATE-LENDING-2020-SECOND-REVISION",
+    publisher: "最高人民法院",
+    authorityLevel: "JUDICIAL_INTERPRETATION",
+    officialUrl: "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+    provisionLocator: "民间借贷司法解释第二十四条至第三十一条（2020年第二次修正）",
+  },
+  {
+    sourceId: "SPC-PRIVATE-LENDING-2020-FIRST-REVISION",
+    publisher: "最高人民法院",
+    authorityLevel: "JUDICIAL_INTERPRETATION",
+    officialUrl: "https://www.court.gov.cn/zixun/xiangqing/249031.html",
+    provisionLocator: "法释〔2020〕6号及修正后第二十五条至第三十二条",
+  },
+  {
+    sourceId: "SPC-PRIVATE-LENDING-2015-ORIGINAL",
+    publisher: "最高人民法院公报",
+    authorityLevel: "JUDICIAL_INTERPRETATION",
+    officialUrl: "https://gongbao.court.gov.cn/Details/48786dea74c9545c2f4fb27254ca08.html",
+    provisionLocator: "法释〔2015〕18号第二十六条、第三十一条",
+  },
+  {
+    sourceId: "CFETS-LPR-HISTORY",
+    publisher: "全国银行间同业拆借中心（中国货币网）",
+    authorityLevel: "OFFICIAL_RATE_DATA",
+    officialUrl: "https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html",
+    provisionLocator: "一年期贷款市场报价利率历史数据",
+  },
+];
+
+function legalSourceDiscoveryRows(): LegalReviewView["sources"] {
+  return OFFICIAL_LEGAL_SOURCE_DISCOVERY.map((item) => ({
+    ...item,
+    snapshotId: null,
+    verificationStatus: "NOT_CAPTURED",
+    licenseStatus: "DISCOVERY_ONLY",
+    licenseBasis: null,
+    licenseReviewHash: null,
+    captureRunId: null,
+    contentSha256: null,
+  }));
+}
+
+function mergeLegalSourceDiscovery(
+  registered: LegalReviewView["sources"],
+): LegalReviewView["sources"] {
+  const registeredIds = new Set(registered.map((item) => item.sourceId));
+  return [
+    ...registered,
+    ...legalSourceDiscoveryRows().filter((item) => !registeredIds.has(item.sourceId)),
+  ];
 }
 
 function syntheticOfficialSourceProbeView(): OfficialSourceCaptureView {
@@ -3137,7 +3151,7 @@ function mapPersistentLegalReview(
     matterVersion: payload.matter_version,
     snapshotHash: payload.snapshot_hash,
     requestId,
-    sources: payload.sources.map((item) => ({
+    sources: mergeLegalSourceDiscovery(payload.sources.map((item) => ({
       snapshotId: item.snapshot_id,
       sourceId: item.source_id,
       publisher: item.publisher,
@@ -3150,7 +3164,7 @@ function mapPersistentLegalReview(
       licenseReviewHash: item.license_review_hash ?? null,
       captureRunId: item.capture_run_id ?? null,
       contentSha256: item.content_sha256,
-    })),
+    }))),
     ruleVersions: payload.rule_versions.map((item) => ({
       ruleVersionId: item.rule_version_id,
       ruleVersion: item.rule_version,
