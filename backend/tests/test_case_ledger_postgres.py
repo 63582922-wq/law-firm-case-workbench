@@ -7,7 +7,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 import unittest
 
-from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore
+from case_kernel.case_ledger_postgres import PostgresCaseLedgerStore, _evidence_links_from_json
 from case_kernel.errors import VersionConflict
 from case_kernel.evidence_refs import EvidenceLink
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
@@ -108,8 +108,23 @@ class FakeConnection:
             return FakeResult(rows=[{"fact_id": value, "status": "CONFIRMED"} for value in (params or ([],))[0]])
         if "SELECT claim_id, status FROM case_claims WHERE claim_id = ANY" in normalized:
             return FakeResult(rows=[{"claim_id": value, "status": "CONFIRMED_SCOPE"} for value in (params or ([],))[0]])
-        if "SELECT amount, currency, status FROM case_transactions" in normalized:
-            return FakeResult(row={"amount": Decimal("1000.00"), "currency": "CNY", "status": "CONFIRMED"})
+        if "SELECT amount, currency, status, evidence_links FROM case_transactions" in normalized:
+            return FakeResult(
+                row={
+                    "amount": Decimal("1000.00"),
+                    "currency": "CNY",
+                    "status": "CONFIRMED",
+                    "evidence_links": [
+                        {
+                            "evidence_id": "synthetic-transaction-evidence",
+                            "original_file_sha256": "a" * 64,
+                            "page_number": 1,
+                            "region_id": "synthetic-region",
+                            "original_label": "[合成] 原始交易页",
+                        }
+                    ],
+                }
+            )
         if "SELECT pc.status, pc.nature, pc.transaction_id" in normalized:
             return FakeResult(
                 row={
@@ -371,6 +386,19 @@ class PostgresCaseLedgerStoreTests(unittest.TestCase):
         self.assertIn("SET status = 'INVALIDATED'", approval_sql)
         self.assertIn("SET status = 'APPROVED'", approval_sql)
         self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", approval_sql)
+
+    def test_transaction_evidence_can_be_copied_without_exposing_private_transaction_detail(self) -> None:
+        links = _evidence_links_from_json([
+            {
+                "evidence_id": "transaction-page-08",
+                "original_file_sha256": "a" * 64,
+                "page_number": 8,
+                "region_id": "transaction-row-02",
+                "original_label": "微信交易记录第8页",
+            }
+        ])
+        self.assertEqual(links[0].evidence_id, "transaction-page-08")
+        self.assertEqual(links[0].original_file_sha256, "a" * 64)
 
     def test_duplicate_group_preserves_all_sources_and_requires_member_canonical(self) -> None:
         first = str(uuid4())

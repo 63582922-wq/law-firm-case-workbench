@@ -23,7 +23,23 @@ export type CaseReviewView = {
   facts: { factId: string; text: string; origin: string; status: string; evidenceCount: number }[];
   claims: { claimId: string; text: string; amount: string | null; currency: string | null; position: string; responseAmount: string | null }[];
   issues: { issueId: string; question: string; claimCount: number; factCount: number; status: string }[];
-  transactions: { transactionId: string; date: string | null; amount: string; currency: string; nature: string; application: string; status: string }[];
+  transactions: {
+    transactionId: string;
+    date: string | null;
+    amount: string;
+    currency: string;
+    nature: string;
+    application: string;
+    status: string;
+    sourceStatus: string;
+    classification: {
+      classificationId: string;
+      origin: string;
+      sameDaySequence: number | null;
+      status: string;
+      allocations: { obligationId: string; amount: string; currency: string }[];
+    } | null;
+  }[];
   pendingFacts: { factId: string; text: string; origin: string; evidenceCount: number }[];
   factPage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
   transactionPage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
@@ -364,6 +380,12 @@ export type FormalCalculationReceipt = {
   requestId: string | null;
 };
 
+export type PaymentClassificationReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -591,7 +613,20 @@ type PersistentTransactionPage = {
   matter_id: string;
   matter_version: number;
   total_count: number;
-  items: { transaction_id: string; local_date: string | null; amount: string; currency: string; status: string; evidence_count: number; classification_nature: string | null; classification_status: string | null }[];
+  items: {
+    transaction_id: string;
+    local_date: string | null;
+    amount: string;
+    currency: string;
+    status: string;
+    evidence_count: number;
+    classification_id: string | null;
+    classification_origin: string | null;
+    classification_nature: string | null;
+    classification_same_day_sequence: number | null;
+    classification_status: string | null;
+    classification_allocations: { obligation_id: string; amount: string; currency: string }[];
+  }[];
   next_cursor: string | null;
   has_more: boolean;
 };
@@ -1191,6 +1226,82 @@ export async function decidePersistentFact(
     matterVersion: payload.matter_version,
     requestId: response.headers.get("X-Request-ID"),
   };
+}
+
+export async function createPaymentClassificationCandidate(
+  input: {
+    expectedVersion: number;
+    transactionId: string;
+    origin: "PLAINTIFF_PLEADING" | "DEFENDANT_STATEMENT" | "AGENT_CANDIDATE" | "ASSISTANT_ENTRY";
+    nature: "DISBURSEMENT" | "REPAYMENT_UNSPECIFIED" | "INTEREST_PAYMENT" | "PRINCIPAL_REPAYMENT" | "REFUND" | "FEE" | "UNRELATED";
+    obligationId?: string;
+    allocationAmount?: string;
+    currency: string;
+    sameDaySequence: number | null;
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<PaymentClassificationReceipt> {
+  if (config.kind !== "persistent-preview") throw new Error("只有已启用的本机持久化工作台可以建立付款分类候选。");
+  const obligationId = input.obligationId?.trim() ?? "";
+  const amount = input.allocationAmount?.trim() ?? "";
+  const calculationRelevant = new Set(["DISBURSEMENT", "REPAYMENT_UNSPECIFIED", "INTEREST_PAYMENT", "PRINCIPAL_REPAYMENT"]);
+  if (!input.transactionId || (calculationRelevant.has(input.nature) && (!obligationId || !/^\d+(?:\.\d{1,6})?$/.test(amount) || Number(amount) <= 0))) {
+    throw new Error("计算相关的付款性质必须填写债务单元和完整的、正数的付款分配金额。");
+  }
+  if (!/^[A-Z]{3}$/.test(input.currency)) throw new Error("付款分类币种格式无效。");
+  if (input.sameDaySequence !== null && (!Number.isInteger(input.sameDaySequence) || input.sameDaySequence < 1)) {
+    throw new Error("同日顺序必须是正整数，或留空。");
+  }
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/transactions/${input.transactionId}/payment-classifications`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        origin: input.origin,
+        nature: input.nature,
+        allocations: calculationRelevant.has(input.nature) ? [{ obligation_id: obligationId, amount, currency: input.currency }] : [],
+        same_day_sequence: input.sameDaySequence,
+        use_transaction_evidence: true,
+        evidence_links: [],
+      }),
+    });
+  } catch {
+    throw new Error("连接在付款分类候选建立前中断。请刷新案件台账核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as { object_id: string; matter_version: number; object_type: string } | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "付款分类候选未建立"));
+  if (payload.object_type !== "PAYMENT_CLASSIFICATION") throw new Error("付款分类候选回执类型不一致，已停止后续处理。");
+  return { objectId: payload.object_id, matterVersion: payload.matter_version, requestId: response.headers.get("X-Request-ID") };
+}
+
+export async function approvePaymentClassification(
+  input: { expectedVersion: number; classificationId: string },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<PaymentClassificationReceipt> {
+  if (config.kind !== "persistent-preview") throw new Error("只有已启用的本机持久化工作台可以批准付款分类。");
+  if (!input.classificationId) throw new Error("付款分类标识缺失，不能批准。");
+  const approvalHash = await sha256Text([
+    "payment-classification-approval-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    input.classificationId,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/payment-classifications/${input.classificationId}/approve`, {
+      method: "POST",
+      headers: { Accept: "application/json", "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ expected_version: input.expectedVersion, approval_hash: approvalHash }),
+    });
+  } catch {
+    throw new Error("连接在付款分类批准前中断。请刷新案件台账核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as { object_id: string; matter_version: number; object_type: string } | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "付款分类未获批准"));
+  if (payload.object_type !== "PAYMENT_CLASSIFICATION") throw new Error("付款分类批准回执类型不一致，已停止后续处理。");
+  return { objectId: payload.object_id, matterVersion: payload.matter_version, requestId: response.headers.get("X-Request-ID") };
 }
 
 async function loadPersistentLedgerPage<T extends { matter_version: number; items: unknown[] }>(
@@ -2981,7 +3092,7 @@ function mapSyntheticReview(payload: SyntheticReview, requestId: string | null):
     facts: payload.facts.map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, status: "CONFIRMED", evidenceCount: item.evidence_count })),
     claims: payload.claims.map((item) => ({ claimId: item.claim_id, text: item.original_claim_text, amount: item.claimed_amount, currency: item.currency, position: item.response_position, responseAmount: item.response_amount })),
     issues: payload.issues.map((item) => ({ issueId: item.issue_id, question: item.question, claimCount: item.claim_count, factCount: item.fact_count, status: "CONFIRMED" })),
-    transactions: payload.transactions.map((item) => ({ transactionId: item.event_id, date: item.effective_date, amount: item.amount, currency: item.currency, nature: item.kind, application: item.payment_application, status: "APPROVED" })),
+    transactions: payload.transactions.map((item) => ({ transactionId: item.event_id, date: item.effective_date, amount: item.amount, currency: item.currency, nature: item.kind, application: item.payment_application, status: "APPROVED", sourceStatus: "CONFIRMED", classification: null })),
     pendingFacts: payload.pending_facts.map((item) => ({ factId: item.fact_id, text: item.original_text, origin: item.origin, evidenceCount: item.evidence_count })),
     factPage: { loadedCount: payload.facts.length + payload.pending_facts.length, totalCount: payload.facts.length + payload.pending_facts.length, nextCursor: null, hasMore: false },
     transactionPage: { loadedCount: payload.transactions.length, totalCount: payload.transactions.length, nextCursor: null, hasMore: false },
@@ -3032,6 +3143,20 @@ function mapPersistentTransactions(items: PersistentTransactionPage["items"]): C
     nature: item.classification_nature ?? "待分类",
     application: paymentApplication(item.classification_nature ?? undefined),
     status: item.classification_status ?? item.status,
+    sourceStatus: item.status,
+    classification: item.classification_id && item.classification_origin && item.classification_status
+      ? {
+        classificationId: item.classification_id,
+        origin: item.classification_origin,
+        sameDaySequence: item.classification_same_day_sequence,
+        status: item.classification_status,
+        allocations: item.classification_allocations.map((allocation) => ({
+          obligationId: allocation.obligation_id,
+          amount: allocation.amount,
+          currency: allocation.currency,
+        })),
+      }
+      : null,
   }));
 }
 

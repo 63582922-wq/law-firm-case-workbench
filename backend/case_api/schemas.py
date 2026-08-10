@@ -329,7 +329,14 @@ class PersistentPaymentClassificationCandidateRequest(BaseModel):
     ]
     allocations: list[PersistentObligationAllocationRequest] = Field(default_factory=list, max_length=100)
     same_day_sequence: int | None = Field(default=None, ge=1)
-    evidence_links: list[OriginalEvidenceLinkRequest] = Field(min_length=1, max_length=30)
+    use_transaction_evidence: bool = True
+    evidence_links: list[OriginalEvidenceLinkRequest] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def classification_requires_a_provenance_path(self) -> "PersistentPaymentClassificationCandidateRequest":
+        if not self.use_transaction_evidence and not self.evidence_links:
+            raise ValueError("payment classification requires transaction evidence or explicit evidence links")
+        return self
 
 
 class PersistentDuplicateGroupCandidateRequest(BaseModel):
@@ -498,8 +505,12 @@ class PersistentTransactionPageItem(BaseModel):
     currency: str = Field(pattern=r"^[A-Z]{3}$")
     status: str
     evidence_count: int = Field(ge=0)
-    classification_nature: str | None
-    classification_status: str | None
+    classification_id: UUID | None = None
+    classification_origin: str | None = None
+    classification_nature: str | None = None
+    classification_same_day_sequence: int | None = None
+    classification_status: str | None = None
+    classification_allocations: tuple[PersistentSnapshotAllocation, ...] = ()
 
 
 class PersistentTransactionPageResponse(BaseModel):

@@ -492,6 +492,14 @@
 .intakeItemList > button { min-height: 34px; border: 0; color: var(--ink); background: var(--sheet-muted); font: inherit; font-size: 9px; cursor: pointer; }
 .intakeItemList > button:disabled { color: var(--ink-faint); cursor: not-allowed; }
 
+.paymentClassificationForm { margin-top: 9px; padding: 11px; display: grid; gap: 10px; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.paymentClassificationForm > p { color: var(--ink-soft); font-size: 9px; line-height: 1.55; }
+.paymentClassificationFields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.paymentClassificationFields label { min-width: 0; display: grid; gap: 5px; color: var(--ink); font-size: 9px; font-weight: 650; }
+.paymentClassificationFields input, .paymentClassificationFields select { min-width: 0; width: 100%; padding: 7px 8px; border: 1px solid var(--line-strong); border-radius: 0; color: var(--ink); background: var(--sheet); font: inherit; font-size: 10px; }
+.paymentClassificationFields small { color: var(--ink-faint); font-size: 8px; font-weight: 400; line-height: 1.45; }
+.secondaryAction { border-color: var(--line-strong) !important; color: var(--ink) !important; background: var(--sheet) !important; }
+
 @media (max-width: 1360px) {
   .topbar, .caseHeader, .footer { padding-right: 24px; padding-left: 24px; }.caseSubline { max-width: 615px; }.content { padding-right: 28px; padding-left: 28px; }.evidenceArea { padding-right: 20px; padding-left: 20px; }.evidenceColumns { grid-template-columns: 194px minmax(410px,1fr) 252px; }.documentStage { padding-right: 17px; padding-left: 17px; }.documentPaper { padding-right: 32px; padding-left: 32px; }.topbarMeta span:first-child { display: none; }
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }

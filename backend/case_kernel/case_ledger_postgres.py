@@ -980,6 +980,7 @@ class PostgresCaseLedgerStore:
         allocations: tuple[ObligationAllocation, ...],
         same_day_sequence: int | None,
         evidence_links: tuple[EvidenceLink, ...],
+        use_transaction_evidence: bool = False,
     ) -> CaseLedgerCommandReceipt:
         _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
         _validate_uuid("transaction_id", transaction_id)
@@ -987,7 +988,8 @@ class PostgresCaseLedgerStore:
         _require_positive_version(expected_version)
         if same_day_sequence is not None and same_day_sequence < 1:
             raise CaseLedgerPersistenceBlocked("same-day sequence must be a positive integer")
-        validate_evidence_links(evidence_links)
+        if not use_transaction_evidence:
+            validate_evidence_links(evidence_links)
         normalized_allocations = tuple(sorted(allocations, key=lambda item: item.obligation_id))
         command_name = "CREATE_PAYMENT_CLASSIFICATION_CANDIDATE"
         payload = {
@@ -998,6 +1000,7 @@ class PostgresCaseLedgerStore:
             "nature": nature.value,
             "allocations": [asdict(item) for item in normalized_allocations],
             "same_day_sequence": same_day_sequence,
+            "use_transaction_evidence": use_transaction_evidence,
             "evidence_links": _evidence_payload(evidence_links),
         }
         payload_hash = _payload_hash(payload)
@@ -1022,7 +1025,7 @@ class PostgresCaseLedgerStore:
             )
             transaction = connection.execute(
                 """
-                SELECT amount, currency, status
+                SELECT amount, currency, status, evidence_links
                 FROM case_transactions
                 WHERE transaction_id = %s AND matter_id = %s AND firm_id = %s
                 FOR UPDATE
@@ -1033,6 +1036,10 @@ class PostgresCaseLedgerStore:
                 raise KeyError(transaction_id)
             if transaction["status"] == TransactionStatus.INVALIDATED.value:
                 raise CaseLedgerPersistenceBlocked("a classification cannot use an invalidated transaction")
+            effective_evidence_links = evidence_links
+            if use_transaction_evidence:
+                effective_evidence_links = _evidence_links_from_json(transaction["evidence_links"])
+            validate_evidence_links(effective_evidence_links)
             _validate_persistent_classification(
                 transaction_amount=Decimal(transaction["amount"]),
                 transaction_currency=transaction["currency"],
@@ -1055,7 +1062,7 @@ class PostgresCaseLedgerStore:
                     origin.value,
                     nature.value,
                     same_day_sequence,
-                    Jsonb(_evidence_payload(evidence_links)),
+                    Jsonb(_evidence_payload(effective_evidence_links)),
                 ),
             )
             for allocation in normalized_allocations:
@@ -1644,19 +1651,41 @@ class PostgresCaseLedgerStore:
                    transaction.amount, transaction.currency, transaction.status,
                    jsonb_array_length(transaction.evidence_links) AS evidence_count,
                    transaction.created_at,
+                   classification.classification_id AS classification_id,
+                   classification.origin AS classification_origin,
                    classification.nature AS classification_nature,
-                   classification.status AS classification_status
+                   classification.same_day_sequence AS classification_same_day_sequence,
+                   classification.status AS classification_status,
+                   allocation.allocations AS classification_allocations
             FROM case_transactions transaction
             LEFT JOIN LATERAL (
-                SELECT nature, status
+                SELECT classification_id, origin, nature, same_day_sequence, status
                 FROM case_payment_classifications candidate
                 WHERE candidate.matter_id = transaction.matter_id
                   AND candidate.firm_id = transaction.firm_id
                   AND candidate.transaction_id = transaction.transaction_id
-                  AND candidate.status = 'APPROVED'
-                ORDER BY candidate.created_at DESC, candidate.classification_id DESC
+                  AND candidate.status IN ('CANDIDATE', 'APPROVED')
+                ORDER BY CASE candidate.status WHEN 'CANDIDATE' THEN 0 ELSE 1 END,
+                         candidate.created_at DESC, candidate.classification_id DESC
                 LIMIT 1
             ) classification ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(
+                    jsonb_agg(
+                        jsonb_build_object(
+                            'obligation_id', allocation.obligation_id,
+                            'amount', allocation.amount,
+                            'currency', allocation.currency
+                        )
+                        ORDER BY allocation.obligation_id ASC
+                    ),
+                    '[]'::jsonb
+                ) AS allocations
+                FROM case_payment_allocations allocation
+                WHERE allocation.classification_id = classification.classification_id
+                  AND allocation.matter_id = transaction.matter_id
+                  AND allocation.firm_id = transaction.firm_id
+            ) allocation ON TRUE
         """
         with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
             _authorize_matter_read(
@@ -1765,8 +1794,12 @@ class PostgresCaseLedgerStore:
                     "currency": row["currency"],
                     "status": row["status"],
                     "evidence_count": int(row["evidence_count"]),
+                    "classification_id": str(row["classification_id"]) if row.get("classification_id") else None,
+                    "classification_origin": row.get("classification_origin"),
                     "classification_nature": row["classification_nature"],
+                    "classification_same_day_sequence": row.get("classification_same_day_sequence"),
                     "classification_status": row["classification_status"],
+                    "classification_allocations": tuple(row.get("classification_allocations") or ()),
                 }
                 for row in visible
             ),
@@ -2483,6 +2516,36 @@ def _group_ids(rows: Iterable[dict[str, Any]], group_key: str, value_key: str) -
 
 def _evidence_payload(links: tuple[EvidenceLink, ...]) -> list[dict[str, Any]]:
     return [asdict(link) for link in links]
+
+
+def _evidence_links_from_json(value: object) -> tuple[EvidenceLink, ...]:
+    """Rehydrate immutable transaction evidence for a linked classification.
+
+    The classification command never guesses provenance.  When the lawyer
+    chooses to reuse the transaction's original evidence, the ledger copies
+    exactly those immutable page/file references into the new classification
+    row so the two objects remain independently auditable.
+    """
+
+    if not isinstance(value, list):
+        raise CaseLedgerPersistenceBlocked("source transaction has no usable original evidence links")
+    links: list[EvidenceLink] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise CaseLedgerPersistenceBlocked("source transaction evidence link is malformed")
+        try:
+            links.append(
+                EvidenceLink(
+                    evidence_id=str(item["evidence_id"]),
+                    original_file_sha256=str(item["original_file_sha256"]),
+                    page_number=item.get("page_number"),
+                    region_id=item.get("region_id"),
+                    original_label=str(item["original_label"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise CaseLedgerPersistenceBlocked("source transaction evidence link is malformed") from error
+    return tuple(links)
 
 
 def _deserialize_evidence(value: Iterable[dict[str, Any]]) -> tuple[EvidenceLink, ...]:

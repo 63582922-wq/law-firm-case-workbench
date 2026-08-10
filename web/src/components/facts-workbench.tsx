@@ -3,7 +3,9 @@
 import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
+  approvePaymentClassification,
   confirmSyntheticFact,
+  createPaymentClassificationCandidate,
   decidePersistentFact,
   loadCaseReview,
   loadMoreCaseFacts,
@@ -12,12 +14,24 @@ import {
 } from "@/lib/case-data-source";
 import styles from "./case-workbench.module.css";
 
+type PaymentClassificationDraft = {
+  transactionId: string;
+  nature: "DISBURSEMENT" | "REPAYMENT_UNSPECIFIED" | "INTEREST_PAYMENT" | "PRINCIPAL_REPAYMENT" | "REFUND" | "FEE" | "UNRELATED";
+  obligationId: string;
+  allocationAmount: string;
+  sameDaySequence: string;
+  confirmed: boolean;
+};
+
 export function FactsWorkbench() {
   const [review, setReview] = useState<CaseReviewView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pageError, setPageError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState<"facts" | "transactions" | null>(null);
+  const [classificationDraft, setClassificationDraft] = useState<PaymentClassificationDraft | null>(null);
+  const [classificationBusy, setClassificationBusy] = useState<string | null>(null);
+  const [classificationNotice, setClassificationNotice] = useState<string | null>(null);
 
   useEffect(() => {
     void reloadReview();
@@ -59,6 +73,63 @@ export function FactsWorkbench() {
     finally { setConfirming(null); }
   }
 
+  function startClassification(transaction: CaseReviewView["transactions"][number]) {
+    setClassificationNotice(null);
+    setClassificationDraft({
+      transactionId: transaction.transactionId,
+      nature: transaction.classification?.status === "CANDIDATE" ? transaction.nature as "DISBURSEMENT" | "REPAYMENT_UNSPECIFIED" | "INTEREST_PAYMENT" | "PRINCIPAL_REPAYMENT" | "REFUND" | "FEE" | "UNRELATED" : "REPAYMENT_UNSPECIFIED",
+      obligationId: transaction.classification?.allocations[0]?.obligationId ?? "",
+      allocationAmount: transaction.classification?.allocations[0]?.amount ?? transaction.amount,
+      sameDaySequence: transaction.classification?.sameDaySequence?.toString() ?? "",
+      confirmed: false,
+    });
+  }
+
+  async function saveClassification(transaction: CaseReviewView["transactions"][number]) {
+    if (!review || review.sourceKind !== "persistent-preview" || review.matterVersion === null || !classificationDraft) return;
+    if (!classificationDraft.confirmed) {
+      setClassificationNotice("请先确认付款性质、债务单元、同日顺序和原始交易证据继承关系。");
+      return;
+    }
+    const sameDaySequence = classificationDraft.sameDaySequence.trim() ? Number(classificationDraft.sameDaySequence) : null;
+    setClassificationBusy(transaction.transactionId);
+    setClassificationNotice(null);
+    try {
+      const receipt = await createPaymentClassificationCandidate({
+        expectedVersion: review.matterVersion,
+        transactionId: transaction.transactionId,
+        origin: "DEFENDANT_STATEMENT",
+        nature: classificationDraft.nature,
+        obligationId: classificationDraft.obligationId,
+        allocationAmount: classificationDraft.allocationAmount,
+        currency: transaction.currency,
+        sameDaySequence,
+      });
+      await reloadReview();
+      setClassificationDraft(null);
+      setClassificationNotice(`付款分类候选已建立（案件版本 ${receipt.matterVersion}），请核对后单独批准。`);
+    } catch (cause) {
+      setClassificationNotice(cause instanceof Error ? cause.message : "付款分类候选未建立");
+    } finally {
+      setClassificationBusy(null);
+    }
+  }
+
+  async function approveClassification(transaction: CaseReviewView["transactions"][number]) {
+    if (!review || review.sourceKind !== "persistent-preview" || review.matterVersion === null || !transaction.classification || transaction.classification.status !== "CANDIDATE") return;
+    setClassificationBusy(transaction.transactionId);
+    setClassificationNotice(null);
+    try {
+      const receipt = await approvePaymentClassification({ expectedVersion: review.matterVersion, classificationId: transaction.classification.classificationId });
+      await reloadReview();
+      setClassificationNotice(`付款分类已批准（案件版本 ${receipt.matterVersion}）。后续正式计算会读取这项已批准分配。`);
+    } catch (cause) {
+      setClassificationNotice(cause instanceof Error ? cause.message : "付款分类未获批准");
+    } finally {
+      setClassificationBusy(null);
+    }
+  }
+
   if (error) return <section className={styles.calculationBlocked}><p className={styles.eyebrow}>事实与争点</p><h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "持久化模式未启用" : "案件台账未连接"}</h3><p>{error}</p><small>系统没有回退到另一套数据，也没有把未连接状态显示为成功。</small><button className={styles.candidateAction} onClick={() => void reloadReview()} type="button">重新载入案件</button></section>;
   if (!review) return <section className={styles.calculationLoading}>正在读取案件审批链生成的版本化快照…</section>;
 
@@ -76,7 +147,7 @@ export function FactsWorkbench() {
         {review.issues.map((issue) => <div className={styles.ledgerRow} key={issue.issueId}><strong>{issue.question}</strong><small>{statusLabel(issue.status)} · {issue.factCount} 项确认事实 · {issue.claimCount} 项诉请范围</small></div>)}
       </LedgerSection>
       <LedgerSection title="计算前交易快照" note="付款性质决定是否可进入测算。">
-        {review.transactions.map((transaction) => <div className={styles.ledgerRow} key={transaction.transactionId}><strong>{transaction.date ?? "日期待确认"} · {currencySymbol(transaction.currency)} {transaction.amount}</strong><small>{statusLabel(transaction.status)} · {statusLabel(transaction.nature)} · {transaction.application} · {transaction.currency}</small></div>)}
+        {review.transactions.map((transaction) => <div className={styles.ledgerRow} key={transaction.transactionId}><strong>{transaction.date ?? "日期待确认"} · {currencySymbol(transaction.currency)} {transaction.amount}</strong><small>{statusLabel(transaction.status)} · {statusLabel(transaction.nature)} · {transaction.application} · {transaction.currency}</small>{transaction.classification && <small>分类来源：{statusLabel(transaction.classification.origin)}；{transaction.classification.sameDaySequence ? `同日第 ${transaction.classification.sameDaySequence} 笔；` : "未设同日顺序；"}{transaction.classification.allocations.length ? `债务单元 ${transaction.classification.allocations.map((item) => `${item.obligationId} / ${item.amount} ${item.currency}`).join("；")}` : "不进入本金、利息计算。"}</small>}{review.sourceKind === "persistent-preview" && transaction.sourceStatus === "CONFIRMED" && transaction.classification?.status !== "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => startClassification(transaction)} type="button">{transaction.classification ? "更正付款分类" : "建立付款分类"}</button>}{review.sourceKind === "persistent-preview" && transaction.classification?.status === "CANDIDATE" && <button className={styles.candidateAction} disabled={classificationBusy === transaction.transactionId} onClick={() => void approveClassification(transaction)} type="button">{classificationBusy === transaction.transactionId ? "正在批准…" : "批准该付款分类"}</button>}{classificationDraft?.transactionId === transaction.transactionId && <PaymentClassificationForm draft={classificationDraft} transaction={transaction} busy={classificationBusy === transaction.transactionId} onChange={setClassificationDraft} onCancel={() => setClassificationDraft(null)} onSubmit={() => void saveClassification(transaction)} />}</div>)}
         <LedgerPagination loaded={review.transactionPage.loadedCount} total={review.transactionPage.totalCount} hasMore={review.transactionPage.hasMore} busy={loadingMore === "transactions"} onMore={() => void loadMore("transactions")} />
       </LedgerSection>
       {review.pendingFacts.length > 0 && <LedgerSection title="待律师确认的事实候选" note={review.sourceKind === "synthetic-alpha" ? "此操作仅改变本机合成台账。" : "确认操作固定案件版本、事实标识、决定状态与审计哈希；上游依赖会随决定变化重新核验。"}>
@@ -84,8 +155,14 @@ export function FactsWorkbench() {
       </LedgerSection>}
     </div>
     {pageError && <div className={styles.inlineError} role="alert"><strong>后续记录未载入</strong><span>{pageError}</span><button className={styles.candidateAction} onClick={() => void reloadReview()} type="button">重新载入当前案件</button></div>}
+    {classificationNotice && <div className={styles.inlineError} role="status"><strong>付款分类</strong><span>{classificationNotice}</span></div>}
     <p className={styles.resultHash}>案件摘要投影 {review.snapshotHash.slice(0, 16)}…{review.transactionSnapshotHash ? `；交易快照 ${review.transactionSnapshotHash.slice(0, 16)}…` : ""}。后续页严格绑定案件版本；修改上游材料或律师决定后，必须重新载入。{review.requestId ? ` 请求号 ${review.requestId}` : ""}</p>
   </section>;
+}
+
+function PaymentClassificationForm({ draft, transaction, busy, onChange, onCancel, onSubmit }: { draft: PaymentClassificationDraft; transaction: CaseReviewView["transactions"][number]; busy: boolean; onChange: (draft: PaymentClassificationDraft) => void; onCancel: () => void; onSubmit: () => void }) {
+  const financial = ["DISBURSEMENT", "REPAYMENT_UNSPECIFIED", "INTEREST_PAYMENT", "PRINCIPAL_REPAYMENT"].includes(draft.nature);
+  return <form className={styles.paymentClassificationForm} onSubmit={(event) => { event.preventDefault(); onSubmit(); }}><p>原始证据将逐项继承自这笔已确认交易；系统不会用生成摘要、红框图片或推断结果替代原始定位。</p><div className={styles.paymentClassificationFields}><label><span>付款性质</span><select value={draft.nature} onChange={(event) => onChange({ ...draft, nature: event.target.value as typeof draft.nature })}><option value="DISBURSEMENT">出借款</option><option value="REPAYMENT_UNSPECIFIED">还款（待冲抵）</option><option value="INTEREST_PAYMENT">支付利息</option><option value="PRINCIPAL_REPAYMENT">归还本金</option><option value="REFUND">退款</option><option value="FEE">费用</option><option value="UNRELATED">与本案无关</option></select></label>{financial && <><label><span>债务单元</span><input required value={draft.obligationId} onChange={(event) => onChange({ ...draft, obligationId: event.target.value })} placeholder="例如：借款合同-01" /></label><label><span>分配金额（{transaction.currency}）</span><input required inputMode="decimal" value={draft.allocationAmount} onChange={(event) => onChange({ ...draft, allocationAmount: event.target.value })} /><small>必须等于本笔交易全额 {transaction.amount} {transaction.currency}</small></label></>}<label><span>同日顺序（可选）</span><input inputMode="numeric" value={draft.sameDaySequence} onChange={(event) => onChange({ ...draft, sameDaySequence: event.target.value })} placeholder="同日多笔时填写 1、2…" /></label></div><label className={styles.formalCalculationCheck}><input checked={draft.confirmed} onChange={(event) => onChange({ ...draft, confirmed: event.target.checked })} type="checkbox" /><span>我已核对该笔交易、付款性质、金额归属及同日先后；分类候选仅在我随后单独批准后才进入正式计算。</span></label><div className={styles.formalCalculationActions}><button disabled={busy} type="submit">{busy ? "正在建立…" : "建立分类候选"}</button><button className={styles.secondaryAction} disabled={busy} onClick={onCancel} type="button">取消</button></div></form>;
 }
 
 function LedgerSection({ title, note, children }: { title: string; note: string; children: React.ReactNode }) {

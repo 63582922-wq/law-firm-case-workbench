@@ -1051,6 +1051,26 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(classification_call["nature"].value, "INTEREST_PAYMENT")
         self.assertEqual(classification_call["allocations"][0].currency, "CNY")
 
+        inherited = client.post(
+            f"/v1/matters/{self.matter_id}/transactions/{transaction_id}/payment-classifications",
+            headers={"Idempotency-Key": "persistent-classification-inherit-001"},
+            json={
+                "expected_version": 3,
+                "origin": "DEFENDANT_STATEMENT",
+                "nature": "PRINCIPAL_REPAYMENT",
+                "allocations": [
+                    {"obligation_id": "synthetic-obligation", "amount": "1000.00", "currency": "CNY"}
+                ],
+                "same_day_sequence": 2,
+                "use_transaction_evidence": True,
+                "evidence_links": [],
+            },
+        )
+        self.assertEqual(inherited.status_code, 201, inherited.text)
+        inherited_call = [call for call in store.calls if call[0] == "create_classification"][-1][1]
+        self.assertTrue(inherited_call["use_transaction_evidence"])
+        self.assertEqual(inherited_call["evidence_links"], ())
+
     def test_case_snapshot_is_a_single_versioned_read_model(self) -> None:
         store = FakePersistentFactStore()
         client = TestClient(

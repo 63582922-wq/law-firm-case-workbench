@@ -2074,6 +2074,7 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 ),
                 same_day_sequence=body.same_day_sequence,
                 evidence_links=_evidence_links(body.evidence_links),
+                use_transaction_evidence=body.use_transaction_evidence,
             )
         )
 
