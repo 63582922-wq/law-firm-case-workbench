@@ -13,6 +13,7 @@ import {
 } from "@/lib/desktop-bridge";
 import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { AgentCapabilities } from "@/components/agent-capabilities";
+import { AgentExecutionAudit } from "@/components/agent-execution-audit";
 import styles from "./case-workbench.module.css";
 
 export function IdentitySecurityWorkbench({
@@ -255,6 +256,7 @@ export function IdentitySecurityWorkbench({
       </div>
 
       <AgentCapabilities />
+      <AgentExecutionAudit />
 
       <section className={styles.securityActions} aria-labelledby="security-actions-title">
         <div>

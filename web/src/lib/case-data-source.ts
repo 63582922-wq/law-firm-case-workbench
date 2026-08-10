@@ -417,6 +417,44 @@ export type ReviewableOfficeDraftDelivery = {
   purpose: "REVIEW_PDF" | "DOWNLOAD_EDITABLE";
 };
 
+export type AgentExecutionAuditView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  runs: {
+    runId: string;
+    agentId: string;
+    agentVersion: string;
+    policyManifestHash: string;
+    inputHash: string;
+    inputMatterVersion: number;
+    createdAt: string;
+  }[];
+  proposals: {
+    proposalId: string;
+    runId: string;
+    sequence: number;
+    skillId: string;
+    skillVersion: string;
+    toolId: string;
+    approvalGate: string;
+    requiredScopes: string[];
+    inputHash: string;
+    rationaleHash: string;
+    createdAt: string;
+  }[];
+  receipts: {
+    receiptId: string;
+    proposalId: string;
+    status: "SUCCEEDED" | "BLOCKED" | "FAILED" | "STALE_RESULT";
+    outputHash: string | null;
+    errorCode: string | null;
+    executedAt: string;
+  }[];
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -805,6 +843,42 @@ type PersistentReviewableOfficeDraftSnapshot = {
     review_input_hash: string;
     status: "CANDIDATE" | "APPROVED";
     created_at: string;
+  }[];
+};
+
+type PersistentAgentExecutionSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  runs: {
+    run_id: string;
+    agent_id: string;
+    agent_version: string;
+    policy_manifest_hash: string;
+    input_hash: string;
+    input_matter_version: number;
+    created_at: string;
+  }[];
+  proposals: {
+    proposal_id: string;
+    run_id: string;
+    sequence: number;
+    skill_id: string;
+    skill_version: string;
+    tool_id: string;
+    approval_gate: string;
+    required_scopes: string[];
+    input_hash: string;
+    rationale_hash: string;
+    created_at: string;
+  }[];
+  receipts: {
+    receipt_id: string;
+    proposal_id: string;
+    status: "SUCCEEDED" | "BLOCKED" | "FAILED" | "STALE_RESULT";
+    output_hash: string | null;
+    error_code: string | null;
+    executed_at: string;
   }[];
 };
 
@@ -1448,6 +1522,47 @@ export async function fetchReviewableOfficeDraft(
     fileName: purpose === "REVIEW_PDF" ? "文书审阅稿.pdf" : pair.editableMediaType.endsWith("document") ? "文书草稿.docx" : "核算草稿.xlsx",
     artifactSha256: expectedHash,
     purpose,
+  };
+}
+
+export async function loadAgentExecutionAudit(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<AgentExecutionAuditView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") {
+    return {
+      sourceKind: "synthetic-alpha", sourceLabel: "合成模式不执行 Agent", matterVersion: null,
+      snapshotHash: null, requestId: null, runs: [], proposals: [], receipts: [],
+    };
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/agent-executions`,
+    { headers: { Accept: "application/json" } },
+  );
+  const payload = (await response.json()) as PersistentAgentExecutionSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "Agent 审计快照不可用"));
+  }
+  return {
+    sourceKind: "persistent-preview", sourceLabel: "案件级 Agent 审计账本",
+    matterVersion: payload.matter_version, snapshotHash: payload.snapshot_hash,
+    requestId: response.headers.get("X-Request-ID"),
+    runs: payload.runs.map((item) => ({
+      runId: item.run_id, agentId: item.agent_id, agentVersion: item.agent_version,
+      policyManifestHash: item.policy_manifest_hash, inputHash: item.input_hash,
+      inputMatterVersion: item.input_matter_version, createdAt: item.created_at,
+    })),
+    proposals: payload.proposals.map((item) => ({
+      proposalId: item.proposal_id, runId: item.run_id, sequence: item.sequence,
+      skillId: item.skill_id, skillVersion: item.skill_version, toolId: item.tool_id,
+      approvalGate: item.approval_gate, requiredScopes: item.required_scopes,
+      inputHash: item.input_hash, rationaleHash: item.rationale_hash, createdAt: item.created_at,
+    })),
+    receipts: payload.receipts.map((item) => ({
+      receiptId: item.receipt_id, proposalId: item.proposal_id, status: item.status,
+      outputHash: item.output_hash, errorCode: item.error_code, executedAt: item.executed_at,
+    })),
   };
 }
 
