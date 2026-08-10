@@ -40,6 +40,7 @@ from case_kernel.formal_calculation_postgres import PersistentFormalCalculationS
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
+from case_kernel.store import InMemoryMatterStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
 from case_kernel.agent_execution_postgres import PersistentAgentExecutionSnapshot
@@ -198,6 +199,18 @@ class FakePersistentFactStore:
             payment_classifications=(),
             duplicate_groups=(),
         )
+
+
+class FakePersistentMatterStore:
+    """Marked test double for the separately guarded matter-creation path."""
+
+    persistent_test_double = True
+
+    def __init__(self) -> None:
+        self._delegate = InMemoryMatterStore()
+
+    def create(self, **kwargs):
+        return self._delegate.create(**kwargs)
 
 
 class FakePersistentEvidenceStore:
@@ -863,6 +876,29 @@ class PersistentApiTests(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 400, denied.text)
         self.assertNotIn("access-control-allow-origin", denied.headers)
+
+    def test_lead_lawyer_can_create_a_uuid_case_without_client_selected_identity(self) -> None:
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=FakePersistentFactStore(),
+                    matter_store=FakePersistentMatterStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        )
+        response = client.post(
+            "/v1/matters",
+            headers={"Idempotency-Key": "create-matter-001", "X-Actor": "forged-actor-is-ignored"},
+            json={"title": "测试甲借款纠纷"},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        payload = response.json()
+        self.assertEqual(payload["command_name"], "CREATE_MATTER")
+        self.assertEqual(payload["matter_version"], 1)
+        UUID(payload["matter_id"])
+        UUID(payload["audit_event_id"])
 
     def test_server_identity_drives_fact_candidate_without_actor_headers(self) -> None:
         store = FakePersistentFactStore()

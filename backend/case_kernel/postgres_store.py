@@ -31,6 +31,7 @@ from .models import (
     SubmissionBundle,
     SubmissionLifecycle,
     SubmissionValidity,
+    Role,
 )
 from .store import StoredCommand
 
@@ -47,6 +48,8 @@ class PostgresMatterStore:
         _validate_identifiers(matter_id=matter.matter_id, firm_id=actor.firm_id, actor_id=actor.actor_id)
         if matter.firm_id != actor.firm_id:
             raise ValueError("matter firm must match actor firm")
+        if Role.LEAD_LAWYER not in actor.roles:
+            raise PermissionError("only a lead lawyer can create a matter")
         _require_key(idempotency_key)
         payload = {"command": "CREATE_MATTER", "title": matter.title}
         payload_hash = _payload_hash(payload)
@@ -68,6 +71,17 @@ class PostgresMatterStore:
                 VALUES (%s, %s, %s, %s, %s)
                 """,
                 (matter.matter_id, actor.firm_id, matter.title, matter.stage.value, matter.version),
+            )
+            # A new case without an active owner is unusable: every subsequent
+            # evidence or ledger command performs database role checks.  Grant
+            # the creator the same lead role that the workflow required for
+            # creation, in the very transaction that creates the matter.
+            connection.execute(
+                """
+                INSERT INTO matter_actor_roles (matter_id, firm_id, user_id, role)
+                VALUES (%s, %s, %s, 'LEAD_LAWYER')
+                """,
+                (matter.matter_id, actor.firm_id, actor.actor_id),
             )
             event = AuditEvent.create(
                 matter=matter,

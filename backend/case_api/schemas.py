@@ -246,6 +246,32 @@ class CaseLedgerReceiptResponse(BaseModel):
     object_id: UUID
 
 
+class PersistentMatterCreateRequest(BaseModel):
+    """A deliberately small first-step case record.
+
+    Parties, amounts and assertions belong to the evidence-led review flow;
+    the first command records only the lawyer's neutral working title.
+    """
+
+    title: str = Field(min_length=2, max_length=160)
+
+    @field_validator("title")
+    @classmethod
+    def title_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("title is required")
+        return normalized
+
+
+class PersistentMatterCreateResponse(BaseModel):
+    command_name: Literal["CREATE_MATTER"]
+    idempotency_key: str
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    audit_event_id: UUID
+
+
 class PersistentFactResponse(BaseModel):
     fact_id: UUID
     original_text: str

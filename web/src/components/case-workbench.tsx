@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { CalculationWorkbench } from "@/components/calculation-workbench";
 import { EvidenceWorkbench as EvidenceManifestWorkbench } from "@/components/evidence-workbench";
 import { FactsWorkbench } from "@/components/facts-workbench";
@@ -8,8 +8,13 @@ import { LegalWorkbench } from "@/components/legal-workbench";
 import { IdentitySecurityWorkbench } from "@/components/identity-security-workbench";
 import { SubmissionWorkbench } from "@/components/submission-workbench";
 import {
+  activatePersistentMatter,
   caseDataSourceConfig,
+  createPersistentMatter,
+  getPersistentWorkspaceTarget,
   loadCaseReview,
+  restoreActivePersistentMatter,
+  type CaseDataSourceConfig,
   type CaseReviewView,
 } from "@/lib/case-data-source";
 import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
@@ -31,10 +36,12 @@ const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; hr
 
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
   const [view] = useState<View>(initialView);
+  const [sourceConfig, setSourceConfig] = useState<CaseDataSourceConfig>(caseDataSourceConfig);
   const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
   const currentStageIndex = view === "bundle" ? 4 : view === "legal" || view === "calculation" ? 2 : 1;
-  const syntheticSource = caseDataSourceConfig.kind === "synthetic-alpha";
+  const syntheticSource = sourceConfig.kind === "synthetic-alpha";
+  const workspaceAwaitingCase = sourceConfig.kind === "persistent-disabled" && getPersistentWorkspaceTarget() !== null;
 
   useEffect(() => {
     let cancelled = false;
@@ -68,18 +75,26 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
     };
   }, []);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const restored = restoreActivePersistentMatter();
+      setSourceConfig((current) => current === restored ? current : restored);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   return (
     <main className={styles.shell}>
       <header className={styles.topbar}>
         <div className={styles.brand} aria-label="律所案件 AI 工作台">
           <span className={styles.brandMark}>案</span>
           <span>律所案件 AI 工作台</span>
-          <small>{syntheticSource ? "内部合成 Alpha" : caseDataSourceConfig.label}</small>
+          <small>{syntheticSource ? "内部合成 Alpha" : sourceConfig.label}</small>
         </div>
         <div className={styles.topbarMeta}>
-          <span>{syntheticSource ? "当前角色：主办律师（合成）" : "身份来源：服务端会话与数据库案件角色"}</span>
+          <span>{syntheticSource ? "当前角色：主办律师（合成）" : workspaceAwaitingCase ? "先建立本案的受审计台账" : "身份来源：服务端会话与数据库案件角色"}</span>
           <span className={styles.dot} aria-hidden="true" />
-          <span>{syntheticSource ? "不连接真实案件材料" : caseDataSourceConfig.kind === "persistent-disabled" ? "持久化数据源未启用" : "持久化内部预览"}</span>
+          <span>{syntheticSource ? "不连接真实案件材料" : workspaceAwaitingCase ? "等待新建案件" : sourceConfig.kind === "persistent-disabled" ? "持久化数据源未启用" : "持久化内部预览"}</span>
           {desktopRuntime ? (
             <>
               <span className={styles.dot} aria-hidden="true" />
@@ -94,8 +109,8 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
       <section className={styles.caseHeader} aria-labelledby="case-title">
         <div>
           <p className={styles.eyebrow}>{syntheticSource ? `案件卷宗 / ${syntheticMatter.matterNo}` : "持久化案件 / 由版本化快照读取"}</p>
-          <h1 id="case-title">{syntheticSource ? syntheticMatter.title : caseDataSourceConfig.kind === "persistent-disabled" ? "持久化案件尚未启用" : "案件标题将在事实台账中核验"}</h1>
-          <p className={styles.caseSubline}>{syntheticSource ? `${syntheticMatter.client} · ${syntheticMatter.court} · 争议对方：${syntheticMatter.opponent}` : caseDataSourceConfig.kind === "persistent-disabled" ? caseDataSourceConfig.reason : "不会以合成案件内容回退或覆盖持久化案件状态"}</p>
+          <h1 id="case-title">{syntheticSource ? syntheticMatter.title : workspaceAwaitingCase ? "建立案件工作区" : sourceConfig.kind === "persistent-disabled" ? "持久化案件尚未启用" : "案件标题将在事实台账中核验"}</h1>
+          <p className={styles.caseSubline}>{syntheticSource ? `${syntheticMatter.client} · ${syntheticMatter.court} · 争议对方：${syntheticMatter.opponent}` : workspaceAwaitingCase ? "先建立一个受审计的案件台账，再选择本地案卷文件夹。" : sourceConfig.kind === "persistent-disabled" ? sourceConfig.reason : "不会以合成案件内容回退或覆盖持久化案件状态"}</p>
         </div>
         <div className={styles.deadline}>
           <span>{syntheticSource ? "最近期限" : "期限状态"}</span>
@@ -110,6 +125,14 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           <nav>
             {navItems.map((item) => {
               const active = item.id === view;
+              const lockedUntilCaseCreated = workspaceAwaitingCase && item.id !== "overview" && item.id !== "security";
+              if (lockedUntilCaseCreated) {
+                return (
+                  <button className={styles.navItem} key={item.id} disabled type="button">
+                    <span>{item.label}</span><small>先新建案件</small>
+                  </button>
+                );
+              }
               if (item.href) {
                 return (
                   <a
@@ -146,7 +169,12 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           </ol>
         </aside>
 
-        {view === "overview" ? (
+        {view === "overview" && workspaceAwaitingCase ? (
+          <PersistentWorkspaceSetup onMatterCreated={(matterId) => {
+            activatePersistentMatter(matterId);
+            setSourceConfig(caseDataSourceConfig);
+          }} />
+        ) : view === "overview" ? (
           <Overview unresolvedCount={unresolvedCount} syntheticSource={syntheticSource} />
         ) : view === "evidence" ? (
           <EvidenceManifestWorkbench />
@@ -162,6 +190,50 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
         <span>所有结论、取舍与锁定均须由具备权限的人员在后续流程确认</span>
       </footer>
     </main>
+  );
+}
+
+function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matterId: string) => void }) {
+  const [title, setTitle] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function createMatter(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setNotice(null);
+    setBusy(true);
+    try {
+      const receipt = await createPersistentMatter(title);
+      onMatterCreated(receipt.matterId);
+    } catch (reason: unknown) {
+      setNotice(reason instanceof Error ? reason.message : "案件未创建；请保留当前页面后重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className={styles.content} aria-label="建立案件工作区">
+      <div className={styles.contentTopline}><span>建立案件工作区</span><span className={styles.statusPill}>尚未读取任何材料</span></div>
+      <article className={styles.nextDecision}>
+        <div>
+          <p className={styles.eyebrow}>第一步</p>
+          <h2>先建立案件，再选择资料文件夹</h2>
+          <p>此时只记录中性的工作名称。双方、金额、期限和诉讼立场必须从原始材料中核验，不会被表单预填或推定。</p>
+        </div>
+      </article>
+      <form className={styles.caseSetupForm} onSubmit={(event) => void createMatter(event)}>
+        <label>
+          <span>案件工作名称</span>
+          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：测试甲借款纠纷" required />
+        </label>
+        <div className={styles.caseSetupActions}>
+          <button type="submit" disabled={busy || title.trim().length < 2}>{busy ? "正在建立…" : "建立案件并进入材料接收"}</button>
+          <small>建立后，系统才会打开“选择资料文件夹”的受控权限和证据盘点流程。</small>
+        </div>
+        {notice ? <p className={styles.caseSetupNotice}>{notice}</p> : null}
+      </form>
+    </section>
   );
 }
 

@@ -108,6 +108,7 @@ def build_desktop_persistent_runtime(
     folder_grants = LocalFolderGrantRegistry()
     dependencies = PersistentApiDependencies(
         settings=settings,
+        matter_store=services.matter_store,
         case_ledger_store=services.case_ledger_store,
         identity_resolver=identity.session_authority,
         desktop_session_authority=identity.session_authority,

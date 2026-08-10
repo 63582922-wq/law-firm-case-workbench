@@ -12,6 +12,17 @@ export type CaseDataSourceConfig =
   | { kind: "persistent-preview"; label: "持久化内部预览"; apiBase: string | null; matterId: string }
   | { kind: "persistent-disabled"; label: "持久化模式未启用"; reason: string };
 
+export type PersistentWorkspaceTarget = {
+  apiBase: string | null;
+};
+
+export type PersistentMatterCreateReceipt = {
+  matterId: string;
+  matterVersion: number;
+  auditEventId: string;
+  requestId: string | null;
+};
+
 export type CaseReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1074,11 +1085,61 @@ type PersistentExternalRequestSnapshot = {
 
 type ErrorEnvelope = { code?: string; message?: string; request_id?: string; detail?: string };
 
-export const caseDataSourceConfig = resolveCaseDataSourceConfig({
+const ACTIVE_MATTER_STORAGE_KEY = "lawcase.active-persistent-matter.v1";
+const MATTER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export let caseDataSourceConfig = resolveCaseDataSourceConfig({
   mode: process.env.NEXT_PUBLIC_CASE_DATA_SOURCE,
   apiBase: process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE,
   matterId: process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID,
 });
+
+/**
+ * A persistent desktop can be ready before the first case exists.  Keep that
+ * state distinct from a malformed data-source configuration so the lawyer's
+ * first action is a real audited create command, not an example case.
+ */
+export function getPersistentWorkspaceTarget(): PersistentWorkspaceTarget | null {
+  if ((process.env.NEXT_PUBLIC_CASE_DATA_SOURCE?.trim() || "") !== "persistent-preview") return null;
+  if (process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID?.trim()) return null;
+  const apiBase = process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE?.trim().replace(/\/$/, "") || "";
+  if (apiBase && !isAllowedPreviewOrigin(apiBase)) return null;
+  return { apiBase: apiBase || null };
+}
+
+export function restoreActivePersistentMatter(): CaseDataSourceConfig {
+  const target = getPersistentWorkspaceTarget();
+  if (!target || typeof window === "undefined") return caseDataSourceConfig;
+  const matterId = window.sessionStorage.getItem(ACTIVE_MATTER_STORAGE_KEY)?.trim() || "";
+  if (!MATTER_ID_PATTERN.test(matterId)) {
+    if (matterId) window.sessionStorage.removeItem(ACTIVE_MATTER_STORAGE_KEY);
+    return caseDataSourceConfig;
+  }
+  if (caseDataSourceConfig.kind === "persistent-preview" && caseDataSourceConfig.matterId === matterId) {
+    return caseDataSourceConfig;
+  }
+  caseDataSourceConfig = {
+    kind: "persistent-preview",
+    label: "持久化内部预览",
+    apiBase: target.apiBase,
+    matterId,
+  };
+  return caseDataSourceConfig;
+}
+
+export function activatePersistentMatter(matterId: string): CaseDataSourceConfig {
+  const target = getPersistentWorkspaceTarget();
+  if (!target || !MATTER_ID_PATTERN.test(matterId)) throw new Error("案件工作区尚未就绪，未切换案件。");
+  if (typeof window === "undefined") throw new Error("案件只能在已登记的桌面工作台中激活。");
+  window.sessionStorage.setItem(ACTIVE_MATTER_STORAGE_KEY, matterId);
+  caseDataSourceConfig = {
+    kind: "persistent-preview",
+    label: "持久化内部预览",
+    apiBase: target.apiBase,
+    matterId,
+  };
+  return caseDataSourceConfig;
+}
 
 export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: string; matterId?: string }): CaseDataSourceConfig {
   const mode = input.mode?.trim() || "synthetic-alpha";
@@ -1094,10 +1155,54 @@ export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: st
   if (apiBase && !isAllowedPreviewOrigin(apiBase)) {
     return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "持久化服务地址不符合本机或 HTTPS 安全边界。" };
   }
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(matterId)) {
+  if (!MATTER_ID_PATTERN.test(matterId)) {
     return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "案件标识不是有效 UUID，已停止读取。" };
   }
   return { kind: "persistent-preview", label: "持久化内部预览", apiBase: apiBase || null, matterId };
+}
+
+export async function createPersistentMatter(title: string): Promise<PersistentMatterCreateReceipt> {
+  const target = getPersistentWorkspaceTarget();
+  const normalizedTitle = title.trim();
+  if (!target) throw new Error("新建案件服务尚未在已登记桌面工作台中启用。");
+  if (normalizedTitle.length < 2 || normalizedTitle.length > 160) {
+    throw new Error("案件名称应为 2 至 160 个字符。");
+  }
+  const response = await persistentApiFetch(target, "/v1/matters", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "Idempotency-Key": crypto.randomUUID(),
+    },
+    body: JSON.stringify({ title: normalizedTitle }),
+  });
+  const payload = (await response.json()) as {
+    command_name?: string;
+    matter_id?: string;
+    matter_version?: number;
+    audit_event_id?: string;
+  } | ErrorEnvelope;
+  if (
+    !response.ok ||
+    !("matter_id" in payload) ||
+    payload.command_name !== "CREATE_MATTER" ||
+    !MATTER_ID_PATTERN.test(payload.matter_id ?? "") ||
+    !Number.isInteger(payload.matter_version) ||
+    (payload.matter_version ?? 0) < 1 ||
+    !MATTER_ID_PATTERN.test(payload.audit_event_id ?? "")
+  ) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案件未创建；系统没有写入任何示例案件。"));
+  }
+  const matterId = payload.matter_id ?? "";
+  const matterVersion = payload.matter_version ?? 0;
+  const auditEventId = payload.audit_event_id ?? "";
+  return {
+    matterId,
+    matterVersion,
+    auditEventId,
+    requestId: response.headers.get("X-Request-ID"),
+  };
 }
 
 export async function loadCaseReview(config: CaseDataSourceConfig = caseDataSourceConfig): Promise<CaseReviewView> {

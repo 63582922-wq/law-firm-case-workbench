@@ -32,7 +32,7 @@ from case_kernel.evidence_manifest_postgres import (
     PersistentEvidenceSnapshot,
     PostgresEvidenceManifestStore,
 )
-from case_kernel.errors import IdempotencyConflict, VersionConflict
+from case_kernel.errors import AuthorizationDenied, IdempotencyConflict, VersionConflict
 from case_kernel.fact_claim_ledger import AssertionOrigin, ClaimResponsePosition, FactStatus
 from case_kernel.calculation_engine import AllocationPolicy
 from case_kernel.formal_calculation_postgres import (
@@ -52,6 +52,8 @@ from case_kernel.official_source_capture_postgres import (
     PostgresOfficialSourceCaptureStore,
 )
 from case_kernel.models import Actor
+from case_kernel.postgres_store import PostgresMatterStore
+from case_kernel.workflow import MatterWorkflow
 from case_kernel.local_access_grants import (
     LocalFolderAccessBlocked,
     LocalFolderGrantRegistry,
@@ -126,6 +128,8 @@ from .schemas import (
     PersistentLocalFolderScanRequest,
     PersistentLocalFolderSelectionRequest,
     PersistentLocalFolderSelectionResponse,
+    PersistentMatterCreateRequest,
+    PersistentMatterCreateResponse,
     PersistentOriginalPageAccessRequest,
     PersistentOriginalPageAccessResponse,
     PersistentCaseReviewSummaryResponse,
@@ -240,6 +244,10 @@ class PersistentFactLedgerPort(Protocol):
     def resolve_duplicate_group(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def get_case_snapshot(self, *, matter_id: str, actor: Actor): ...
+
+
+class PersistentMatterStorePort(Protocol):
+    def create(self, **kwargs): ...
 
 
 class PersistentEvidenceManifestPort(Protocol):
@@ -437,6 +445,7 @@ class PersistentApiDependencies:
     settings: RuntimeSettings
     case_ledger_store: PersistentFactLedgerPort
     identity_resolver: ServerIdentityResolver
+    matter_store: PersistentMatterStorePort | None = None
     desktop_session_authority: DesktopSessionAuthority | None = None
     evidence_manifest_store: PersistentEvidenceManifestPort | None = None
     formal_calculation_store: PersistentFormalCalculationPort | None = None
@@ -464,6 +473,9 @@ class PersistentApiDependencies:
             # objects cannot accidentally become a production persistence port.
             if not getattr(self.case_ledger_store, "persistent_test_double", False):
                 raise ValueError("persistent API requires the guarded PostgreSQL case ledger store")
+        if self.matter_store is not None and not isinstance(self.matter_store, PostgresMatterStore):
+            if not getattr(self.matter_store, "persistent_test_double", False):
+                raise ValueError("persistent API requires the guarded PostgreSQL matter store")
         if self.evidence_manifest_store is not None and not isinstance(
             self.evidence_manifest_store, PostgresEvidenceManifestStore
         ):
@@ -630,6 +642,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             raise PersistentEvidenceServiceUnavailable("evidence Manifest persistence is not configured")
         return dependencies.evidence_manifest_store
 
+    def get_matter_workflow() -> MatterWorkflow:
+        if dependencies.matter_store is None:
+            raise PersistentRequestBlocked("matter creation persistence is not configured")
+        return MatterWorkflow(dependencies.matter_store)
+
     def get_formal_calculation_store() -> PersistentFormalCalculationPort:
         if dependencies.formal_calculation_store is None:
             raise PersistentCalculationServiceUnavailable(
@@ -722,6 +739,11 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             "AUTHENTICATION_REQUIRED",
             "登录状态无效或已过期，请重新登录。",
         )
+
+    @app.exception_handler(AuthorizationDenied)
+    async def workflow_authorization_handler(_: Request, exc: AuthorizationDenied):
+        del exc
+        return _error(status.HTTP_403_FORBIDDEN, "PERMISSION_DENIED", "你没有新建案件的权限。")
 
     @app.exception_handler(PermissionError)
     async def permission_handler(_: Request, exc: PermissionError):
@@ -916,6 +938,31 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
                 session_id=UUID(grant.session_id),
                 expires_at=grant.expires_at,
             )
+
+    @app.post(
+        "/v1/matters",
+        response_model=PersistentMatterCreateResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["matters"],
+    )
+    async def create_persistent_matter(
+        body: PersistentMatterCreateRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+    ) -> PersistentMatterCreateResponse:
+        receipt = get_matter_workflow().create_matter(
+            identity.actor,
+            matter_id=str(uuid4()),
+            title=body.title,
+            idempotency_key=idempotency_key,
+        )
+        return PersistentMatterCreateResponse(
+            command_name="CREATE_MATTER",
+            idempotency_key=receipt.idempotency_key,
+            matter_id=UUID(receipt.matter_id),
+            matter_version=receipt.matter_version,
+            audit_event_id=UUID(receipt.audit_event_id),
+        )
 
     @app.get(
         "/v1/matters/{matter_id}/snapshot",
