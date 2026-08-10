@@ -3272,6 +3272,35 @@ def create_persistent_app(
         )
 
     @app.post(
+        "/v1/native-model/matters/{matter_id}/external-requests/{request_id}/attempts",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        include_in_schema=False,
+    )
+    async def record_native_model_attempt(
+        matter_id: UUID,
+        request_id: UUID,
+        request: Request,
+        desktop_session_id: UUID,
+        body: PersistentExternalRequestAttemptRequest,
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
+    ) -> CaseLedgerReceiptResponse:
+        """Append one native-only attempt receipt without trusting a WebView actor."""
+        identity = require_native_parent(request, str(desktop_session_id))
+        worker = dependencies.native_model_worker
+        if worker is None or worker.firm_id != identity.actor.firm_id:
+            raise PersistentAuthenticationBlocked("native OCR worker identity is not configured")
+        # The request body is schema-bound; the native client cannot inject a
+        # raw provider URL, prompt, case body or arbitrary audit fields.
+        return _receipt(external_store.record_external_attempt(
+            matter_id=str(matter_id), actor=worker, expected_version=body.expected_version,
+            idempotency_key=f"native-model-attempt:{request_id}:{body.status}:{uuid4()}",
+            request_id=str(request_id), status=body.status,
+            provider_request_ref_hash=body.provider_request_ref_hash,
+            output_hash=body.output_hash, error_code=body.error_code,
+        ))
+
+    @app.post(
         "/v1/matters/{matter_id}/evidence-derivatives/{derivative_id}/access",
         response_model=PersistentArtifactAccessResponse,
         tags=["evidence-access"],
