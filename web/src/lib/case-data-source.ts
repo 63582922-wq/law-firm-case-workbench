@@ -328,6 +328,12 @@ export type OfficialSourceCaptureReceipt = {
   requestId: string | null;
 };
 
+export type LegalRuleVersionReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1457,6 +1463,114 @@ export async function registerReviewedOfficialSourceCapture(
   }
   if (payload.object_type !== "OFFICIAL_LEGAL_SOURCE_SNAPSHOT") {
     throw new Error("正式法源登记回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function approveLprMultipleRuleVersion(
+  input: {
+    expectedVersion: number;
+    ruleId: string;
+    ruleVersion: string;
+    issueKey: string;
+    sourceSnapshotId: string;
+    parameterSourceSnapshotId: string;
+    parameterEvidenceLocator: string;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+    triggerEventKind: "CONTRACT_SIGNED" | "DISBURSEMENT" | "PAYMENT" | "DEFAULT" | "CLAIM_FILED" | "CASE_ACCEPTED" | "JUDGMENT";
+    rateMultiplier: string;
+    requiredFactKeys: string[];
+    transitionRuleVersions: string[];
+    conflictSet: string | null;
+    priority: number;
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LegalRuleVersionReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以批准正式 LPR 规则。");
+  }
+  const normalizeText = (value: string, label: string) => {
+    const normalized = value.trim();
+    if (!normalized) throw new Error(`请填写${label}。`);
+    return normalized;
+  };
+  const ruleId = normalizeText(input.ruleId, "规则标识");
+  const ruleVersion = normalizeText(input.ruleVersion, "规则版本");
+  const issueKey = normalizeText(input.issueKey, "争点标识");
+  const parameterEvidenceLocator = normalizeText(input.parameterEvidenceLocator, "官方 LPR 精确定位");
+  const multiplier = normalizeText(input.rateMultiplier, "LPR 倍数");
+  const normalizedFacts = [...new Set(input.requiredFactKeys.map((item) => item.trim()).filter(Boolean))];
+  const normalizedTransitions = [...new Set(input.transitionRuleVersions.map((item) => item.trim()).filter(Boolean))];
+  if (!normalizedFacts.length) throw new Error("请至少选择一项已批准的案件事实锚点。");
+  if (!/^\d+(?:\.\d+)?$/.test(multiplier) || Number(multiplier) <= 0 || Number(multiplier) > 100) {
+    throw new Error("LPR 倍数必须为大于 0 且不超过 100 的十进制数。");
+  }
+  const approvalHash = await sha256Text([
+    "legal-rule-version-approval-v2",
+    config.matterId,
+    String(input.expectedVersion),
+    ruleId,
+    ruleVersion,
+    issueKey,
+    input.sourceSnapshotId,
+    input.parameterSourceSnapshotId,
+    parameterEvidenceLocator,
+    input.effectiveFrom,
+    input.effectiveTo ?? "OPEN_ENDED",
+    input.triggerEventKind,
+    "LPR_MULTIPLE",
+    multiplier,
+    normalizedFacts.join(","),
+    normalizedTransitions.join(","),
+    input.conflictSet?.trim() || "NO_CONFLICT_SET",
+    String(input.priority),
+    "BASE_RATE_DERIVED_FROM_AUTHENTICATED_OFFICIAL_OBSERVATION",
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/legal-rule-versions`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        rule_id: ruleId,
+        rule_version: ruleVersion,
+        issue_key: issueKey,
+        source_snapshot_id: input.sourceSnapshotId,
+        parameter_source_snapshot_id: input.parameterSourceSnapshotId,
+        parameter_evidence_locator: parameterEvidenceLocator,
+        effective_from: input.effectiveFrom,
+        effective_to: input.effectiveTo,
+        trigger_event_kind: input.triggerEventKind,
+        formula_kind: "LPR_MULTIPLE",
+        rate_multiplier: multiplier,
+        required_fact_keys: normalizedFacts,
+        transition_rule_versions: normalizedTransitions,
+        conflict_set: input.conflictSet?.trim() || null,
+        priority: input.priority,
+        approval_hash: approvalHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在规则审批确认前中断。请刷新法律快照核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "LPR 规则未获批准"));
+  }
+  if (payload.object_type !== "LEGAL_RULE_VERSION") {
+    throw new Error("规则审批回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,

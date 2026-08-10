@@ -5,6 +5,7 @@ import {
   caseDataSourceConfig,
   loadLegalReview,
   loadOfficialSourceCaptureReview,
+  approveLprMultipleRuleVersion,
   queueOfficialSourceCapture,
   registerReviewedOfficialSourceCapture,
   reviewOfficialSourceCapture,
@@ -26,6 +27,24 @@ export function LegalWorkbench() {
   const [captureTargets, setCaptureTargets] = useState<Record<string, string>>({});
   const [provisionLocators, setProvisionLocators] = useState<Record<string, string>>({});
   const [licenseBases, setLicenseBases] = useState<Record<string, string>>({});
+  const [ruleBusy, setRuleBusy] = useState(false);
+  const [ruleNotice, setRuleNotice] = useState<string | null>(null);
+  const [ruleApproved, setRuleApproved] = useState(false);
+  const [lprRule, setLprRule] = useState({
+    ruleId: "",
+    ruleVersion: "",
+    issueKey: "",
+    sourceSnapshotId: "",
+    parameterSourceSnapshotId: "",
+    parameterEvidenceLocator: "",
+    effectiveFrom: "",
+    effectiveTo: "",
+    triggerEventKind: "CLAIM_FILED" as const,
+    rateMultiplier: "4",
+    conflictSet: "",
+    priority: "100",
+    requiredFactKeys: [] as string[],
+  });
 
   useEffect(() => {
     let active = true;
@@ -156,6 +175,69 @@ export function LegalWorkbench() {
       setCaptureBusy(null);
     }
   }
+
+  async function approveLprRule() {
+    if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
+    if (!ruleApproved) {
+      setRuleNotice("请先确认：基准利率由已认证官方观察记录自动读取，不能手工填入或修改。");
+      return;
+    }
+    const priority = Number(lprRule.priority);
+    if (!Number.isInteger(priority) || priority < 0 || priority > 1_000_000) {
+      setRuleNotice("规则优先级必须是 0 至 1000000 的整数。");
+      return;
+    }
+    setRuleBusy(true);
+    setRuleNotice(null);
+    try {
+      const receipt = await approveLprMultipleRuleVersion({
+        expectedVersion: review.matterVersion,
+        ruleId: lprRule.ruleId,
+        ruleVersion: lprRule.ruleVersion,
+        issueKey: lprRule.issueKey,
+        sourceSnapshotId: lprRule.sourceSnapshotId,
+        parameterSourceSnapshotId: lprRule.parameterSourceSnapshotId,
+        parameterEvidenceLocator: lprRule.parameterEvidenceLocator,
+        effectiveFrom: lprRule.effectiveFrom,
+        effectiveTo: lprRule.effectiveTo || null,
+        triggerEventKind: lprRule.triggerEventKind,
+        rateMultiplier: lprRule.rateMultiplier,
+        requiredFactKeys: lprRule.requiredFactKeys,
+        transitionRuleVersions: [],
+        conflictSet: lprRule.conflictSet || null,
+        priority,
+      });
+      const refreshed = await loadLegalReview();
+      setReview(refreshed);
+      setRuleNotice(`LPR 规则已进入审批链；案件版本更新为 ${receipt.matterVersion}。基准值仍仅由官方观察记录派生。`);
+      setRuleApproved(false);
+    } catch (reason: unknown) {
+      setRuleNotice(reason instanceof Error ? reason.message : "LPR 规则未获批准");
+    } finally {
+      setRuleBusy(false);
+    }
+  }
+
+  const legalFormulaSources = review.sources.filter(
+    (source) => source.snapshotId
+      && source.verificationStatus === "VERIFIED"
+      && source.licenseStatus === "ACTIVE"
+      && source.licenseBasis
+      && source.licenseReviewHash
+      && ["PRIMARY_LAW", "JUDICIAL_INTERPRETATION"].includes(source.authorityLevel),
+  );
+  const lprParameterSources = review.sources.filter(
+    (source) => source.snapshotId
+      && source.sourceId === "CFETS-LPR-HISTORY"
+      && source.authorityLevel === "OFFICIAL_RATE_DATA"
+      && source.verificationStatus === "VERIFIED"
+      && source.licenseStatus === "ACTIVE"
+      && source.licenseBasis
+      && source.licenseReviewHash,
+  );
+  const availableFactKeys = [...new Set(review.factBindings
+    .filter((binding) => binding.status === "APPROVED")
+    .map((binding) => binding.factKey))];
 
   return (
     <section className={styles.legalArea} aria-label="法律规则">
@@ -406,8 +488,37 @@ export function LegalWorkbench() {
       <section className={styles.legalPanel} aria-labelledby="rule-versions-title">
         <div className={styles.legalPanelHeading}>
           <div><p className={styles.eyebrow}>规则层</p><h3 id="rule-versions-title">规则版本与案件事实锚点</h3></div>
-          <span>审批动作不在只读页执行</span>
+          <span>{review.status === "reviewable" ? "写入动作受案件版本与律师确认约束" : "发现模式不允许写入"}</span>
         </div>
+        {review.status === "reviewable" && (
+          <form className={styles.lprRuleForm} onSubmit={(event) => { event.preventDefault(); void approveLprRule(); }}>
+            <div className={styles.lprRuleFormHeading}>
+              <div><strong>建立 LPR 倍数规则</strong><small>仅用于已完成法源登记的案件；这不是利息结论，也不会启动计算。</small></div>
+              <span>基准利率：系统从官方记录读取</span>
+            </div>
+            <div className={styles.lprRuleFields}>
+              <label><span>规则标识</span><input required value={lprRule.ruleId} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleId: event.target.value }))} placeholder="例如 private-lending-lpr-cap" /></label>
+              <label><span>规则版本</span><input required value={lprRule.ruleVersion} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleVersion: event.target.value }))} placeholder="例如 PRIVATE-LENDING-LPR-2020-08" /></label>
+              <label><span>争点标识</span><input required value={lprRule.issueKey} onChange={(event) => setLprRule((prior) => ({ ...prior, issueKey: event.target.value }))} placeholder="例如 interest_cap_after_2020_08_20" /></label>
+              <label><span>法律公式依据</span><select required value={lprRule.sourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, sourceSnapshotId: event.target.value }))}><option value="">选择已核验法律/司法解释快照</option>{legalFormulaSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {source.provisionLocator}</option>)}</select></label>
+              <label><span>官方 LPR 数据快照</span><select required value={lprRule.parameterSourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterSourceSnapshotId: event.target.value }))}><option value="">选择已登记中国货币网快照</option>{lprParameterSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {shortHash(source.contentSha256 ?? "")}</option>)}</select></label>
+              <label><span>官方记录精确定位</span><input required value={lprRule.parameterEvidenceLocator} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterEvidenceLocator: event.target.value }))} placeholder="例如 records[0]；必须与该快照匹配" /></label>
+              <label><span>生效起日</span><input required type="date" value={lprRule.effectiveFrom} onChange={(event) => setLprRule((prior) => ({ ...prior, effectiveFrom: event.target.value }))} /></label>
+              <label><span>生效止日（可空）</span><input type="date" value={lprRule.effectiveTo} onChange={(event) => setLprRule((prior) => ({ ...prior, effectiveTo: event.target.value }))} /></label>
+              <label><span>适用触发事件</span><select value={lprRule.triggerEventKind} onChange={(event) => setLprRule((prior) => ({ ...prior, triggerEventKind: event.target.value as typeof prior.triggerEventKind }))}>{["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"].map((item) => <option key={item} value={item}>{eventLabel(item)}</option>)}</select></label>
+              <label><span>LPR 倍数</span><input required inputMode="decimal" value={lprRule.rateMultiplier} onChange={(event) => setLprRule((prior) => ({ ...prior, rateMultiplier: event.target.value }))} /><small>只输入倍数；没有基准利率输入框。</small></label>
+              <label><span>冲突集合（可空）</span><input value={lprRule.conflictSet} onChange={(event) => setLprRule((prior) => ({ ...prior, conflictSet: event.target.value }))} placeholder="例如 private-lending-interest-cap" /></label>
+              <label><span>优先级</span><input required inputMode="numeric" value={lprRule.priority} onChange={(event) => setLprRule((prior) => ({ ...prior, priority: event.target.value }))} /></label>
+            </div>
+            <fieldset className={styles.lprFactKeys}>
+              <legend>规则所需事实锚点</legend>
+              {availableFactKeys.length ? availableFactKeys.map((factKey) => <label key={factKey}><input type="checkbox" checked={lprRule.requiredFactKeys.includes(factKey)} onChange={(event) => setLprRule((prior) => ({ ...prior, requiredFactKeys: event.target.checked ? [...prior.requiredFactKeys, factKey] : prior.requiredFactKeys.filter((item) => item !== factKey) }))} />{factKey}</label>) : <small>没有已批准事实锚点，不能建立正式规则。</small>}
+            </fieldset>
+            <label className={styles.lprApprovalCheck}><input checked={ruleApproved} onChange={(event) => setRuleApproved(event.target.checked)} type="checkbox" /><span>我确认：本次只批准规则结构、法律依据快照、官方 LPR 快照、定位与倍数；系统将从认证的官方观察记录读取一年期 LPR，且不接受人工利率。</span></label>
+            <div className={styles.lprRuleActions}><button disabled={ruleBusy || !legalFormulaSources.length || !lprParameterSources.length || !availableFactKeys.length} type="submit">{ruleBusy ? "正在提交规则审批…" : "批准 LPR 规则"}</button><small>任一快照、许可、定位、事实锚点或案件版本不匹配，服务端会拒绝写入。</small></div>
+            {ruleNotice && <p className={styles.lprRuleNotice} role="status">{ruleNotice}</p>}
+          </form>
+        )}
         {review.ruleVersions.length ? (
           <div className={styles.legalRuleTable} role="table" aria-label="法律规则版本">
             <div className={`${styles.legalRuleRow} ${styles.legalRuleHead}`} role="row"><span>争点 / 版本</span><span>触发事件</span><span>公式</span><span>服务端年利率</span><span>所需事实</span></div>

@@ -217,6 +217,28 @@
 .legalRuleRow small { color: var(--ink-faint); font-size: 9px; }
 .legalRuleRow > span:nth-child(4) { color: var(--red); font: 600 14px var(--font-serif); }
 .legalRuleHead { min-height: 34px; color: var(--ink-faint); background: var(--sheet-muted); }
+.lprRuleForm { display: grid; gap: 15px; padding: 16px 17px 17px; border-bottom: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.lprRuleFormHeading { display: flex; justify-content: space-between; gap: 18px; align-items: start; }
+.lprRuleFormHeading > div { display: grid; gap: 4px; }
+.lprRuleFormHeading strong { color: var(--ink); font-size: 12px; }
+.lprRuleFormHeading small { color: var(--ink-faint); font-size: 10px; line-height: 1.55; }
+.lprRuleFormHeading > span { padding: 5px 7px; border: 1px solid #ddc99f; color: var(--ochre); background: var(--ochre-soft); font-size: 9px; white-space: nowrap; }
+.lprRuleFields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.lprRuleFields label { min-width: 0; display: grid; gap: 5px; }
+.lprRuleFields label > span, .lprFactKeys legend { color: var(--ink-soft); font-size: 10px; font-weight: 650; }
+.lprRuleFields input, .lprRuleFields select { min-width: 0; height: 31px; border: 1px solid var(--line-strong); border-radius: 3px; background: var(--paper); color: var(--ink); font: 11px var(--font-sans); padding: 5px 7px; }
+.lprRuleFields small { color: var(--ink-faint); font-size: 9px; line-height: 1.4; }
+.lprFactKeys { min-width: 0; padding: 11px 12px 12px; display: flex; flex-wrap: wrap; gap: 8px 13px; border: 1px solid var(--line); background: var(--sheet); }
+.lprFactKeys legend { padding: 0 4px; }
+.lprFactKeys label, .lprFactKeys small { color: var(--ink-soft); font-size: 10px; }
+.lprFactKeys label { display: inline-flex; gap: 5px; align-items: center; }
+.lprApprovalCheck { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; align-items: start; color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.lprApprovalCheck input { margin: 2px 0 0; }
+.lprRuleActions { display: flex; gap: 12px; align-items: center; }
+.lprRuleActions button { padding: 8px 10px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: 600 10px var(--font-sans); cursor: pointer; }
+.lprRuleActions button:disabled { opacity: .42; cursor: not-allowed; }
+.lprRuleActions small { color: var(--ink-faint); font-size: 9px; line-height: 1.5; }
+.lprRuleNotice { padding: 9px 10px; border: 1px solid #ddc99f; color: var(--ink-soft); background: var(--ochre-soft); font-size: 10px; line-height: 1.55; }
 .legalAnchors { padding: 15px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 15px; border-top: 1px solid var(--line-strong); background: var(--sheet-muted); }
 .legalAnchors > div { min-width: 0; padding: 11px 12px; display: grid; grid-template-columns: 1fr auto; gap: 6px; border: 1px solid var(--line); background: var(--sheet); }
 .legalAnchors strong, .legalAnchors span { font-size: 11px; }
