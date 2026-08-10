@@ -1566,3 +1566,17 @@ class PersistentExternalRequestSnapshotResponse(BaseModel):
     authorizations: tuple[dict[str, Any], ...]
     attempts: tuple[dict[str, Any], ...]
     snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PersistentOcrReviewCandidateDecisionRequest(BaseModel):
+    expected_version: int = Field(ge=1)
+    decision: Literal["ACCEPTED", "REJECTED"]
+    review_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=480)
+
+
+class PersistentOcrReviewCandidateSnapshotResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    candidates: tuple[dict[str, Any], ...]
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")

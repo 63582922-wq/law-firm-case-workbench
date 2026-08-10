@@ -206,6 +206,8 @@ from .schemas import (
     PersistentExternalRequestAttemptRequest,
     PersistentExternalRequestPreflightRequest,
     PersistentExternalRequestSnapshotResponse,
+    PersistentOcrReviewCandidateDecisionRequest,
+    PersistentOcrReviewCandidateSnapshotResponse,
     PersistentPaymentClassificationCandidateRequest,
     PersistentTransactionCandidateRequest,
     PersistentTransactionPageResponse,
@@ -403,6 +405,12 @@ class PersistentExternalRequestPort(Protocol):
 class PersistentOcrReviewCandidatePort(Protocol):
     def stage(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
+    def get_snapshot(self, *, matter_id: str, actor: Actor): ...
+
+    def read_text(self, *, matter_id: str, candidate_id: str, actor: Actor) -> str: ...
+
+    def review(self, **kwargs) -> CaseLedgerCommandReceipt: ...
+
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot: ...
 
 
@@ -449,6 +457,10 @@ class PersistentDocumentConsistencyServiceUnavailable(RuntimeError):
 
 
 class PersistentExternalRequestServiceUnavailable(RuntimeError):
+    pass
+
+
+class PersistentOcrReviewCandidateServiceUnavailable(RuntimeError):
     pass
 
 
@@ -737,6 +749,11 @@ def create_persistent_app(
                 "external request persistence is not configured"
             )
         return dependencies.external_request_store
+
+    def get_ocr_review_candidate_store() -> PersistentOcrReviewCandidatePort:
+        if dependencies.ocr_review_candidate_store is None:
+            raise PersistentOcrReviewCandidateServiceUnavailable("OCR review candidate persistence is not configured")
+        return dependencies.ocr_review_candidate_store
 
     def require_artifact_services() -> tuple[EphemeralArtifactAccessBroker, LocalEncryptedArtifactStore]:
         if dependencies.artifact_access_broker is None or dependencies.artifact_store is None:
@@ -1682,6 +1699,49 @@ def create_persistent_app(
     ) -> PersistentExternalRequestSnapshotResponse:
         snapshot = external_store.get_snapshot(matter_id=str(matter_id), actor=identity.actor)
         return PersistentExternalRequestSnapshotResponse.model_validate(snapshot.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/ocr-review-candidates",
+        response_model=PersistentOcrReviewCandidateSnapshotResponse,
+        tags=["ocr-review"],
+    )
+    async def get_ocr_review_candidates(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        store: Annotated[PersistentOcrReviewCandidatePort, Depends(get_ocr_review_candidate_store)],
+    ) -> PersistentOcrReviewCandidateSnapshotResponse:
+        return PersistentOcrReviewCandidateSnapshotResponse.model_validate(store.get_snapshot(matter_id=str(matter_id), actor=identity.actor).__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/ocr-review-candidates/{candidate_id}/content",
+        response_class=Response,
+        tags=["ocr-review"],
+    )
+    async def read_ocr_review_candidate(
+        matter_id: UUID,
+        candidate_id: UUID,
+        request: Request,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        store: Annotated[PersistentOcrReviewCandidatePort, Depends(get_ocr_review_candidate_store)],
+    ) -> Response:
+        _require_loopback(request)
+        return Response(content=store.read_text(matter_id=str(matter_id), candidate_id=str(candidate_id), actor=identity.actor), media_type="text/plain; charset=utf-8", headers={"Cache-Control": "no-store, private", "Content-Security-Policy": "sandbox", "X-Content-Type-Options": "nosniff"})
+
+    @app.post(
+        "/v1/matters/{matter_id}/ocr-review-candidates/{candidate_id}/review",
+        response_model=CaseLedgerReceiptResponse,
+        status_code=status.HTTP_201_CREATED,
+        tags=["ocr-review"],
+    )
+    async def review_ocr_review_candidate(
+        matter_id: UUID,
+        candidate_id: UUID,
+        body: PersistentOcrReviewCandidateDecisionRequest,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        idempotency_key: Annotated[str, Depends(get_idempotency_key)],
+        store: Annotated[PersistentOcrReviewCandidatePort, Depends(get_ocr_review_candidate_store)],
+    ) -> CaseLedgerReceiptResponse:
+        return _receipt(store.review(matter_id=str(matter_id), actor=identity.actor, expected_version=body.expected_version, idempotency_key=idempotency_key, candidate_id=str(candidate_id), decision=body.decision, review_hash=body.review_hash, reason=body.reason))
 
     @app.post(
         "/v1/matters/{matter_id}/external-requests",
