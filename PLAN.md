@@ -104,6 +104,8 @@
 
 实施记录：`2026-08-10 新增 Agent 文书候选持久化迁移：候选正文仍在 AES-GCM 受管对象库，SQL 只保存内容寻址对象键、内容/执行/复核/理由哈希、受限 Word/Excel Skill/Tool、一次律师决定以及审批后对应的 Agent Run/Proposal。RLS、不可删除触发器和状态约束仅允许 CANDIDATE 到精确 APPROVED 或 REJECTED；该迁移尚待 Store/Worker 接入及专用 PostgreSQL 实库执行。`
 
+实施记录：`2026-08-10 将 Agent 文书候选 Store 接入 RuntimeServices 与 desktop_persistent_runtime：持久化桌面装配只有在同一 Keychain AES-GCM 对象认证器可用时才注入该 Store，默认合成运行时保持空值；候选 Store 读取对象前再次验证密文解密后的字节数、SHA-256 与固定 JSON Schema。专用实库迁移、API/审阅 UI 与 Worker 领取仍待接入。`
+
 实施记录：`2026-08-10 在中文“身份与安全”页接入只读 Agent 执行审计区：可见当前 Agent、输入案件版本、策略/输入哈希、每项 Skill/Tool、审批门、范围及追加式回执状态；不显示提示词、案卷正文、对象键、令牌或供应商凭证，也不提供绕过系统 Worker 的执行按钮。生产身份/实库未配置时明确显示阻断状态`
 
 实施记录：`2026-08-10 完成外部模型/OCR/MCP 调用的追加式预授权账本与持久 API：主办/复核律师必须固定目的、字段标识、供应商、地域、保留/训练政策、服务、次数/成本上限、输入/授权哈希及到期时间；系统 Worker 才能写入提交/结果回执。过期、超过次数、终态重试和 UNKNOWN_SUBMISSION 后自动重试均被阻断，且不保存密钥、提示词或案卷正文。真实供应商适配器、模型配置/钥匙串接入、成本计量和桌面预授权 UI 待接入`

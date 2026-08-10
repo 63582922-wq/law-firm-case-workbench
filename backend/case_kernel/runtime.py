@@ -24,6 +24,7 @@ from .official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from .postgres_store import PostgresMatterStore
 from .reviewable_draft_postgres import PostgresReviewableDraftStore
 from .agent_execution_postgres import PostgresAgentExecutionStore
+from .agent_draft_candidate_postgres import PostgresAgentDraftCandidateStore
 from .document_consistency_postgres import PostgresDocumentConsistencyReviewStore
 from .external_request_postgres import PostgresExternalRequestStore
 from .submission_postgres import PostgresSubmissionStore
@@ -119,6 +120,7 @@ class RuntimeServices:
     submission_store: PostgresSubmissionStore | None
     reviewable_draft_store: PostgresReviewableDraftStore | None
     agent_execution_store: PostgresAgentExecutionStore | None
+    agent_draft_candidate_store: PostgresAgentDraftCandidateStore | None
     document_consistency_store: PostgresDocumentConsistencyReviewStore | None
     external_request_store: PostgresExternalRequestStore | None
     artifact_store: LocalEncryptedArtifactStore | None
@@ -152,6 +154,7 @@ def build_runtime_services(
             submission_store=None,
             reviewable_draft_store=None,
             agent_execution_store=None,
+            agent_draft_candidate_store=None,
             document_consistency_store=None,
             external_request_store=None,
             artifact_store=None,
@@ -190,6 +193,10 @@ def build_runtime_services(
             registry=default_case_skill_registry(
                 reviewable_office_drafts_enabled=office_converter is not None and artifact_store is not None
             ),
+        ),
+        agent_draft_candidate_store=PostgresAgentDraftCandidateStore(
+            dsn,
+            artifact_reader=artifact_reader,
         ),
         document_consistency_store=PostgresDocumentConsistencyReviewStore(dsn),
         external_request_store=PostgresExternalRequestStore(dsn),

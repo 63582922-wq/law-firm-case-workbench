@@ -39,7 +39,7 @@ class PostgresAgentDraftCandidateStore:
     _REGISTER = frozenset({Role.SYSTEM_WORKER})
     _APPROVE = frozenset({Role.LEAD_LAWYER, Role.REVIEWER})
 
-    def __init__(self, dsn: str, *, artifact_reader: Callable[[str, str], bytes]) -> None:
+    def __init__(self, dsn: str, *, artifact_reader: Callable[[str, str], bytes] | None) -> None:
         self._dsn = dsn
         self._reader = artifact_reader
 
@@ -70,6 +70,8 @@ class PostgresAgentDraftCandidateStore:
     def _validated_candidate(self, spec: AgentDraftCandidateSpec):
         if spec.document_kind not in {"DOCX", "XLSX"} or not spec.agent_id.strip() or not spec.agent_version.strip() or not 0 < spec.content_bytes <= 2 * 1024 * 1024: raise CaseLedgerPersistenceBlocked("Agent draft candidate metadata is invalid")
         _validate_sha256("content_sha256", spec.content_sha256); _validate_sha256("rationale_hash", spec.rationale_hash)
+        if self._reader is None:
+            raise CaseLedgerPersistenceBlocked("Agent draft candidate storage requires encrypted artifact authentication")
         raw = self._reader(spec.content_object_key, spec.content_sha256)
         if len(raw) != spec.content_bytes or sha256(raw).hexdigest() != spec.content_sha256: raise CaseLedgerPersistenceBlocked("encrypted Agent draft candidate object failed authentication")
         return prepare_docx_review_candidate(parse_docx_candidate(raw)) if spec.document_kind == "DOCX" else prepare_xlsx_review_candidate(parse_xlsx_candidate(raw))

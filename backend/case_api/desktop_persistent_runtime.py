@@ -95,6 +95,7 @@ def build_desktop_persistent_runtime(
             services.submission_store,
             services.reviewable_draft_store,
             services.agent_execution_store,
+            services.agent_draft_candidate_store,
             services.document_consistency_store,
             services.external_request_store,
             services.artifact_store,
