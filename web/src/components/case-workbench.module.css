@@ -172,7 +172,7 @@
 .legalPanelHeading h3 { margin-top: 5px; font: 600 18px var(--font-serif); }
 .legalPanelHeading > span { color: var(--ink-faint); font-size: 10px; text-align: right; }
 .legalSourceList { display: grid; }
-.legalSourceRow { min-height: 90px; padding: 14px 16px; display: grid; grid-template-columns: minmax(0, 1fr) 118px; gap: 15px; border-top: 1px solid var(--line); }
+.legalSourceRow { min-height: 90px; padding: 14px 16px; display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 15px; border-top: 1px solid var(--line); }
 .legalSourceRow:first-child { border-top: 0; }
 .legalSourceRow > div:first-child { min-width: 0; display: grid; align-content: start; gap: 5px; }
 .legalSourceRow strong { font-size: 12px; }
@@ -181,6 +181,8 @@
 .legalSourceState { display: grid; align-content: center; justify-items: end; gap: 5px; }
 .legalSourceState span { font-size: 10px; font-weight: 700; }
 .legalSourceState small { color: var(--ink-faint); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.legalCaptureTarget { display: grid; gap: 3px; width: 100%; color: var(--ink-soft); font-size: 9px; text-align: left; }
+.legalCaptureTarget select { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--paper); color: var(--ink); font: inherit; padding: 4px; }
 .legalGuardrail { padding: 19px 17px; border: 1px solid var(--line); background: var(--sheet-muted); }
 .legalGuardrail h3 { margin: 6px 0 13px; font: 600 18px var(--font-serif); line-height: 1.4; }
 .legalGuardrail ol { padding-left: 18px; display: grid; gap: 9px; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }

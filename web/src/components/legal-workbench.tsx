@@ -22,6 +22,7 @@ export function LegalWorkbench() {
   const [captureBusy, setCaptureBusy] = useState<string | null>(null);
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const [publicSourceConfirmed, setPublicSourceConfirmed] = useState(false);
+  const [captureTargets, setCaptureTargets] = useState<Record<string, string>>({});
   const [provisionLocators, setProvisionLocators] = useState<Record<string, string>>({});
   const [licenseBases, setLicenseBases] = useState<Record<string, string>>({});
 
@@ -77,7 +78,10 @@ export function LegalWorkbench() {
     return refreshed;
   }
 
-  async function queueCapture(source: LegalReviewView["sources"][number]) {
+  async function queueCapture(
+    source: LegalReviewView["sources"][number],
+    targetUrl: string,
+  ) {
     if (!captureReview || captureReview.matterVersion === null) return;
     if (!publicSourceConfirmed) {
       setCaptureNotice("请先确认本次只访问公开官方网站且不发送案件材料。");
@@ -86,7 +90,6 @@ export function LegalWorkbench() {
     setCaptureBusy(`queue:${source.sourceId}`);
     setCaptureNotice(null);
     try {
-      const targetUrl = officialCaptureTarget(source.sourceId, source.officialUrl);
       const receipt = await queueOfficialSourceCapture({
         sourceId: source.sourceId,
         targetUrl,
@@ -187,7 +190,10 @@ export function LegalWorkbench() {
             <span>{readySources}/{review.sources.length} 可进入规则</span>
           </div>
           <div className={styles.legalSourceList}>
-            {review.sources.map((source) => (
+            {review.sources.map((source) => {
+              const candidates = officialCaptureTargets(source.sourceId, source.officialUrl);
+              const targetUrl = captureTargets[source.sourceId] ?? candidates[0].url;
+              return (
               <article className={styles.legalSourceRow} key={`${source.sourceId}-${source.snapshotId ?? "discovery"}`}>
                 <div>
                   <strong>{source.publisher}</strong>
@@ -200,18 +206,33 @@ export function LegalWorkbench() {
                   </span>
                   <small>{source.contentSha256 ? shortHash(source.contentSha256) : "无内容哈希"}</small>
                   {captureReview?.status === "persistent" && source.verificationStatus !== "VERIFIED" && (
-                    <button
-                      className={styles.legalCaptureButton}
-                      disabled={!publicSourceConfirmed || captureBusy !== null}
-                      onClick={() => queueCapture(source)}
-                      type="button"
-                    >
-                      {captureBusy === `queue:${source.sourceId}` ? "正在入队…" : "授权抓取官方原文"}
-                    </button>
+                    <>
+                      {candidates.length > 1 && (
+                        <label className={styles.legalCaptureTarget}>
+                          <span>本次来源</span>
+                          <select
+                            aria-label={`${source.publisher}的本次抓取来源`}
+                            onChange={(event) => setCaptureTargets((prior) => ({ ...prior, [source.sourceId]: event.target.value }))}
+                            value={targetUrl}
+                          >
+                            {candidates.map((candidate) => <option key={candidate.url} value={candidate.url}>{candidate.label}</option>)}
+                          </select>
+                        </label>
+                      )}
+                      <button
+                        className={styles.legalCaptureButton}
+                        disabled={!publicSourceConfirmed || captureBusy !== null}
+                        onClick={() => queueCapture(source, targetUrl)}
+                        type="button"
+                      >
+                        {captureBusy === `queue:${source.sourceId}` ? "正在入队…" : "授权抓取官方原文"}
+                      </button>
+                    </>
                   )}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         </section>
 
@@ -466,11 +487,22 @@ function formulaLabel(rule: LegalReviewView["ruleVersions"][number]) {
   return `固定 ${formatPercent(rule.baseAnnualRate ?? rule.derivedAnnualRate)}`;
 }
 
-function officialCaptureTarget(sourceId: string, defaultUrl: string) {
+function officialCaptureTargets(sourceId: string, defaultUrl: string) {
   if (sourceId === "CFETS-LPR-HISTORY") {
-    return "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN";
+    return [{ label: "官方历史数据接口", url: "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-currency/LprHis?lang=CN" }];
   }
-  return defaultUrl;
+  const fallbacks: Record<string, { label: string; url: string }[]> = {
+    "CN-CIVIL-CODE-680": [
+      { label: "最高人民法院公开页", url: "https://www.court.gov.cn/zixun/xiangqing/233181.html" },
+    ],
+    "SPC-PRIVATE-LENDING-2020-SECOND-REVISION": [
+      { label: "国际商事法庭官方镜像", url: "https://cicc.court.gov.cn/html/1/380/385/12844.html" },
+    ],
+  };
+  return [
+    { label: "登记官方原文", url: defaultUrl },
+    ...(fallbacks[sourceId] ?? []),
+  ];
 }
 
 function captureStatusLabel(status: string) {
