@@ -28,6 +28,7 @@
       "publisher": "最高人民法院",
       "authority_level": "JUDICIAL_INTERPRETATION",
       "official_url": "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+      "fallback_official_url": "https://cicc.court.gov.cn/html/1/380/385/12844.html",
       "provision_locator": "《最高人民法院关于审理民间借贷案件适用法律若干问题的规定》第二十四条至第三十一条（2020年第二次修正）",
       "research_focus": [
         "合同成立时一年期LPR四倍",
@@ -40,7 +41,7 @@
       "may_enter_formal_bundle": false,
       "capture_probe": {
         "checked_at": "2026-08-10",
-        "result": "LIVE_CAPTURE_AND_ARTICLE_25_31_PARSE_OK"
+        "result": "LIVE_CAPTURE_AND_ARTICLE_25_31_PARSE_OK; canonical page may time out through restricted fetchers, CICC official mirror discovered as fallback"
       }
     },
     {

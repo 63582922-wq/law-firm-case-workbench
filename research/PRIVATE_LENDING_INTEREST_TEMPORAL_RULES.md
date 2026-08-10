@@ -43,7 +43,7 @@
 ## 官方来源
 
 - 国家法律法规数据库：《中华人民共和国民法典》：https://flk.npc.gov.cn/detail?id=ff808081729d1efe01729d50b5c500bf
-- 最高人民法院：2020 年第二次修正所涉民间借贷司法解释全文（第二十五条、第三十一条）：https://www.court.gov.cn/zixun/xiangqing/282621.html
+- 最高人民法院：2020 年第二次修正所涉民间借贷司法解释全文（第二十五条、第三十一条）：https://www.court.gov.cn/zixun/xiangqing/282621.html；该页在受限抓取环境发生超时时，可用最高人民法院国际商事法庭官方镜像 https://cicc.court.gov.cn/html/1/380/385/12844.html 作发现/回查，正式快照仍须从产品内受控请求取得并由律师复核。
 - 最高人民法院：2020 年第一次修正历史文本（法释〔2020〕6号）：https://www.court.gov.cn/zixun/xiangqing/249031.html
 - 全国银行间同业拆借中心：中国货币网 LPR 历史数据：https://www.chinamoney.com.cn/r/cms/chinese/chinamoney/html/currency/lpr-shibor-history-download.html
 - 最高人民法院：2015 年民间借贷司法解释发布说明（24%/36% 分区说明）：https://www.court.gov.cn/zixun/xiangqing/15147.html
