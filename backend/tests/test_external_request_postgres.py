@@ -51,7 +51,7 @@ class ExternalRequestPostgresTests(TestCase):
         self.store = PostgresExternalRequestStore("postgresql://not-used.invalid/lawcase_test")
 
     def _preflight(self):
-        return ExternalRequestPreflight("MODEL", "提取日期", "approved-provider", "CN", "30D", "NO_TRAINING", ("evidence:page:1",), "model-x", 3, 1000, "a" * 64, "b" * 64, datetime.now(timezone.utc) + timedelta(hours=1))
+        return ExternalRequestPreflight("MODEL", "提取日期", "approved-provider", "CN", "30D", "NO_TRAINING", ("evidence:page:1",), "model-x", 3, "CNY", 1000, "a" * 64, "b" * 64, datetime.now(timezone.utc) + timedelta(hours=1))
 
     def _run(self, connection, callback):
         with patch("case_kernel.external_request_postgres.psycopg.connect", return_value=_Context(connection)):
@@ -66,6 +66,19 @@ class ExternalRequestPostgresTests(TestCase):
         self.assertEqual(receipt.matter_version, 4)
         sql = "\n".join(item[0] for item in connection.executed)
         self.assertIn("INSERT INTO external_request_authorizations", sql)
+        self.assertIn("cost_currency", sql)
+
+    def test_preflight_rejects_ambiguous_cost_currency(self) -> None:
+        ambiguous = ExternalRequestPreflight(
+            "MODEL", "提取日期", "approved-provider", "CN", "30D", "NO_TRAINING",
+            ("evidence:page:1",), "model-x", 3, "XXX", 1000, "a" * 64, "b" * 64,
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "cost currency"):
+            self._run(_Connection(), lambda: self.store.authorize_external_request(
+                matter_id=self.matter_id, actor=self.lawyer, expected_version=3,
+                idempotency_key="external-preflight-currency", preflight=ambiguous,
+            ))
 
     def test_unknown_submission_blocks_any_automatic_retry(self) -> None:
         connection = _Connection(attempts=({"sequence": 1, "status": "UNKNOWN_SUBMISSION"},))

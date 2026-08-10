@@ -455,6 +455,42 @@ export type AgentExecutionAuditView = {
   }[];
 };
 
+export type ExternalRequestAuditView = {
+  sourceKind: "synthetic-alpha" | "persistent-preview";
+  sourceLabel: string;
+  matterVersion: number | null;
+  snapshotHash: string | null;
+  requestId: string | null;
+  authorizations: {
+    requestId: string;
+    requestKind: "MODEL" | "OCR" | "MCP";
+    purpose: string;
+    providerId: string;
+    processorRegion: string;
+    retentionPolicy: string;
+    trainingPolicy: string;
+    selectedFieldIds: string[];
+    serviceId: string;
+    callCap: number;
+    costCurrency: string;
+    costCapMinor: number;
+    inputHash: string;
+    authorizationHash: string;
+    expiresAt: string;
+    authorizedAt: string;
+  }[];
+  attempts: {
+    attemptId: string;
+    requestId: string;
+    sequence: number;
+    status: "SUBMISSION_STARTED" | "SUCCEEDED" | "FAILED" | "UNKNOWN_SUBMISSION" | "CANCELLED" | "EXPIRED";
+    providerRequestRefHash: string | null;
+    outputHash: string | null;
+    errorCode: string | null;
+    createdAt: string;
+  }[];
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -879,6 +915,40 @@ type PersistentAgentExecutionSnapshot = {
     output_hash: string | null;
     error_code: string | null;
     executed_at: string;
+  }[];
+};
+
+type PersistentExternalRequestSnapshot = {
+  matter_id: string;
+  matter_version: number;
+  snapshot_hash: string;
+  authorizations: {
+    request_id: string;
+    request_kind: "MODEL" | "OCR" | "MCP";
+    purpose: string;
+    provider_id: string;
+    processor_region: string;
+    retention_policy: string;
+    training_policy: string;
+    selected_field_ids: string[];
+    service_id: string;
+    call_cap: number;
+    cost_currency: string;
+    cost_cap_minor: number;
+    input_hash: string;
+    authorization_hash: string;
+    expires_at: string;
+    authorized_at: string;
+  }[];
+  attempts: {
+    attempt_id: string;
+    request_id: string;
+    sequence: number;
+    status: "SUBMISSION_STARTED" | "SUCCEEDED" | "FAILED" | "UNKNOWN_SUBMISSION" | "CANCELLED" | "EXPIRED";
+    provider_request_ref_hash: string | null;
+    output_hash: string | null;
+    error_code: string | null;
+    created_at: string;
   }[];
 };
 
@@ -1562,6 +1632,45 @@ export async function loadAgentExecutionAudit(
     receipts: payload.receipts.map((item) => ({
       receiptId: item.receipt_id, proposalId: item.proposal_id, status: item.status,
       outputHash: item.output_hash, errorCode: item.error_code, executedAt: item.executed_at,
+    })),
+  };
+}
+
+export async function loadExternalRequestAudit(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<ExternalRequestAuditView> {
+  if (config.kind === "persistent-disabled") throw new Error(config.reason);
+  if (config.kind === "synthetic-alpha") {
+    return {
+      sourceKind: "synthetic-alpha", sourceLabel: "合成模式不进行外部调用", matterVersion: null,
+      snapshotHash: null, requestId: null, authorizations: [], attempts: [],
+    };
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/external-requests`,
+    { headers: { Accept: "application/json" } },
+  );
+  const payload = (await response.json()) as PersistentExternalRequestSnapshot | ErrorEnvelope;
+  if (!response.ok || !("snapshot_hash" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "外部调用授权账本不可用"));
+  }
+  return {
+    sourceKind: "persistent-preview", sourceLabel: "案件级外部调用预授权账本",
+    matterVersion: payload.matter_version, snapshotHash: payload.snapshot_hash,
+    requestId: response.headers.get("X-Request-ID"),
+    authorizations: payload.authorizations.map((item) => ({
+      requestId: item.request_id, requestKind: item.request_kind, purpose: item.purpose,
+      providerId: item.provider_id, processorRegion: item.processor_region,
+      retentionPolicy: item.retention_policy, trainingPolicy: item.training_policy,
+      selectedFieldIds: item.selected_field_ids, serviceId: item.service_id,
+      callCap: item.call_cap, costCurrency: item.cost_currency, costCapMinor: item.cost_cap_minor, inputHash: item.input_hash,
+      authorizationHash: item.authorization_hash, expiresAt: item.expires_at, authorizedAt: item.authorized_at,
+    })),
+    attempts: payload.attempts.map((item) => ({
+      attemptId: item.attempt_id, requestId: item.request_id, sequence: item.sequence,
+      status: item.status, providerRequestRefHash: item.provider_request_ref_hash,
+      outputHash: item.output_hash, errorCode: item.error_code, createdAt: item.created_at,
     })),
   };
 }

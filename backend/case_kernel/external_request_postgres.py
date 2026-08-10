@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import re
 from typing import Any, Iterator
 from uuid import UUID, uuid4
 
@@ -42,6 +43,7 @@ class ExternalRequestPreflight:
     selected_field_ids: tuple[str, ...]
     service_id: str
     call_cap: int
+    cost_currency: str
     cost_cap_minor: int
     input_hash: str
     authorization_hash: str
@@ -90,7 +92,7 @@ class PostgresExternalRequestStore:
                 INSERT INTO external_request_authorizations (
                     request_id, firm_id, matter_id, authorized_by, request_kind, purpose,
                     provider_id, processor_region, retention_policy, training_policy,
-                    selected_field_ids, service_id, call_cap, cost_cap_minor, input_hash,
+                    selected_field_ids, service_id, call_cap, cost_currency, cost_cap_minor, input_hash,
                     authorization_hash, expires_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
                 """,
@@ -98,7 +100,7 @@ class PostgresExternalRequestStore:
                  normalized.purpose, normalized.provider_id, normalized.processor_region,
                  normalized.retention_policy, normalized.training_policy,
                  json.dumps(normalized.selected_field_ids, ensure_ascii=False, separators=(",", ":")),
-                 normalized.service_id, normalized.call_cap, normalized.cost_cap_minor,
+                normalized.service_id, normalized.call_cap, normalized.cost_currency, normalized.cost_cap_minor,
                  normalized.input_hash, normalized.authorization_hash, normalized.expires_at),
             )
             return _finish_command(
@@ -108,7 +110,8 @@ class PostgresExternalRequestStore:
                 audit_payload={"request_id": request_id, "request_kind": normalized.request_kind,
                                "provider_id": normalized.provider_id, "processor_region": normalized.processor_region,
                                "service_id": normalized.service_id, "selected_field_count": len(normalized.selected_field_ids),
-                               "call_cap": normalized.call_cap, "cost_cap_minor": normalized.cost_cap_minor,
+                               "call_cap": normalized.call_cap, "cost_currency": normalized.cost_currency,
+                               "cost_cap_minor": normalized.cost_cap_minor,
                                "input_hash": normalized.input_hash, "authorization_hash": normalized.authorization_hash,
                                "expires_at": normalized.expires_at.isoformat()},
                 stale_submission=False, stale_calculations=False,
@@ -198,7 +201,7 @@ class PostgresExternalRequestStore:
             if matter is None:
                 raise KeyError(matter_id)
             authorizations = _serialize_rows(connection.execute(
-                "SELECT request_id, request_kind, purpose, provider_id, processor_region, retention_policy, training_policy, selected_field_ids, service_id, call_cap, cost_cap_minor, input_hash, authorization_hash, expires_at, authorized_at FROM external_request_authorizations WHERE matter_id = %s AND firm_id = %s ORDER BY authorized_at DESC, request_id DESC",
+                "SELECT request_id, request_kind, purpose, provider_id, processor_region, retention_policy, training_policy, selected_field_ids, service_id, call_cap, cost_currency, cost_cap_minor, input_hash, authorization_hash, expires_at, authorized_at FROM external_request_authorizations WHERE matter_id = %s AND firm_id = %s ORDER BY authorized_at DESC, request_id DESC",
                 (matter_id, actor.firm_id),
             ).fetchall())
             attempts = _serialize_rows(connection.execute(
@@ -241,6 +244,8 @@ def _validate_preflight(value: ExternalRequestPreflight, *, now: datetime | None
         raise CaseLedgerPersistenceBlocked("external request selected fields are invalid")
     if not 1 <= value.call_cap <= 100 or not 0 <= value.cost_cap_minor <= 10_000_000:
         raise CaseLedgerPersistenceBlocked("external request call or cost cap is invalid")
+    if not re.fullmatch(r"[A-Z]{3}", value.cost_currency) or value.cost_currency == "XXX":
+        raise CaseLedgerPersistenceBlocked("external request cost currency is invalid")
     _validate_sha256("input_hash", value.input_hash)
     _validate_sha256("authorization_hash", value.authorization_hash)
     current = _now(now)
@@ -265,7 +270,7 @@ def _validate_attempt_shape(status: str, provider_ref: str | None, output_hash: 
 
 
 def _preflight_payload(value: ExternalRequestPreflight) -> dict[str, Any]:
-    return {"request_kind": value.request_kind, "purpose": value.purpose, "provider_id": value.provider_id, "processor_region": value.processor_region, "retention_policy": value.retention_policy, "training_policy": value.training_policy, "selected_field_ids": list(value.selected_field_ids), "service_id": value.service_id, "call_cap": value.call_cap, "cost_cap_minor": value.cost_cap_minor, "input_hash": value.input_hash, "authorization_hash": value.authorization_hash, "expires_at": value.expires_at.isoformat()}
+    return {"request_kind": value.request_kind, "purpose": value.purpose, "provider_id": value.provider_id, "processor_region": value.processor_region, "retention_policy": value.retention_policy, "training_policy": value.training_policy, "selected_field_ids": list(value.selected_field_ids), "service_id": value.service_id, "call_cap": value.call_cap, "cost_currency": value.cost_currency, "cost_cap_minor": value.cost_cap_minor, "input_hash": value.input_hash, "authorization_hash": value.authorization_hash, "expires_at": value.expires_at.isoformat()}
 
 
 def _now(value: datetime | None) -> datetime:

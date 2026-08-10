@@ -2055,7 +2055,7 @@ class PersistentApiTests(unittest.TestCase):
                 "expected_version": 12, "request_kind": "MODEL", "purpose": "提取付款日期",
                 "provider_id": "approved-provider", "processor_region": "CN", "retention_policy": "30D",
                 "training_policy": "NO_TRAINING", "selected_field_ids": ["evidence:page:1"],
-                "service_id": "model-x", "call_cap": 2, "cost_cap_minor": 1000,
+                "service_id": "model-x", "call_cap": 2, "cost_currency": "CNY", "cost_cap_minor": 1000,
                 "input_hash": "a" * 64, "authorization_hash": "b" * 64,
                 "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
             },

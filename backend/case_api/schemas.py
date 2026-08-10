@@ -1429,6 +1429,7 @@ class PersistentExternalRequestPreflightRequest(BaseModel):
     selected_field_ids: list[str] = Field(min_length=1, max_length=30)
     service_id: str = Field(min_length=1, max_length=240)
     call_cap: int = Field(ge=1, le=100)
+    cost_currency: str = Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
     cost_cap_minor: int = Field(ge=0, le=10_000_000)
     input_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     authorization_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -1440,6 +1441,8 @@ class PersistentExternalRequestPreflightRequest(BaseModel):
             raise ValueError("selected external fields must be unique")
         if any(not item.strip() or len(item) > 160 for item in self.selected_field_ids):
             raise ValueError("selected external field identifier is invalid")
+        if self.cost_currency == "XXX":
+            raise ValueError("external request cost currency must be explicit")
         return self
 
 

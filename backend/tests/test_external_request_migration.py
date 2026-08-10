@@ -18,6 +18,11 @@ class ExternalRequestMigrationTests(unittest.TestCase):
         self.assertIn("ENABLE ROW LEVEL SECURITY", sql)
         self.assertIn("external request ledger is append-only", sql)
 
+    def test_cost_currency_migration_marks_legacy_rows_without_guessing(self) -> None:
+        sql = (Path(__file__).parents[1] / "migrations" / "0018_external_request_cost_currency.sql").read_text()
+        self.assertIn("ADD COLUMN cost_currency", sql)
+        self.assertIn("DEFAULT 'XXX'", sql)
+
 
 if __name__ == "__main__":
     unittest.main()
