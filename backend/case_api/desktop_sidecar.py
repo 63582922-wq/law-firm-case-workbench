@@ -51,6 +51,12 @@ from case_api.desktop_trust_bootstrap import (
     load_desktop_enrollment_trust,
 )
 from case_api.persistent_identity import PersistentAuthenticationBlocked
+from case_api.desktop_persistent_runtime import (
+    DesktopPersistentRuntimeBlocked,
+    build_desktop_persistent_runtime,
+)
+from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
+from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeSettings
 
 
 PROTOCOL = "lawcase-local-api-v1"
@@ -111,7 +117,14 @@ def create_desktop_sidecar_app(
     identity: DesktopIdentityRuntime | None = None,
     enrollment_issuer: AuthenticatedFirmEnrollmentIssuer | None = None,
     keychain_runner=None,
+    persistent_dependencies: PersistentApiDependencies | None = None,
 ) -> FastAPI:
+    if persistent_dependencies is not None:
+        # The persistent API includes the same one-use desktop-session exchange
+        # route. Returning it directly preserves its request correlation,
+        # CORS, error handling, and authorization middleware instead of
+        # copying routes into a second FastAPI application.
+        return create_persistent_app(persistent_dependencies)
     trust = trust or load_desktop_enrollment_trust()
     identity = identity or DesktopIdentityRuntime(
         phase="NOT_ENROLLED",
@@ -598,6 +611,20 @@ def run() -> int:
         trust=trust,
         bootstrap_token=parent_api_token,
     )
+    try:
+        runtime_settings = RuntimeSettings.from_environment(os.environ)
+        persistent_runtime = (
+            build_desktop_persistent_runtime(
+                identity=identity,
+                environ=os.environ,
+            )
+            if runtime_settings.mode is RuntimeMode.POSTGRES_INTERNAL_PREVIEW
+            else None
+        )
+    except (RuntimeConfigurationBlocked, DesktopPersistentRuntimeBlocked):
+        server_socket.close()
+        print("本机受控服务的持久化前置条件未通过。", file=sys.stderr, flush=True)
+        return 78
     enrollment_issuer = None
     if trust.phase == "READY" and trust.catalog is not None:
         enrollment_issuer = JsonFirmEnrollmentIssuer(
@@ -619,7 +646,11 @@ def run() -> int:
                     "pid": os.getpid(),
                     "challenge_sha256": sha256(challenge.encode("ascii")).hexdigest(),
                     "identity": identity.phase,
-                    "persistence": "NOT_CONFIGURED",
+                    "persistence": (
+                        "POSTGRES_INTERNAL_PREVIEW"
+                        if persistent_runtime is not None
+                        else "NOT_CONFIGURED"
+                    ),
                     "enrollment_trust": trust.phase,
                 },
                 separators=(",", ":"),
@@ -633,6 +664,11 @@ def run() -> int:
             parent_api_token=parent_api_token,
             identity=identity,
             enrollment_issuer=enrollment_issuer,
+            persistent_dependencies=(
+                persistent_runtime.dependencies
+                if persistent_runtime is not None
+                else None
+            ),
         ),
         host="127.0.0.1",
         port=port,

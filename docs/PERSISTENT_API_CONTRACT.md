@@ -6,7 +6,7 @@
 
 - `case_api.app` 继续只服务 `alpha_*` 合成对象，不挂载任何持久化路由；
 - `case_api.persistent_app.create_persistent_app()` 未注入依赖时只返回“已禁用”健康状态，案件路由不存在；
-- 启用持久化路由必须使用 `postgres-internal-preview` 配置、受控 PostgreSQL 台账 Store 和服务端身份解析器；
+- 启用持久化路由必须使用 `postgres-internal-preview` 配置、受控 PostgreSQL 台账 Store 和服务端身份解析器；桌面 sidecar 还必须同时持有当前重新验签的登记身份、Keychain 只读 AES-256-GCM 密钥及预创建的私有加密对象目录。`desktop_persistent_runtime` 一次装配全部 Store 和访问 Broker，缺任一项即在监听案件路由前退出；
 - 本地原件页预览要求成对注入 `LocalFolderGrantRegistry` 与使用同一 Registry 的 `OriginalPageAccessBroker`；缺任一依赖时接口按 503 阻断，不回退到整份 PDF 或浏览器直读；
 - 文件夹检查、短时授权和单页预览仅接受 loopback 请求及 `OS_BOUND_LOCAL_SESSION`。响应不返回绝对路径；预览许可绑定律所、案件、操作者、会话、文件夹授权、原件哈希和来源页，一次使用后立即失效；
 - 加密派生件访问必须与证据 Store、OS 绑定会话、Keychain 取钥和本机 loopback 同时配置；缺任一项返回 `503`，不回退公开对象路径、合成文件或环境密钥；
@@ -50,7 +50,7 @@ WebView 的全部正式案件请求现统一通过受控客户端：桌面模式
 
 `/v1/matters/{matter_id}/external-requests` 是外部模型、OCR 与 MCP 的预授权面：主办/复核律师提交目的、字段标识、供应商、处理地域、保留/训练政策、服务名、次数/成本上限、输入/授权哈希和到期时间；系统 Worker 才能向 `/{request_id}/attempts` 写入“已提交”、成功或稳定失败回执。持久层拒绝无预授权、过期、超过次数上限、终态重试和 `UNKNOWN_SUBMISSION` 后的自动重试。该接口不接收供应商密钥、提示词或原始案卷正文。
 
-启动重验与短时 identity authority 已装配到打包 sidecar，但仓库固定的生产信任目录仍为 `NOT_CONFIGURED`，专用 PostgreSQL 也未配置。没有律所真实信任根、签发/续期/撤销服务和数据库逐案授权时，产品不会形成真实登录或开放案件路由。
+启动重验与短时 identity authority 已装配到打包 sidecar。其持久化装配只使用 `DesktopSessionAuthority` 作为同一个 API 的身份解析器，不复制或下放 actor、firm、role；文件夹授权和所有一次性文件许可也只在该 sidecar 进程内存活。仓库固定的生产信任目录仍为 `NOT_CONFIGURED`，专用 PostgreSQL、Keychain 工件密钥和私有对象目录也未配置。没有律所真实信任根、签发/续期/撤销服务和数据库逐案授权时，产品不会形成真实登录或开放案件路由。
 
 API 为每个请求生成 UUID `X-Request-ID`，通过上下文写入同一数据库审计事务。已知错误返回稳定代码、中文消息和相同请求号，不向普通界面暴露数据库异常或连接信息。
 
