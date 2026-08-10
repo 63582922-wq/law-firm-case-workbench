@@ -10,6 +10,7 @@ from case_kernel.postgres_store import PostgresMatterStore
 from case_kernel.official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.submission_postgres import PostgresSubmissionStore
+from case_kernel.reviewable_draft_postgres import PostgresReviewableDraftStore
 from case_kernel.runtime import (
     RuntimeConfigurationBlocked,
     RuntimeMode,
@@ -33,6 +34,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNone(services.legal_source_store)
         self.assertIsNone(services.official_source_capture_store)
         self.assertIsNone(services.submission_store)
+        self.assertIsNone(services.reviewable_draft_store)
         self.assertIsNone(services.artifact_store)
         self.assertIsNone(services.office_pdf_converter)
         matter_connect.assert_not_called()
@@ -79,6 +81,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsInstance(services.legal_source_store, PostgresLegalSourceStore)
         self.assertIsInstance(services.official_source_capture_store, PostgresOfficialSourceCaptureStore)
         self.assertIsInstance(services.submission_store, PostgresSubmissionStore)
+        self.assertIsInstance(services.reviewable_draft_store, PostgresReviewableDraftStore)
         self.assertIsNone(services.artifact_store)
         self.assertNotIn("synthetic-password", repr(settings))
         matter_connect.assert_not_called()
@@ -100,6 +103,7 @@ class RuntimeSettingsTests(unittest.TestCase):
         self.assertIsNotNone(services.legal_source_store._official_source_reader)
         self.assertIsNotNone(services.official_source_capture_store._artifact_reader)
         self.assertIsNotNone(services.submission_store._artifact_reader)
+        self.assertIsNotNone(services.reviewable_draft_store._artifact_reader)
 
     def test_synthetic_runtime_rejects_a_persistent_artifact_store(self) -> None:
         with TemporaryDirectory(prefix="runtime-synthetic-store-test-") as temporary:

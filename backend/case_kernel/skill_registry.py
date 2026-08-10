@@ -119,10 +119,11 @@ class CaseSkillRegistry:
 def default_case_skill_registry() -> CaseSkillRegistry:
     """Return the product's explicit current capability surface.
 
-    Word/Excel authoring and Office-to-PDF rendering are deliberately listed as
-    GATED until their isolated converter and visual verification worker are
-    wired.  This prevents the interface from advertising a completed legal
-    work product before the safe implementation exists.
+    Word/Excel authoring and Office-to-PDF rendering remain GATED until the
+    isolated conversion, managed-pair persistence, lawyer UI, packaging and
+    release workflow are all wired.  This prevents the interface from
+    advertising a completed legal work product before the complete safe path
+    exists.
     """
     tools = (
         ToolDefinition("register_source_file", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),

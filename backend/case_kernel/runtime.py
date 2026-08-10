@@ -22,6 +22,7 @@ from .managed_artifact_store import LocalEncryptedArtifactStore
 from .office_pdf_conversion_worker import OfficePdfConversionBlocked, SandboxedOfficePdfConverter
 from .official_source_capture_postgres import PostgresOfficialSourceCaptureStore
 from .postgres_store import PostgresMatterStore
+from .reviewable_draft_postgres import PostgresReviewableDraftStore
 from .submission_postgres import PostgresSubmissionStore
 from .store import InMemoryMatterStore, MatterStore
 
@@ -112,6 +113,7 @@ class RuntimeServices:
     legal_source_store: PostgresLegalSourceStore | None
     official_source_capture_store: PostgresOfficialSourceCaptureStore | None
     submission_store: PostgresSubmissionStore | None
+    reviewable_draft_store: PostgresReviewableDraftStore | None
     artifact_store: LocalEncryptedArtifactStore | None
     office_pdf_converter: SandboxedOfficePdfConverter | None
     persistence_label: str
@@ -141,6 +143,7 @@ def build_runtime_services(
             legal_source_store=None,
             official_source_capture_store=None,
             submission_store=None,
+            reviewable_draft_store=None,
             artifact_store=None,
             office_pdf_converter=None,
             persistence_label="in-memory-synthetic-only",
@@ -169,6 +172,9 @@ def build_runtime_services(
             dsn, artifact_reader=artifact_reader
         ),
         submission_store=PostgresSubmissionStore(dsn, artifact_reader=artifact_reader),
+        reviewable_draft_store=PostgresReviewableDraftStore(
+            dsn, artifact_reader=artifact_reader
+        ),
         artifact_store=artifact_store,
         office_pdf_converter=office_converter,
         persistence_label="postgres-internal-preview",
