@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
 import shutil
@@ -14,6 +15,9 @@ def build_desktop_sidecar() -> Path:
     backend_root = Path(__file__).resolve().parents[1]
     project_root = backend_root.parent
     entrypoint = backend_root / "case_api" / "desktop_sidecar.py"
+    trust_bootstrap = (
+        backend_root / "case_api" / "deployment" / "enrollment_trust_bootstrap.json"
+    )
     destination_root = project_root / "web" / "src-tauri" / "binaries"
     target = subprocess.run(
         ["rustc", "--print", "host-tuple"],
@@ -42,6 +46,8 @@ def build_desktop_sidecar() -> Path:
                 "lawcase-local-api",
                 "--paths",
                 str(backend_root),
+                "--add-data",
+                f"{trust_bootstrap}{os.pathsep}case_api/deployment",
                 "--distpath",
                 str(dist_root),
                 "--workpath",

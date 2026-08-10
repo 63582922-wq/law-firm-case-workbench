@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   disableLocalEnrollment,
+  importSignedEnrollmentPackage,
   initializeDesktopInstallation,
   readDesktopEnrollmentVaultStatus,
 } from "@/lib/desktop-bridge";
@@ -15,11 +16,13 @@ export function IdentitySecurityWorkbench({
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
   const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
-  const [vaultBusy, setVaultBusy] = useState<"initialize" | "disable" | null>(null);
+  const [vaultBusy, setVaultBusy] = useState<"initialize" | "import" | "disable" | null>(null);
   const [vaultMessage, setVaultMessage] = useState<string | null>(null);
   const [disableArmed, setDisableArmed] = useState(false);
   const processReady = desktopRuntime?.phase === "READY";
+  const trustReady = desktopRuntime?.enrollmentTrustPhase === "READY";
   const identityEnrolled = false;
+  const signedCredentialSaved = vaultStatus?.phase === "CREDENTIAL_SAVED_VERIFIED";
   const persistenceConfigured = false;
 
   useEffect(() => {
@@ -78,6 +81,20 @@ export function IdentitySecurityWorkbench({
     }
   }
 
+  async function importEnrollment() {
+    setVaultBusy("import");
+    setVaultMessage(null);
+    try {
+      const status = await importSignedEnrollmentPackage();
+      setVaultStatus(status);
+      setVaultMessage(status.message);
+    } catch (error) {
+      setVaultMessage(readableError(error, "律所登记包未能通过验签；未写入 Keychain。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
   return (
     <section className={styles.securityArea} aria-label="身份与安全">
       <header className={styles.securityHeading}>
@@ -97,9 +114,15 @@ export function IdentitySecurityWorkbench({
           state={processReady ? "ready" : "blocked"}
         />
         <StatusCell
+          label="生产信任目录"
+          value={trustReady ? "核验通过" : desktopRuntime?.enrollmentTrustPhase === "BLOCKED" ? "核验失败" : "未配置"}
+          note={trustReady ? "律所签发公钥、有效期与回滚链已核验" : "安装包不内置测试密钥，也不接受页面自填公钥"}
+          state={trustReady ? "ready" : "blocked"}
+        />
+        <StatusCell
           label="律所签名登记"
-          value={identityEnrolled ? "已登记" : "未登记"}
-          note={desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
+          value={identityEnrolled ? "已登记" : signedCredentialSaved ? "已验签保存" : "未登记"}
+          note={signedCredentialSaved ? "尚未连接数据库建立可用会话" : desktopRuntime?.identityPhase === "NOT_ENROLLED" ? "本机服务已确认没有可用律师登记" : "尚未取得受信签发状态"}
           state="blocked"
         />
         <StatusCell
@@ -121,21 +144,24 @@ export function IdentitySecurityWorkbench({
           <div className={styles.securityPanelHeading}>
             <div>
               <p className={styles.eyebrow}>登记流程</p>
-              <h3 id="enrollment-flow-title">四层信任必须按顺序成立</h3>
+              <h3 id="enrollment-flow-title">五层信任必须按顺序成立</h3>
             </div>
-            <span>当前停在第 2 层</span>
+            <span>{trustReady ? "当前停在第 3 层" : "当前停在第 2 层"}</span>
           </div>
           <ol className={styles.securityFlow}>
             <FlowStep index="01" title="受监护桌面进程" state={processReady ? "已完成" : "未通过"}>
               Tauri 启动随应用分发的本机服务并核验随机挑战、PID 与动态端口。
             </FlowStep>
-            <FlowStep index="02" title="律所核验并签发" state="等待真实服务">
-              律所管理员或统一身份服务核验律师后，以受信 Ed25519 私钥签发短期凭证。
+            <FlowStep index="02" title="生产信任目录" state={trustReady ? "已通过" : "未配置"}>
+              安装包只固定离线根公钥；门限签名目录提供当前签发公钥、服务地址、证书固定值、有效期和撤销状态。
             </FlowStep>
-            <FlowStep index="03" title="本机 Keychain 绑定" state="未开始">
+            <FlowStep index="03" title="律所核验并签发" state="等待真实服务">
+              律所管理员核验律师后签发短期凭证；用户不能在页面选择律所、人员或案件角色。
+            </FlowStep>
+            <FlowStep index="04" title="本机 Keychain 绑定" state="未开始">
               凭证与 32 字节安装秘密分开保存；复制凭证到另一台电脑不能登录。当前：{vaultStatus?.message ?? "请从桌面版读取 Keychain 状态。"}
             </FlowStep>
-            <FlowStep index="04" title="数据库逐案授权" state="未开始">
+            <FlowStep index="05" title="数据库逐案授权" state="未开始">
               每次读写重新检查在职状态、未撤销的本案角色和律所隔离策略。
             </FlowStep>
           </ol>
@@ -171,8 +197,13 @@ export function IdentitySecurityWorkbench({
           >
             {vaultBusy === "initialize" ? "正在写入并复核…" : vaultStatus?.installationInitialized ? "本机安全存储已就绪" : "初始化本机安全存储"}
           </button>
-          <button disabled type="button" title="需要律所签发服务、生产公钥和管理员核验">
-            使用律所激活码登记
+          <button
+            disabled={!trustReady || !vaultStatus?.installationInitialized || vaultBusy !== null}
+            onClick={() => void importEnrollment()}
+            type="button"
+            title={trustReady ? "只从原生文件选择器读取 .lawenroll 登记包" : "需要生产信任目录和律所签发服务"}
+          >
+            {vaultBusy === "import" ? "正在受信验签…" : "导入律所签名登记包"}
           </button>
           {vaultStatus?.enrollmentEnvelopePresent ? (
             <button
@@ -189,8 +220,8 @@ export function IdentitySecurityWorkbench({
       </section>
 
       <div className={styles.securityNotice} role="status">
-        <strong>为什么“使用律所激活码登记”仍被禁用</strong>
-        <span>真实律所签发服务和生产公钥尚未部署。当前可以安全初始化本机 Keychain，但不能导入任意凭证、自助选角色或制造假登录。</span>
+        <strong>不需要你提供模型 API Key</strong>
+        <span>当前缺的是律所运营方的生产信任根和签发服务，不是普通用户的 OpenAI API Key。原生导入链已经实现：只有生产信任目录就绪后，才能从系统文件选择器读取 .lawenroll，受信验签成功后按当前凭证哈希原子写入 Keychain。</span>
       </div>
     </section>
   );

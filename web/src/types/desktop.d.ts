@@ -10,12 +10,14 @@ declare global {
         apiBase: string | null;
         processId: number | null;
         identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+        enrollmentTrustPhase: "NOT_CONFIGURED" | "BLOCKED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
         persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
       enrollmentVaultStatus(): Promise<{
         phase:
           | "NOT_INITIALIZED"
           | "INSTALLATION_READY"
+          | "CREDENTIAL_SAVED_VERIFIED"
           | "CREDENTIAL_PRESENT_UNVERIFIED"
           | "BROKEN_LOCAL_CREDENTIAL"
           | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
@@ -25,6 +27,12 @@ declare global {
         enrollmentEnvelopePresent: boolean;
       } | null>;
       initializeInstallation(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
+      importSignedEnrollmentPackage(): Promise<{
         phase: string;
         message: string;
         installationInitialized: boolean;

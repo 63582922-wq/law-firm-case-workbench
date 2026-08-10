@@ -95,6 +95,20 @@ class DesktopEnrollmentProvider(Protocol):
     def load(self) -> DesktopEnrollment: ...
 
 
+class TrustedEnrollmentIssuerResolver(Protocol):
+    """Resolve keys from current, signed deployment trust metadata."""
+
+    def resolve(self, key_id: str, *, now: datetime) -> TrustedEnrollmentIssuer: ...
+
+    def validate_enrollment_window(
+        self,
+        *,
+        key_id: str,
+        issued_at: datetime,
+        expires_at: datetime,
+    ) -> None: ...
+
+
 def create_enrolled_desktop_session_authority(
     *,
     enrollment_provider: DesktopEnrollmentProvider,
@@ -137,19 +151,38 @@ class SignedDesktopEnrollmentVerifier:
     def __init__(
         self,
         *,
-        trusted_issuers: Mapping[str, TrustedEnrollmentIssuer],
+        trusted_issuers: Mapping[str, TrustedEnrollmentIssuer] | None = None,
+        trusted_catalog: TrustedEnrollmentIssuerResolver | None = None,
         clock=None,
     ) -> None:
-        if not trusted_issuers:
+        if (trusted_issuers is None) == (trusted_catalog is None):
+            raise DesktopEnrollmentBlocked("exactly one enrollment trust source is required")
+        if trusted_issuers is not None and not trusted_issuers:
             raise DesktopEnrollmentBlocked("at least one trusted enrollment issuer is required")
-        self._trusted_issuers = dict(trusted_issuers)
+        self._trusted_issuers = dict(trusted_issuers or {})
         for key_id, issuer in self._trusted_issuers.items():
             if key_id != issuer.key_id:
                 raise DesktopEnrollmentBlocked("trusted enrollment issuer registry is inconsistent")
+        self._trusted_catalog = trusted_catalog
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def verify(self, *, envelope_text: str, installation_secret: bytes) -> DesktopEnrollment:
         if len(installation_secret) != INSTALLATION_SECRET_BYTES:
+            raise DesktopEnrollmentBlocked("desktop installation binding is unavailable")
+        return self.verify_for_installation_binding(
+            envelope_text=envelope_text,
+            installation_binding_sha256=sha256(installation_secret).hexdigest(),
+        )
+
+    def verify_for_installation_binding(
+        self,
+        *,
+        envelope_text: str,
+        installation_binding_sha256: str,
+    ) -> DesktopEnrollment:
+        """Verify for a binding digest computed inside the native Keychain boundary."""
+
+        if not _SHA256_PATTERN.fullmatch(installation_binding_sha256):
             raise DesktopEnrollmentBlocked("desktop installation binding is unavailable")
         envelope = _strict_json_object(envelope_text)
         if frozenset(envelope) != _ENVELOPE_FIELDS:
@@ -163,7 +196,14 @@ class SignedDesktopEnrollmentVerifier:
             raise DesktopEnrollmentBlocked("desktop enrollment signature encoding is invalid")
 
         key_id = _required_identifier(credential, "key_id")
-        trusted = self._trusted_issuers.get(key_id)
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() != timedelta(0):
+            raise DesktopEnrollmentBlocked("desktop enrollment clock must use UTC")
+        trusted = (
+            self._trusted_catalog.resolve(key_id, now=now)
+            if self._trusted_catalog is not None
+            else self._trusted_issuers.get(key_id)
+        )
         if trusted is None:
             raise DesktopEnrollmentBlocked("desktop enrollment issuer is not trusted")
         issuer = _required_string(credential, "issuer", maximum=200)
@@ -189,21 +229,23 @@ class SignedDesktopEnrollmentVerifier:
         binding = credential.get("installation_binding_sha256")
         if not isinstance(binding, str) or not _SHA256_PATTERN.fullmatch(binding):
             raise DesktopEnrollmentBlocked("desktop installation binding is invalid")
-        expected_binding = sha256(installation_secret).hexdigest()
-        if not compare_digest(binding, expected_binding):
+        if not compare_digest(binding, installation_binding_sha256):
             raise DesktopEnrollmentBlocked("desktop enrollment belongs to another installation")
 
         issued_at = _required_utc_timestamp(credential, "issued_at")
         expires_at = _required_utc_timestamp(credential, "expires_at")
-        now = self._clock()
-        if now.tzinfo is None or now.utcoffset() != timedelta(0):
-            raise DesktopEnrollmentBlocked("desktop enrollment clock must use UTC")
         if issued_at > now + MAX_CLOCK_SKEW:
             raise DesktopEnrollmentBlocked("desktop enrollment issue time is in the future")
         if expires_at <= now:
             raise DesktopEnrollmentBlocked("desktop enrollment has expired")
         if expires_at <= issued_at or expires_at - issued_at > MAX_ENROLLMENT_LIFETIME:
             raise DesktopEnrollmentBlocked("desktop enrollment lifetime is invalid")
+        if self._trusted_catalog is not None:
+            self._trusted_catalog.validate_enrollment_window(
+                key_id=key_id,
+                issued_at=issued_at,
+                expires_at=expires_at,
+            )
 
         return DesktopEnrollment(
             enrollment_id=enrollment_id,

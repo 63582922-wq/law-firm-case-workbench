@@ -1,13 +1,20 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_shell::{ShellExt, process::CommandChild, process::CommandEvent};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 const LOCAL_API_PROTOCOL: &str = "lawcase-local-api-v1";
+const MAX_ENROLLMENT_PACKAGE_BYTES: u64 = 16_384;
+const MAX_LOCAL_API_RESPONSE_BYTES: u64 = 65_536;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +30,7 @@ struct DesktopRuntimeStatus {
     api_base: Option<String>,
     process_id: Option<u32>,
     identity_phase: String,
+    enrollment_trust_phase: String,
     persistence_phase: String,
 }
 
@@ -32,7 +40,10 @@ struct LocalApiState {
     api_base: Option<String>,
     process_id: Option<u32>,
     identity_phase: String,
+    enrollment_trust_phase: String,
     persistence_phase: String,
+    api_port: Option<u16>,
+    parent_api_token: Option<Zeroizing<String>>,
     child: Option<CommandChild>,
 }
 
@@ -44,7 +55,10 @@ impl Default for LocalApiState {
             api_base: None,
             process_id: None,
             identity_phase: "UNKNOWN".to_string(),
+            enrollment_trust_phase: "UNKNOWN".to_string(),
             persistence_phase: "UNKNOWN".to_string(),
+            api_port: None,
+            parent_api_token: None,
             child: None,
         }
     }
@@ -56,6 +70,7 @@ struct LocalApiRuntime {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LocalApiReady {
     protocol: String,
     status: String,
@@ -63,7 +78,17 @@ struct LocalApiReady {
     pid: u32,
     challenge_sha256: String,
     identity: String,
+    enrollment_trust: String,
     persistence: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollmentVerificationResponse {
+    status: String,
+    envelope_sha256: String,
+    enrollment_id: String,
+    expires_at: String,
 }
 
 fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
@@ -74,6 +99,7 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         api_base: state.api_base.clone(),
         process_id: state.process_id,
         identity_phase: state.identity_phase.clone(),
+        enrollment_trust_phase: state.enrollment_trust_phase.clone(),
         persistence_phase: state.persistence_phase.clone(),
     }
 }
@@ -86,7 +112,10 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.api_base = None;
         state.process_id = None;
         state.identity_phase = "UNAVAILABLE".to_string();
+        state.enrollment_trust_phase = "UNAVAILABLE".to_string();
         state.persistence_phase = "UNAVAILABLE".to_string();
+        state.api_port = None;
+        state.parent_api_token = None;
         state.child.take()
     };
     if let Some(child) = child {
@@ -107,6 +136,10 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         || ready.port == 0
         || ready.challenge_sha256 != expected_digest
         || ready.identity != "NOT_ENROLLED"
+        || !matches!(
+            ready.enrollment_trust.as_str(),
+            "NOT_CONFIGURED" | "BLOCKED" | "READY"
+        )
         || ready.persistence != "NOT_CONFIGURED"
     {
         return Err("本机服务未通过父进程绑定核验。".to_string());
@@ -116,6 +149,11 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
 
 fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), String> {
     let challenge = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let parent_api_token = Zeroizing::new(format!(
+        "{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    ));
     let (mut receiver, mut child) = app
         .shell()
         .sidecar("lawcase-local-api")
@@ -127,6 +165,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
         "protocol": LOCAL_API_PROTOCOL,
         "challenge": challenge,
         "parent_pid": std::process::id(),
+        "parent_api_token": parent_api_token.as_str(),
     });
     if child.write(format!("{}\n", handshake).as_bytes()).is_err() {
         let _ = child.kill();
@@ -135,6 +174,7 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
     {
         let mut state = runtime.inner.lock().expect("local API state lock poisoned");
         state.process_id = Some(process_id);
+        state.parent_api_token = Some(parent_api_token);
         state.child = Some(child);
     }
 
@@ -153,7 +193,9 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                             state.api_base = Some(format!("http://127.0.0.1:{}", ready.port));
                             state.process_id = Some(process_id);
                             state.identity_phase = ready.identity;
+                            state.enrollment_trust_phase = ready.enrollment_trust;
                             state.persistence_phase = ready.persistence;
+                            state.api_port = Some(ready.port);
                             ready_received = true;
                         }
                         Err(message) => {
@@ -175,7 +217,10 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     state.api_base = None;
                     state.process_id = None;
                     state.identity_phase = "UNAVAILABLE".to_string();
+                    state.enrollment_trust_phase = "UNAVAILABLE".to_string();
                     state.persistence_phase = "UNAVAILABLE".to_string();
+                    state.api_port = None;
+                    state.parent_api_token = None;
                     state.child = None;
                     break;
                 }
@@ -194,7 +239,10 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.api_base = None;
         state.process_id = None;
         state.identity_phase = "UNAVAILABLE".to_string();
+        state.enrollment_trust_phase = "UNAVAILABLE".to_string();
         state.persistence_phase = "UNAVAILABLE".to_string();
+        state.api_port = None;
+        state.parent_api_token = None;
         state.child.take()
     };
     if let Some(child) = child {
@@ -226,6 +274,144 @@ fn disable_local_enrollment(
     confirmation: String,
 ) -> Result<EnrollmentVaultStatus, String> {
     vault.disable_local_enrollment(&confirmation)
+}
+
+#[tauri::command]
+fn import_signed_enrollment_package(
+    app: AppHandle,
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, EnrollmentVault>,
+) -> Result<EnrollmentVaultStatus, String> {
+    let (port, token) = enrollment_verification_channel(&runtime)?;
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择律所签名登记包")
+        .add_filter("律所签名登记包", &["lawenroll"])
+        .blocking_pick_file();
+    let Some(selected) = selected else {
+        return Err("已取消选择；未读取或写入任何登记凭证。".to_string());
+    };
+    let selected_path = selected
+        .into_path()
+        .map_err(|_| "所选登记包不是可读取的本机文件。".to_string())?;
+    let metadata =
+        fs::symlink_metadata(&selected_path).map_err(|_| "无法核验所选登记包。".to_string())?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_ENROLLMENT_PACKAGE_BYTES
+        || selected_path.extension().and_then(|value| value.to_str()) != Some("lawenroll")
+    {
+        return Err("登记包必须是 16 KB 以内的 .lawenroll 普通文件。".to_string());
+    }
+    let envelope_bytes =
+        fs::read(&selected_path).map_err(|_| "无法读取所选登记包。".to_string())?;
+    let envelope_text = String::from_utf8(envelope_bytes)
+        .map_err(|_| "登记包不是有效 UTF-8 文本；未写入 Keychain。".to_string())?;
+    let context = vault.verification_context()?;
+    let verified = verify_enrollment_with_sidecar(
+        port,
+        token.as_str(),
+        &envelope_text,
+        &context.installation_binding_sha256,
+    )?;
+    let _ = Uuid::parse_str(&verified.enrollment_id)
+        .map_err(|_| "本机服务返回的登记标识无效；未写入 Keychain。".to_string())?;
+    if verified.status != "VERIFIED" || verified.expires_at.len() < 20 {
+        return Err("本机服务未确认登记包有效；未写入 Keychain。".to_string());
+    }
+    let mut status = vault.commit_enrollment_after_verification(
+        &envelope_text,
+        &verified.envelope_sha256,
+        &context.installation_binding_sha256,
+        context.expected_current_sha256.as_deref(),
+    )?;
+    status.phase = "CREDENTIAL_SAVED_VERIFIED".to_string();
+    status.message = "律所签名登记包已验签并保存；仍需连接案件数据库核验逐案权限。".to_string();
+    Ok(status)
+}
+
+fn enrollment_verification_channel(
+    runtime: &LocalApiRuntime,
+) -> Result<(u16, Zeroizing<String>), String> {
+    let state = runtime
+        .inner
+        .lock()
+        .map_err(|_| "本机受控服务状态锁定失败；未开始登记。".to_string())?;
+    if state.phase != "READY" || state.enrollment_trust_phase != "READY" {
+        return Err("生产信任目录尚未通过核验；不能导入律所登记包。".to_string());
+    }
+    let port = state
+        .api_port
+        .ok_or_else(|| "本机验签通道不可用；未开始登记。".to_string())?;
+    let token = state
+        .parent_api_token
+        .as_ref()
+        .ok_or_else(|| "本机验签通道未绑定桌面父进程。".to_string())?;
+    Ok((port, Zeroizing::new(token.to_string())))
+}
+
+fn verify_enrollment_with_sidecar(
+    port: u16,
+    parent_api_token: &str,
+    envelope_text: &str,
+    installation_binding_sha256: &str,
+) -> Result<EnrollmentVerificationResponse, String> {
+    if parent_api_token.len() != 64
+        || installation_binding_sha256.len() != 64
+        || envelope_text.is_empty()
+        || envelope_text.len() as u64 > MAX_ENROLLMENT_PACKAGE_BYTES
+    {
+        return Err("本机验签请求格式无效；未写入 Keychain。".to_string());
+    }
+    let body = serde_json::to_vec(&serde_json::json!({
+        "envelope_text": envelope_text,
+        "installation_binding_sha256": installation_binding_sha256,
+    }))
+    .map_err(|_| "无法构造本机验签请求。".to_string())?;
+    let address = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
+    let mut stream = TcpStream::connect_timeout(&address.into(), Duration::from_secs(3))
+        .map_err(|_| "无法连接本机验签服务；未写入 Keychain。".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "无法限制本机验签读取时长。".to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| "无法限制本机验签写入时长。".to_string())?;
+    let head = format!(
+        "POST /v1/desktop-enrollment/verify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {parent_api_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(&body))
+        .map_err(|_| "无法发送本机验签请求；未写入 Keychain。".to_string())?;
+    let mut response = Vec::new();
+    stream
+        .take(MAX_LOCAL_API_RESPONSE_BYTES + 1)
+        .read_to_end(&mut response)
+        .map_err(|_| "无法读取本机验签回执；未写入 Keychain。".to_string())?;
+    if response.len() as u64 > MAX_LOCAL_API_RESPONSE_BYTES {
+        return Err("本机验签回执过长；未写入 Keychain。".to_string());
+    }
+    parse_enrollment_verification_response(&response)
+}
+
+fn parse_enrollment_verification_response(
+    response: &[u8],
+) -> Result<EnrollmentVerificationResponse, String> {
+    let boundary = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "本机验签回执格式无效；未写入 Keychain。".to_string())?;
+    let header = std::str::from_utf8(&response[..boundary])
+        .map_err(|_| "本机验签回执头无效。".to_string())?;
+    if !header.starts_with("HTTP/1.1 200 ") || header.lines().any(|line| line.contains('\0')) {
+        return Err("律所登记包未通过本机受信验签；未写入 Keychain。".to_string());
+    }
+    serde_json::from_slice(&response[boundary + 4..])
+        .map_err(|_| "本机验签回执内容无效；未写入 Keychain。".to_string())
 }
 
 fn validate_matter_id(matter_id: &str) -> Result<(), String> {
@@ -305,6 +491,7 @@ pub fn run() {
             desktop_runtime_status,
             desktop_enrollment_vault_status,
             initialize_desktop_installation,
+            import_signed_enrollment_package,
             disable_local_enrollment,
             select_case_folder
         ])
@@ -320,7 +507,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        LOCAL_API_PROTOCOL, validate_matter_id, validate_selected_root, verify_ready_payload,
+        LOCAL_API_PROTOCOL, LocalApiRuntime, enrollment_verification_channel,
+        parse_enrollment_verification_response, validate_matter_id, validate_selected_root,
+        verify_ready_payload,
     };
     use sha2::{Digest, Sha256};
     use std::path::Path;
@@ -364,11 +553,56 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let payload = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"persistence\":\"NOT_CONFIGURED\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
         assert!(verify_ready_payload(payload.as_bytes(), "b").is_err());
+    }
+
+    #[test]
+    fn ready_payload_rejects_unknown_fields_and_invalid_trust_phase() {
+        let challenge = "a".repeat(64);
+        let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
+        let extra = format!(
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
+            LOCAL_API_PROTOCOL, digest
+        );
+        let invalid = extra.replace(",\"role\":\"ADMIN\"", "").replace(
+            "\"enrollment_trust\":\"READY\"",
+            "\"enrollment_trust\":\"BYPASS\"",
+        );
+        assert!(verify_ready_payload(extra.as_bytes(), &challenge).is_err());
+        assert!(verify_ready_payload(invalid.as_bytes(), &challenge).is_err());
+    }
+
+    #[test]
+    fn native_verification_channel_requires_ready_trust_and_keeps_token_private() {
+        let runtime = LocalApiRuntime::default();
+        assert!(enrollment_verification_channel(&runtime).is_err());
+        {
+            let mut state = runtime.inner.lock().unwrap();
+            state.phase = "READY".to_string();
+            state.enrollment_trust_phase = "READY".to_string();
+            state.api_port = Some(43127);
+            state.parent_api_token = Some(zeroize::Zeroizing::new("c".repeat(64)));
+        }
+        let (port, token) = enrollment_verification_channel(&runtime).unwrap();
+        assert_eq!(port, 43127);
+        assert_eq!(token.as_str(), "c".repeat(64));
+        let snapshot = super::snapshot_runtime(&runtime);
+        let serialized = serde_json::to_string(&snapshot).unwrap();
+        assert!(!serialized.contains(&"c".repeat(64)));
+    }
+
+    #[test]
+    fn native_verification_response_parser_rejects_status_and_extra_fields() {
+        let valid = "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\r\n{\"status\":\"VERIFIED\",\"envelope_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"enrollment_id\":\"11111111-1111-4111-8111-111111111111\",\"expires_at\":\"2026-09-01T00:00:00Z\"}";
+        assert!(parse_enrollment_verification_response(valid.as_bytes()).is_ok());
+        let denied = valid.replacen("200", "422", 1);
+        assert!(parse_enrollment_verification_response(denied.as_bytes()).is_err());
+        let extra = valid.replacen("}", ",\"role\":\"ADMIN\"}", 1);
+        assert!(parse_enrollment_verification_response(extra.as_bytes()).is_err());
     }
 }
 mod enrollment_vault;

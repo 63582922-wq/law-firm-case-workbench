@@ -90,6 +90,17 @@ class DesktopEnrollmentTests(unittest.TestCase):
         self.assertEqual(enrollment.actor.roles, frozenset({Role.LEAD_LAWYER, Role.REVIEWER}))
         self.assertNotIn(sha256(INSTALLATION_SECRET).hexdigest(), repr(enrollment))
 
+        native_boundary = self.verifier.verify_for_installation_binding(
+            envelope_text=self.envelope(),
+            installation_binding_sha256=sha256(INSTALLATION_SECRET).hexdigest(),
+        )
+        self.assertEqual(native_boundary.enrollment_id, enrollment.enrollment_id)
+        with self.assertRaisesRegex(DesktopEnrollmentBlocked, "binding is unavailable"):
+            self.verifier.verify_for_installation_binding(
+                envelope_text=self.envelope(),
+                installation_binding_sha256="invalid",
+            )
+
     def test_tampering_unknown_issuer_and_wrong_installation_fail_closed(self) -> None:
         tampered = json.loads(self.envelope())
         tampered["credential"]["roles"] = ["FIRM_ADMIN"]

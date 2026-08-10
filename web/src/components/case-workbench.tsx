@@ -47,9 +47,10 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
             phase: "BLOCKED",
             message: "无法核验本机受控服务，案件访问保持禁用。",
             apiBase: null,
-            processId: null,
-            identityPhase: "UNAVAILABLE",
-            persistencePhase: "UNAVAILABLE",
+              processId: null,
+              identityPhase: "UNAVAILABLE",
+              enrollmentTrustPhase: "UNAVAILABLE",
+              persistencePhase: "UNAVAILABLE",
           });
         }
       }

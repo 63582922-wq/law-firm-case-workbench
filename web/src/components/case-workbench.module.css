@@ -338,7 +338,7 @@
 .securityHeading h2 { margin: 5px 0 8px; font: 600 23px var(--font-serif); }
 .securityHeading p:last-child { color: var(--ink-soft); font-size: 12px; }
 .securityBlockedPill { padding: 6px 9px; flex: 0 0 auto; border: 1px solid #d7b7ae; color: var(--red); background: var(--red-soft); font-size: 10px; }
-.securityStatusGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line-strong); border-top: 0; background: var(--sheet); }
+.securityStatusGrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line-strong); border-top: 0; background: var(--sheet); }
 .securityStatusGrid > div { min-height: 116px; padding: 16px; display: grid; align-content: start; gap: 7px; border-left: 1px solid var(--line); }
 .securityStatusGrid > div:first-child { border-left: 0; }
 .securityStatusGrid span, .securityStatusGrid small { color: var(--ink-faint); font-size: 10px; line-height: 1.5; }
@@ -379,5 +379,5 @@
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }
   .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.officialCasePolicy { grid-template-columns: 1fr; gap: 12px; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
-  .securityArea { padding-right: 20px; padding-left: 20px; }.securityStatusGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.securityStatusGrid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }.securityStatusGrid > div:nth-child(4) { border-top: 1px solid var(--line); }.securityColumns, .securityActions { grid-template-columns: 1fr; }
+  .securityArea { padding-right: 20px; padding-left: 20px; }.securityColumns, .securityActions { grid-template-columns: 1fr; }
 }

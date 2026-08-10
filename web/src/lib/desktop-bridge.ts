@@ -12,6 +12,7 @@ export type DesktopRuntimeStatus = {
   apiBase: string | null;
   processId: number | null;
   identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+  enrollmentTrustPhase: "NOT_CONFIGURED" | "BLOCKED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
   persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
 };
 
@@ -19,6 +20,7 @@ export type DesktopEnrollmentVaultStatus = {
   phase:
     | "NOT_INITIALIZED"
     | "INSTALLATION_READY"
+    | "CREDENTIAL_SAVED_VERIFIED"
     | "CREDENTIAL_PRESENT_UNVERIFIED"
     | "BROKEN_LOCAL_CREDENTIAL"
     | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
@@ -50,6 +52,10 @@ export async function disableLocalEnrollment(): Promise<DesktopEnrollmentVaultSt
   });
 }
 
+export async function importSignedEnrollmentPackage(): Promise<DesktopEnrollmentVaultStatus> {
+  return invoke<DesktopEnrollmentVaultStatus>("import_signed_enrollment_package");
+}
+
 export function installDesktopBridge(): void {
   if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined || window.lawCaseDesktop) {
     return;
@@ -59,6 +65,7 @@ export function installDesktopBridge(): void {
     runtimeStatus: readDesktopRuntimeStatus,
     enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
     initializeInstallation: initializeDesktopInstallation,
+    importSignedEnrollmentPackage,
     disableLocalEnrollment,
     async selectCaseFolder({ matterId }) {
       if (!UUID_PATTERN.test(matterId)) {

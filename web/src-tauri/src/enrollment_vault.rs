@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use keyring::{Entry, Error as KeyringError};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
@@ -64,6 +65,11 @@ impl CredentialStore for NativeKeyringStore {
 pub(crate) struct EnrollmentVault {
     store: Arc<dyn CredentialStore>,
     operation_lock: Mutex<()>,
+}
+
+pub(crate) struct EnrollmentVerificationContext {
+    pub(crate) installation_binding_sha256: String,
+    pub(crate) expected_current_sha256: Option<String>,
 }
 
 impl Default for EnrollmentVault {
@@ -153,6 +159,84 @@ impl EnrollmentVault {
         Ok(status)
     }
 
+    pub(crate) fn verification_context(&self) -> Result<EnrollmentVerificationContext, String> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let secret = self
+            .read_installation_secret()?
+            .ok_or_else(|| "请先初始化本机安全存储，再导入律所登记包。".to_string())?;
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未开始导入。".to_string())?;
+        Ok(EnrollmentVerificationContext {
+            installation_binding_sha256: format!("{:x}", Sha256::digest(secret.as_slice())),
+            expected_current_sha256: current.as_deref().map(envelope_sha256),
+        })
+    }
+
+    /// Persist an envelope only after a trusted verifier has authenticated the
+    /// exact bytes and returned their SHA-256.  This method is deliberately not
+    /// exposed as a Tauri command: the WebView can never submit arbitrary
+    /// identity material for storage.
+    pub(crate) fn commit_enrollment_after_verification(
+        &self,
+        envelope_text: &str,
+        verified_envelope_sha256: &str,
+        verified_installation_binding_sha256: &str,
+        expected_current_sha256: Option<&str>,
+    ) -> Result<EnrollmentVaultStatus, String> {
+        if !valid_enrollment_shape(envelope_text)
+            || !valid_sha256(verified_envelope_sha256)
+            || !valid_sha256(verified_installation_binding_sha256)
+            || expected_current_sha256.is_some_and(|value| !valid_sha256(value))
+        {
+            return Err("已验签登记回执格式无效；未写入本机凭证。".to_string());
+        }
+        let actual_hash = envelope_sha256(envelope_text);
+        if actual_hash != verified_envelope_sha256 {
+            return Err("登记凭证与已验签回执不一致；未写入本机凭证。".to_string());
+        }
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
+        let current_secret = self
+            .read_installation_secret()?
+            .ok_or_else(|| "本机安装秘密尚未就绪；未写入登记凭证。".to_string())?;
+        let current_binding = format!("{:x}", Sha256::digest(current_secret.as_slice()));
+        if current_binding != verified_installation_binding_sha256 {
+            return Err("本机安装秘密已变化；未保存绑定旧设备状态的凭证。".to_string());
+        }
+        let current = self
+            .store
+            .get(ENROLLMENT_ACCOUNT)
+            .map_err(|_| "无法读取当前登记凭证；未执行替换。".to_string())?;
+        let current_hash = current.as_deref().map(envelope_sha256);
+        let expected = expected_current_sha256.map(str::to_string);
+        if current_hash != expected {
+            return Err("当前登记凭证已变化；未覆盖较新的本机状态。".to_string());
+        }
+        self.store
+            .set(ENROLLMENT_ACCOUNT, envelope_text)
+            .map_err(|_| "无法写入已验签登记凭证。".to_string())?;
+        let readback = self.store.get(ENROLLMENT_ACCOUNT);
+        if !matches!(readback, Ok(Some(ref value)) if value == envelope_text) {
+            match current {
+                Some(ref prior) => {
+                    let _ = self.store.set(ENROLLMENT_ACCOUNT, prior);
+                }
+                None => {
+                    let _ = self.store.delete(ENROLLMENT_ACCOUNT);
+                }
+            }
+            return Err("登记凭证写入后复核失败；已尝试恢复原状态。".to_string());
+        }
+        Ok(self.status_locked())
+    }
+
     fn status_locked(&self) -> EnrollmentVaultStatus {
         let secret = match self.read_installation_secret() {
             Ok(secret) => secret,
@@ -164,19 +248,7 @@ impl EnrollmentVault {
         };
         let envelope_valid_shape = envelope
             .as_ref()
-            .map(|value| {
-                !value.is_empty()
-                    && value.len() <= MAX_ENROLLMENT_BYTES
-                    && serde_json::from_str::<serde_json::Value>(value)
-                        .ok()
-                        .and_then(|parsed| parsed.as_object().cloned())
-                        .map(|object| {
-                            object.len() == 2
-                                && object.contains_key("credential")
-                                && object.contains_key("signature")
-                        })
-                        .unwrap_or(false)
-            })
+            .map(|value| valid_enrollment_shape(value))
             .unwrap_or(true);
         if !envelope_valid_shape {
             return EnrollmentVaultStatus {
@@ -232,6 +304,32 @@ impl EnrollmentVault {
     }
 }
 
+fn valid_enrollment_shape(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ENROLLMENT_BYTES
+        && serde_json::from_str::<serde_json::Value>(value)
+            .ok()
+            .and_then(|parsed| parsed.as_object().cloned())
+            .map(|object| {
+                object.len() == 2
+                    && object.contains_key("credential")
+                    && object.contains_key("signature")
+            })
+            .unwrap_or(false)
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn envelope_sha256(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
 fn blocked_status(message: &str) -> EnrollmentVaultStatus {
     EnrollmentVaultStatus {
         phase: "UNAVAILABLE".to_string(),
@@ -245,9 +343,10 @@ fn blocked_status(message: &str) -> EnrollmentVaultStatus {
 mod tests {
     use super::{
         CredentialStore, ENROLLMENT_ACCOUNT, EnrollmentVault, INITIALIZE_CONFIRMATION,
-        INSTALLATION_ACCOUNT, LOCAL_DISABLE_CONFIRMATION, StoreFailure,
+        INSTALLATION_ACCOUNT, LOCAL_DISABLE_CONFIRMATION, StoreFailure, envelope_sha256,
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -355,5 +454,115 @@ mod tests {
         let values = store.values.lock().unwrap();
         assert!(values.contains_key(INSTALLATION_ACCOUNT));
         assert!(!values.contains_key(ENROLLMENT_ACCOUNT));
+    }
+
+    #[test]
+    fn verified_enrollment_commit_is_hash_bound_and_compare_and_set() {
+        let store = Arc::new(MemoryStore::default());
+        store.values.lock().unwrap().insert(
+            INSTALLATION_ACCOUNT.to_string(),
+            STANDARD.encode([3_u8; 32]),
+        );
+        let vault = EnrollmentVault::with_store(store.clone());
+        let first = r#"{"credential":{},"signature":"first"}"#;
+        assert!(
+            vault
+                .commit_enrollment_after_verification(
+                    first,
+                    &"0".repeat(64),
+                    &format!("{:x}", Sha256::digest([3_u8; 32])),
+                    None,
+                )
+                .is_err()
+        );
+        let first_hash = envelope_sha256(first);
+        assert!(
+            vault
+                .commit_enrollment_after_verification(first, &first_hash, &"0".repeat(64), None)
+                .is_err()
+        );
+        assert!(
+            !store
+                .values
+                .lock()
+                .unwrap()
+                .contains_key(ENROLLMENT_ACCOUNT)
+        );
+        let status = vault
+            .commit_enrollment_after_verification(
+                first,
+                &first_hash,
+                &format!("{:x}", Sha256::digest([3_u8; 32])),
+                None,
+            )
+            .unwrap();
+        assert_eq!(status.phase, "CREDENTIAL_PRESENT_UNVERIFIED");
+
+        let second = r#"{"credential":{},"signature":"second"}"#;
+        let second_hash = envelope_sha256(second);
+        assert!(
+            vault
+                .commit_enrollment_after_verification(
+                    second,
+                    &second_hash,
+                    &format!("{:x}", Sha256::digest([3_u8; 32])),
+                    None,
+                )
+                .is_err()
+        );
+        vault
+            .commit_enrollment_after_verification(
+                second,
+                &second_hash,
+                &format!("{:x}", Sha256::digest([3_u8; 32])),
+                Some(&first_hash),
+            )
+            .unwrap();
+        assert_eq!(
+            store.values.lock().unwrap().get(ENROLLMENT_ACCOUNT),
+            Some(&second.to_string())
+        );
+    }
+
+    #[test]
+    fn verified_enrollment_commit_requires_initialized_installation() {
+        let store = Arc::new(MemoryStore::default());
+        let vault = EnrollmentVault::with_store(store.clone());
+        let envelope = r#"{"credential":{},"signature":"first"}"#;
+        assert!(
+            vault
+                .commit_enrollment_after_verification(
+                    envelope,
+                    &envelope_sha256(envelope),
+                    &format!("{:x}", Sha256::digest([3_u8; 32])),
+                    None,
+                )
+                .is_err()
+        );
+        assert!(store.values.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn verification_context_exposes_only_binding_and_current_envelope_hashes() {
+        let store = Arc::new(MemoryStore::default());
+        let envelope = r#"{"credential":{},"signature":"first"}"#;
+        {
+            let mut values = store.values.lock().unwrap();
+            values.insert(
+                INSTALLATION_ACCOUNT.to_string(),
+                STANDARD.encode([3_u8; 32]),
+            );
+            values.insert(ENROLLMENT_ACCOUNT.to_string(), envelope.to_string());
+        }
+        let vault = EnrollmentVault::with_store(store);
+        let context = vault.verification_context().unwrap();
+        assert_eq!(
+            context.installation_binding_sha256,
+            format!("{:x}", Sha256::digest([3_u8; 32]))
+        );
+        assert_eq!(
+            context.expected_current_sha256,
+            Some(envelope_sha256(envelope))
+        );
     }
 }
