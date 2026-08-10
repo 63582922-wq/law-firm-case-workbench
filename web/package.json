@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
+    "desktop:build": "tauri build && ../backend/.venv/bin/python ../backend/scripts/finalize_macos_bundle.py",
     "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

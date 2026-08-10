@@ -10,6 +10,7 @@
 - 桌面连接：Tauri 壳暴露受控的“选择本案文件夹”和只读运行状态命令；选择后仍须在工作台确认范围，才会获得短时只读授权。
 - 本机服务：生产桌面包自带 Python/FastAPI sidecar，无需律师另装 Python；当前仅开放禁用态健康检查，身份和持久化未登记时案件路由不存在。
 - 身份与安全：桌面页读取 sidecar 的真实登记/持久化状态，分别显示进程、律所签名登记、数据库与案件访问四道门；真实签发服务缺失时不提供自助选角色或假登录按钮。
+- 法律案例研究：法律规则页直接读取仓库根 `knowledge/official_cases/registry.json`，展示已核验官方案例候选的争点、评测用途和官方链接；所有候选固定为“仅研究线索”，不能自动进入规则包或计算。
 
 ## 明确不做的事
 
@@ -38,7 +39,7 @@ pnpm desktop:dev
 pnpm desktop:build
 ```
 
-生产桌面构建会先用 PyInstaller 生成当前平台的自包含 sidecar，再完成 Next.js 静态导出和 Tauri 打包；不在应用内嵌入 Next.js 服务器。案件写操作仍只允许访问本机 loopback API。
+生产桌面构建会先用 PyInstaller 生成当前平台的自包含 sidecar，再完成 Next.js 静态导出和 Tauri 打包；macOS 本地 Alpha 随后校验固定包结构，进行由内到外的临时签名并执行严格包验证。不在应用内嵌入 Next.js 服务器。案件写操作仍只允许访问本机 loopback API。临时签名不等于 Apple Developer ID、公证或公开分发许可。
 
 ## 下一步接入条件
 

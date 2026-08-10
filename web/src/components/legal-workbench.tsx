@@ -11,6 +11,7 @@ import {
   type LegalReviewView,
   type OfficialSourceCaptureView,
 } from "@/lib/case-data-source";
+import { officialCasePolicyLinks, officialCaseResearchCatalog } from "@/lib/official-case-catalog";
 import styles from "./case-workbench.module.css";
 
 export function LegalWorkbench() {
@@ -227,6 +228,45 @@ export function LegalWorkbench() {
           <p>任一上游事实、证据、规则或来源失效，当前计算及提交材料自动转为失效。</p>
         </aside>
       </div>
+
+      <section className={styles.legalPanel} aria-labelledby="official-case-catalog-title">
+        <div className={styles.legalPanelHeading}>
+          <div><p className={styles.eyebrow}>案例研究层</p><h3 id="official-case-catalog-title">官方真实案例研究线索</h3></div>
+          <span>{officialCaseResearchCatalog.candidates.length} 项元数据 · 核验于 {officialCaseResearchCatalog.verifiedOn}</span>
+        </div>
+        <div className={styles.officialCasePolicy}>
+          <div>
+            <strong>只用于检索、类案比较和测试题设计</strong>
+            <p>当前目录只保存官方页面元数据。案例不会自动成为法源、裁判依据、案件事实或利息结论；律师阅读全文、核对时效与取得案内使用许可前，不能进入正式规则包。</p>
+          </div>
+          <nav aria-label="官方案例库规则">
+            {officialCasePolicyLinks.map((link) => <a href={link.url} key={link.url} rel="noreferrer" target="_blank">{link.label}</a>)}
+          </nav>
+        </div>
+        <div className={styles.officialCaseList}>
+          {officialCaseResearchCatalog.candidates.map((candidate, index) => (
+            <article className={styles.officialCaseRow} key={candidate.candidateId}>
+              <span className={styles.officialCaseIndex}>{String(index + 1).padStart(2, "0")}</span>
+              <div className={styles.officialCaseBody}>
+                <div className={styles.officialCaseTitleLine}>
+                  <strong>{candidate.title}</strong>
+                  <span>需律师阅读全文</span>
+                </div>
+                <div className={styles.officialCaseTags} aria-label="争点标签">
+                  {candidate.issueTags.map((tag) => <span key={tag}>{tag}</span>)}
+                </div>
+                <p>可用于：{candidate.evaluationUses.join("、")}</p>
+                <a href={candidate.officialUrl} rel="noreferrer" target="_blank">打开最高人民法院官方页面</a>
+              </div>
+              <div className={styles.officialCaseState}>
+                <strong>仅研究线索</strong>
+                <small>{candidate.acquisitionMode}</small>
+                <small>未进入规则包</small>
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
 
       <section className={styles.legalPanel} aria-labelledby="official-capture-title">
         <div className={styles.legalPanelHeading}>

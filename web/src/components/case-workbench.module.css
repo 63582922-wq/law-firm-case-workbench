@@ -182,6 +182,27 @@
 .legalGuardrail h3 { margin: 6px 0 13px; font: 600 18px var(--font-serif); line-height: 1.4; }
 .legalGuardrail ol { padding-left: 18px; display: grid; gap: 9px; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
 .legalGuardrail > p:last-child { margin-top: 17px; padding-top: 13px; border-top: 1px solid var(--line); color: var(--red); font-size: 10px; line-height: 1.6; }
+.officialCasePolicy { padding: 15px 17px; display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 24px; border-bottom: 1px solid var(--line-strong); background: var(--ochre-soft); }
+.officialCasePolicy > div { display: grid; gap: 6px; }
+.officialCasePolicy strong { color: var(--ochre); font-size: 11px; }
+.officialCasePolicy p { color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
+.officialCasePolicy nav { display: grid; align-content: start; gap: 6px; }
+.officialCasePolicy a { color: var(--ink); font-size: 9px; line-height: 1.5; text-underline-offset: 3px; }
+.officialCaseList { display: grid; }
+.officialCaseRow { min-height: 128px; padding: 15px 17px; display: grid; grid-template-columns: 32px minmax(0, 1fr) 118px; gap: 13px; align-items: start; border-top: 1px solid var(--line); }
+.officialCaseRow:first-child { border-top: 0; }
+.officialCaseIndex { padding-top: 2px; color: var(--line-strong); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.officialCaseBody { min-width: 0; display: grid; gap: 8px; }
+.officialCaseTitleLine { display: flex; justify-content: space-between; gap: 14px; align-items: start; }
+.officialCaseTitleLine strong { font-size: 12px; line-height: 1.55; }
+.officialCaseTitleLine > span { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #ddc99f; color: var(--ochre); background: var(--ochre-soft); font-size: 9px; }
+.officialCaseTags { display: flex; flex-wrap: wrap; gap: 5px; }
+.officialCaseTags span { padding: 3px 5px; border: 1px solid var(--line); color: var(--ink-soft); background: var(--sheet-muted); font-size: 9px; }
+.officialCaseBody p { color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
+.officialCaseBody a { width: fit-content; color: var(--ink); font-size: 9px; text-underline-offset: 3px; }
+.officialCaseState { display: grid; justify-items: end; gap: 6px; padding-top: 2px; text-align: right; }
+.officialCaseState strong { color: var(--ochre); font-size: 10px; }
+.officialCaseState small { color: var(--ink-faint); font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .legalRuleTable { overflow-x: auto; }
 .legalRuleRow { min-width: 840px; min-height: 55px; padding: 9px 14px; display: grid; grid-template-columns: 1.4fr .75fr .9fr .65fr 1.2fr; gap: 10px; align-items: center; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; }
 .legalRuleRow:first-child { border-top: 0; }
@@ -356,7 +377,7 @@
 @media (max-width: 1360px) {
   .topbar, .caseHeader, .footer { padding-right: 24px; padding-left: 24px; }.caseSubline { max-width: 615px; }.content { padding-right: 28px; padding-left: 28px; }.evidenceArea { padding-right: 20px; padding-left: 20px; }.evidenceColumns { grid-template-columns: 194px minmax(410px,1fr) 252px; }.documentStage { padding-right: 17px; padding-left: 17px; }.documentPaper { padding-right: 32px; padding-left: 32px; }.topbarMeta span:first-child { display: none; }
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }
-  .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.legalCaptureRuns { grid-template-columns: 1fr; }
+  .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.officialCasePolicy { grid-template-columns: 1fr; gap: 12px; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
   .securityArea { padding-right: 20px; padding-left: 20px; }.securityStatusGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.securityStatusGrid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }.securityStatusGrid > div:nth-child(4) { border-top: 1px solid var(--line); }.securityColumns, .securityActions { grid-template-columns: 1fr; }
 }
