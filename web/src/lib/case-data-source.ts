@@ -346,6 +346,12 @@ export type LegalFactBindingReceipt = {
   requestId: string | null;
 };
 
+export type LegalEventReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1687,6 +1693,65 @@ export async function approveLegalFactBinding(
   }
   if (payload.object_type !== "CASE_LEGAL_FACT_BINDING") {
     throw new Error("事实锚点回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function approveCaseLegalEvent(
+  input: {
+    expectedVersion: number;
+    eventKind: "CONTRACT_SIGNED" | "DISBURSEMENT" | "PAYMENT" | "DEFAULT" | "CLAIM_FILED" | "CASE_ACCEPTED" | "JUDGMENT";
+    localDate: string;
+    evidenceIds: string[];
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LegalEventReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以批准案件法律事件。");
+  }
+  if (!input.localDate) throw new Error("请填写法律事件日期。");
+  const evidenceIds = [...new Set(input.evidenceIds.filter(Boolean))];
+  if (!evidenceIds.length) throw new Error("请至少选择一页同案证据作为法律事件依据。");
+  const approvalHash = await sha256Text([
+    "case-legal-event-approval-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    input.eventKind,
+    input.localDate,
+    evidenceIds.sort().join(","),
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/legal-events`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        event_kind: input.eventKind,
+        local_date: input.localDate,
+        evidence_ids: evidenceIds,
+        approval_hash: approvalHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在法律事件确认前中断。请刷新法律与证据快照核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案件法律事件未建立"));
+  }
+  if (payload.object_type !== "CASE_LEGAL_EVENT") {
+    throw new Error("法律事件回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,

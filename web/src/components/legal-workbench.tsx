@@ -4,8 +4,10 @@ import { useEffect, useState } from "react";
 import {
   caseDataSourceConfig,
   approveLegalFactBinding,
+  approveCaseLegalEvent,
   loadLegalReview,
   loadCaseReview,
+  loadEvidenceReview,
   loadOfficialSourceCaptureReview,
   approveLprMultipleRuleVersion,
   queueOfficialSourceCapture,
@@ -13,6 +15,7 @@ import {
   reviewOfficialSourceCapture,
   type LegalReviewView,
   type CaseReviewView,
+  type EvidenceReviewView,
   type OfficialSourceCaptureView,
 } from "@/lib/case-data-source";
 import { officialCasePolicyLinks, officialCaseResearchCatalog } from "@/lib/official-case-catalog";
@@ -37,6 +40,15 @@ export function LegalWorkbench() {
   const [factBinding, setFactBinding] = useState({ factKey: "", factId: "", approved: false });
   const [bindingBusy, setBindingBusy] = useState(false);
   const [bindingNotice, setBindingNotice] = useState<string | null>(null);
+  const [evidenceReview, setEvidenceReview] = useState<EvidenceReviewView | null>(null);
+  const [legalEvent, setLegalEvent] = useState({
+    eventKind: "CLAIM_FILED" as const,
+    localDate: "",
+    evidenceIds: [] as string[],
+    approved: false,
+  });
+  const [eventBusy, setEventBusy] = useState(false);
+  const [eventNotice, setEventNotice] = useState<string | null>(null);
   const [lprRule, setLprRule] = useState({
     ruleId: "",
     ruleVersion: "",
@@ -75,6 +87,13 @@ export function LegalWorkbench() {
       })
       .catch((reason: unknown) => {
         if (active) setBindingNotice(reason instanceof Error ? reason.message : "案件事实快照读取失败");
+      });
+    loadEvidenceReview()
+      .then((result) => {
+        if (active) setEvidenceReview(result);
+      })
+      .catch((reason: unknown) => {
+        if (active) setEventNotice(reason instanceof Error ? reason.message : "案件证据快照读取失败");
       });
     return () => {
       active = false;
@@ -258,6 +277,33 @@ export function LegalWorkbench() {
     }
   }
 
+  async function approveLegalEvent() {
+    if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
+    if (!legalEvent.approved) {
+      setEventNotice("请先确认：事件日期与所选证据页已经由律师核对，系统不会从文件时间自动推定日期。");
+      return;
+    }
+    setEventBusy(true);
+    setEventNotice(null);
+    try {
+      const receipt = await approveCaseLegalEvent({
+        expectedVersion: review.matterVersion,
+        eventKind: legalEvent.eventKind,
+        localDate: legalEvent.localDate,
+        evidenceIds: legalEvent.evidenceIds,
+      });
+      const [refreshedLegal, refreshedEvidence] = await Promise.all([loadLegalReview(), loadEvidenceReview()]);
+      setReview(refreshedLegal);
+      setEvidenceReview(refreshedEvidence);
+      setLegalEvent((prior) => ({ ...prior, approved: false, evidenceIds: [] }));
+      setEventNotice(`案件法律事件已建立；案件版本更新为 ${receipt.matterVersion}。`);
+    } catch (reason: unknown) {
+      setEventNotice(reason instanceof Error ? reason.message : "案件法律事件未建立");
+    } finally {
+      setEventBusy(false);
+    }
+  }
+
   const legalFormulaSources = review.sources.filter(
     (source) => source.snapshotId
       && source.verificationStatus === "VERIFIED"
@@ -279,6 +325,9 @@ export function LegalWorkbench() {
     .filter((binding) => binding.status === "APPROVED")
     .map((binding) => binding.factKey))];
   const confirmedFacts = caseReview?.facts.filter((fact) => fact.status === "CONFIRMED") ?? [];
+  const includedEvidencePages = evidenceReview?.pages.filter(
+    (page) => page.disposition === "INCLUDE" && page.decisionId !== null,
+  ) ?? [];
 
   return (
     <section className={styles.legalArea} aria-label="法律规则">
@@ -539,6 +588,17 @@ export function LegalWorkbench() {
             <label className={styles.legalFactBindingCheck}><input checked={factBinding.approved} onChange={(event) => setFactBinding((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该事实已被审阅，并且确实是本规则适用所需的同案事实。</span></label>
             <button disabled={bindingBusy || !confirmedFacts.length} type="submit">{bindingBusy ? "正在绑定…" : "建立事实锚点"}</button>
             {bindingNotice && <p role="status">{bindingNotice}</p>}
+          </form>
+        )}
+        {review.status === "reviewable" && (
+          <form className={styles.legalEventForm} onSubmit={(event) => { event.preventDefault(); void approveLegalEvent(); }}>
+            <div><strong>建立案件法律事件</strong><small>事件日期不从文件时间自动推定；必须选择已纳入本案的证据页。</small></div>
+            <label><span>事件类型</span><select value={legalEvent.eventKind} onChange={(event) => setLegalEvent((prior) => ({ ...prior, eventKind: event.target.value as typeof prior.eventKind }))}>{["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"].map((item) => <option key={item} value={item}>{eventLabel(item)}</option>)}</select></label>
+            <label><span>法律事件日期</span><input required type="date" value={legalEvent.localDate} onChange={(event) => setLegalEvent((prior) => ({ ...prior, localDate: event.target.value }))} /></label>
+            <fieldset><legend>已纳入本案的证据页</legend>{includedEvidencePages.length ? includedEvidencePages.map((page) => <label key={page.pageId}><input checked={legalEvent.evidenceIds.includes(page.pageId)} onChange={(event) => setLegalEvent((prior) => ({ ...prior, evidenceIds: event.target.checked ? [...prior.evidenceIds, page.pageId] : prior.evidenceIds.filter((item) => item !== page.pageId) }))} type="checkbox" />{page.originalLabel} · 第 {page.pageNumber} 页</label>) : <small>当前页没有已纳入的证据页；请先在证据核验台完成页面取舍。</small>}</fieldset>
+            <label className={styles.legalEventCheck}><input checked={legalEvent.approved} onChange={(event) => setLegalEvent((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认事件日期、类型与所选证据页的关联已经核对。</span></label>
+            <button disabled={eventBusy || !includedEvidencePages.length} type="submit">{eventBusy ? "正在建立…" : "批准法律事件"}</button>
+            {eventNotice && <p role="status">{eventNotice}</p>}
           </form>
         )}
         {review.status === "reviewable" && (
