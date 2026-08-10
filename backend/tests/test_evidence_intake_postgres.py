@@ -35,6 +35,9 @@ class IntakeConnection:
         self.counts = {"active_count": 0, "registered_count": 1, "total_count": 1}
         self.summary = None
         self.exhausted: list[dict] = []
+        self.item_page_run = None
+        self.item_page_count = 0
+        self.item_page_rows: list[dict] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
         normalized = " ".join(sql.split())
@@ -69,6 +72,12 @@ class IntakeConnection:
             return FakeResult(row=self.counts)
         if normalized.startswith("SELECT run.run_id, run.scan_id"):
             return FakeResult(row=self.summary)
+        if normalized.startswith("SELECT run.run_id FROM evidence_intake_runs"):
+            return FakeResult(row=self.item_page_run)
+        if normalized.startswith("SELECT COUNT(*) AS total_count FROM evidence_intake_items"):
+            return FakeResult(row={"total_count": self.item_page_count})
+        if normalized.startswith("SELECT item_id, relative_path, detected_kind, status"):
+            return FakeResult(rows=self.item_page_rows)
         if normalized.startswith("SELECT run.scan_manifest_hash, scan.status"):
             return FakeResult(row=self.run)
         if normalized.startswith("UPDATE evidence_intake_items") and "RECOVERY_ATTEMPTS_EXHAUSTED" in normalized:
@@ -218,6 +227,40 @@ class EvidenceIntakePostgresTests(unittest.TestCase):
         self.assertEqual(summary.run["registered_items"], 1)
         self.assertNotIn("relative_path", summary.run)
         self.assertNotIn("lease_id", summary.run)
+
+    def test_item_page_exposes_relative_processing_results_without_worker_lease(self) -> None:
+        run_id = str(uuid4())
+        item_id = str(uuid4())
+        now = datetime.now(timezone.utc)
+        connection = IntakeConnection(version=8)
+        connection.item_page_run = {"run_id": run_id}
+        connection.item_page_count = 1
+        connection.item_page_rows = [
+            {
+                "item_id": item_id,
+                "relative_path": "微信转账记录/2022.xlsx",
+                "detected_kind": "SPREADSHEET",
+                "status": "REVIEW_REQUIRED",
+                "attempt_count": 1,
+                "outcome_code": "SPREADSHEET_CONVERSION_REQUIRED",
+                "evidence_file_id": None,
+                "created_at": now,
+                "completed_at": now,
+            }
+        ]
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect", return_value=Context(connection)):
+            page = self.store.list_evidence_intake_item_page(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                actor=self.lead,
+                limit=100,
+                cursor=None,
+                expected_version=8,
+            )
+        self.assertEqual(page.items[0]["outcome_code"], "SPREADSHEET_CONVERSION_REQUIRED")
+        self.assertEqual(page.items[0]["relative_path"], "微信转账记录/2022.xlsx")
+        self.assertNotIn("lease_id", page.items[0])
+        self.assertNotIn("expected_sha256", page.items[0])
 
     def test_expired_third_attempt_is_reaped_to_explicit_failure(self) -> None:
         run_id = str(uuid4())

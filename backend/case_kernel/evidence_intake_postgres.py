@@ -15,6 +15,8 @@ from .case_ledger_postgres import (
     _finish_command,
     _payload_hash,
     _read_projection_version,
+    _require_cursor_version,
+    _require_expected_projection_version,
     _require_positive_version,
     _require_roles,
     _require_text,
@@ -22,9 +24,19 @@ from .case_ledger_postgres import (
     _validate_read_identity,
     _validate_sha256,
     _validate_uuid,
+    _canonical_cursor_uuid,
+    _parse_utc_cursor_timestamp,
+    _utc_cursor_timestamp,
 )
 from .evidence_manifest_postgres import PostgresEvidenceManifestStore
 from .models import Actor, Role
+from .stable_pagination import (
+    StablePageCursor,
+    StablePaginationBlocked,
+    decode_page_cursor,
+    encode_page_cursor,
+    validate_page_limit,
+)
 
 
 @dataclass(frozen=True)
@@ -49,6 +61,17 @@ class PersistentEvidenceIntakeSummary:
     matter_id: str
     matter_version: int
     run: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class PersistentEvidenceIntakeItemListPage:
+    matter_id: str
+    matter_version: int
+    run_id: str
+    total_count: int
+    items: tuple[dict[str, Any], ...]
+    next_cursor: str | None
+    has_more: bool
 
 
 class PostgresEvidenceIntakeStore(PostgresEvidenceManifestStore):
@@ -592,6 +615,96 @@ class PostgresEvidenceIntakeStore(PostgresEvidenceManifestStore):
             run=_run_summary_payload(row),
         )
 
+    def list_evidence_intake_item_page(
+        self,
+        *,
+        matter_id: str,
+        run_id: str,
+        actor: Actor,
+        limit: int,
+        cursor: str | None,
+        expected_version: int | None = None,
+    ) -> PersistentEvidenceIntakeItemListPage:
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _validate_uuid("run_id", run_id)
+        _require_roles(actor, self._READ_ROLES)
+        page_limit = validate_page_limit(limit)
+        decoded = (
+            decode_page_cursor(cursor, expected_kind="EVIDENCE_INTAKE_ITEMS", expected_matter_id=matter_id)
+            if cursor is not None
+            else None
+        )
+        after_created_at, after_item_id = _intake_item_cursor_values(decoded, run_id=run_id)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(connection, actor=actor, matter_id=matter_id, allowed_roles=self._READ_ROLES)
+            matter_version = _read_projection_version(connection, matter_id=matter_id, firm_id=actor.firm_id)
+            _require_expected_projection_version(expected_version, matter_version)
+            _require_cursor_version(decoded, matter_version)
+            run = connection.execute(
+                """
+                SELECT run.run_id
+                FROM evidence_intake_runs run
+                JOIN local_folder_scans scan
+                  ON scan.scan_id = run.scan_id AND scan.matter_id = run.matter_id AND scan.firm_id = run.firm_id
+                WHERE run.run_id = %s AND run.matter_id = %s AND run.firm_id = %s
+                  AND run.status <> 'STALE' AND scan.status = 'APPROVED'
+                """,
+                (run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if run is None:
+                raise KeyError(run_id)
+            count_row = connection.execute(
+                """
+                SELECT COUNT(*) AS total_count
+                FROM evidence_intake_items
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s
+                """,
+                (run_id, matter_id, actor.firm_id),
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT item_id, relative_path, detected_kind, status, attempt_count,
+                       outcome_code, evidence_file_id, created_at, completed_at
+                FROM evidence_intake_items
+                WHERE run_id = %s AND matter_id = %s AND firm_id = %s
+                  AND (%s::timestamptz IS NULL OR (created_at, item_id) > (%s::timestamptz, %s::uuid))
+                ORDER BY created_at ASC, item_id ASC
+                LIMIT %s
+                """,
+                (
+                    run_id,
+                    matter_id,
+                    actor.firm_id,
+                    after_created_at,
+                    after_created_at,
+                    after_item_id,
+                    page_limit + 1,
+                ),
+            ).fetchall()
+        visible = rows[:page_limit]
+        has_more = len(rows) > page_limit
+        next_cursor = None
+        if has_more and visible:
+            next_cursor = encode_page_cursor(
+                kind="EVIDENCE_INTAKE_ITEMS",
+                matter_id=matter_id,
+                matter_version=matter_version,
+                sort_values=(
+                    run_id,
+                    _utc_cursor_timestamp(visible[-1]["created_at"]),
+                    str(visible[-1]["item_id"]),
+                ),
+            )
+        return PersistentEvidenceIntakeItemListPage(
+            matter_id=matter_id,
+            matter_version=matter_version,
+            run_id=run_id,
+            total_count=int(count_row["total_count"] if count_row else 0),
+            items=tuple(_intake_item_payload(row) for row in visible),
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
     def reap_exhausted_evidence_intake_items(
         self,
         *,
@@ -741,6 +854,35 @@ def _run_summary_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "review_required_items": row["review_required_items"],
         "blocked_items": row["blocked_items"],
         "failed_items": row["failed_items"],
+        "created_at": row["created_at"].isoformat(),
+        "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+    }
+
+
+def _intake_item_cursor_values(
+    cursor: StablePageCursor | None,
+    *,
+    run_id: str,
+) -> tuple[datetime | None, str | None]:
+    if cursor is None:
+        return None, None
+    if len(cursor.sort_values) != 3 or cursor.sort_values[0] != run_id:
+        raise StablePaginationBlocked("evidence intake item cursor scope is invalid")
+    return (
+        _parse_utc_cursor_timestamp(cursor.sort_values[1]),
+        _canonical_cursor_uuid(cursor.sort_values[2]),
+    )
+
+
+def _intake_item_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "item_id": str(row["item_id"]),
+        "relative_path": row["relative_path"],
+        "detected_kind": row["detected_kind"],
+        "status": row["status"],
+        "attempt_count": row["attempt_count"],
+        "outcome_code": row["outcome_code"],
+        "evidence_file_id": str(row["evidence_file_id"]) if row["evidence_file_id"] else None,
         "created_at": row["created_at"].isoformat(),
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
     }

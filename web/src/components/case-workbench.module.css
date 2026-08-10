@@ -386,6 +386,18 @@
 .intakeRunCounts span { padding: 8px 10px; display: grid; gap: 2px; color: var(--ink-faint); border-right: 1px solid #cbd6ce; font-size: 9px; }
 .intakeRunCounts span:last-child { border-right: 0; }
 .intakeRunCounts strong { color: var(--ink); font: 600 15px var(--font-serif); }
+.intakeItemList { display: grid; border: 1px solid #cbd6ce; background: var(--sheet); }
+.intakeItemHeading { padding: 9px 10px; display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid #cbd6ce; }
+.intakeItemHeading strong { font-size: 10px; }
+.intakeItemHeading span { color: var(--ink-faint); font-size: 9px; }
+.intakeItemRow { min-height: 46px; padding: 8px 10px; display: grid; grid-template-columns: 72px minmax(0, 1fr) 72px; gap: 10px; align-items: center; border-bottom: 1px solid var(--line); }
+.intakeItemRow > div { min-width: 0; display: grid; gap: 3px; }
+.intakeItemRow > div strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.intakeItemRow small, .intakeItemRow > span:last-child { color: var(--ink-faint); font-size: 9px; }
+.intakeItemRow > span:last-child { text-align: right; }
+.intakeItemState { width: max-content; padding: 3px 6px; border: 1px solid var(--line-strong); color: var(--ink-soft); font-size: 9px; background: var(--sheet-muted); }
+.intakeItemList > button { min-height: 34px; border: 0; color: var(--ink); background: var(--sheet-muted); font: inherit; font-size: 9px; cursor: pointer; }
+.intakeItemList > button:disabled { color: var(--ink-faint); cursor: not-allowed; }
 
 @media (max-width: 1360px) {
   .topbar, .caseHeader, .footer { padding-right: 24px; padding-left: 24px; }.caseSubline { max-width: 615px; }.content { padding-right: 28px; padding-left: 28px; }.evidenceArea { padding-right: 20px; padding-left: 20px; }.evidenceColumns { grid-template-columns: 194px minmax(410px,1fr) 252px; }.documentStage { padding-right: 17px; padding-left: 17px; }.documentPaper { padding-right: 32px; padding-left: 32px; }.topbarMeta span:first-child { display: none; }

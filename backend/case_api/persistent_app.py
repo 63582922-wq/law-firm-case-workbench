@@ -119,6 +119,7 @@ from .schemas import (
     PersistentEvidenceIntakeFinalizeRequest,
     PersistentEvidenceIntakeHeartbeatRequest,
     PersistentEvidenceIntakeHeartbeatResponse,
+    PersistentEvidenceIntakeItemPageResponse,
     PersistentEvidenceIntakeLeaseResponse,
     PersistentEvidenceIntakeReapRequest,
     PersistentEvidenceIntakeRunRequest,
@@ -229,6 +230,8 @@ class PersistentEvidenceManifestPort(Protocol):
     def reap_exhausted_evidence_intake_items(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def get_current_evidence_intake_summary(self, *, matter_id: str, actor: Actor): ...
+
+    def list_evidence_intake_item_page(self, **kwargs): ...
 
     def register_original_file(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
@@ -2252,6 +2255,30 @@ def create_persistent_app(dependencies: PersistentApiDependencies | None = None)
             actor=identity.actor,
         )
         return PersistentEvidenceIntakeSummaryResponse.model_validate(summary.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/evidence-intake-runs/{run_id}/items",
+        response_model=PersistentEvidenceIntakeItemPageResponse,
+        tags=["evidence-access"],
+    )
+    async def list_evidence_intake_items(
+        matter_id: UUID,
+        run_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        evidence_store: Annotated[PersistentEvidenceManifestPort, Depends(get_evidence_store)],
+        limit: Annotated[int, Query(ge=1, le=100)] = DEFAULT_PAGE_SIZE,
+        cursor: Annotated[str | None, Query(min_length=20, max_length=512)] = None,
+        expected_version: Annotated[int | None, Query(ge=1)] = None,
+    ) -> PersistentEvidenceIntakeItemPageResponse:
+        page = evidence_store.list_evidence_intake_item_page(
+            matter_id=str(matter_id),
+            run_id=str(run_id),
+            actor=identity.actor,
+            limit=limit,
+            cursor=cursor,
+            expected_version=expected_version,
+        )
+        return PersistentEvidenceIntakeItemPageResponse.model_validate(page.__dict__)
 
     @app.post(
         "/v1/matters/{matter_id}/evidence-intake-runs",

@@ -16,6 +16,7 @@ import {
   issueLocalFolderGrant,
   loadEvidenceReview,
   loadLocalFolderIntake,
+  loadMoreEvidenceIntakeItems,
   loadMoreEvidencePages,
   loadMoreLocalFolderFiles,
   lockEvidenceManifest,
@@ -71,7 +72,7 @@ export function EvidenceWorkbench() {
   const [folderBusy, setFolderBusy] = useState<"select" | "grant" | null>(null);
   const [folderNotice, setFolderNotice] = useState<string | null>(null);
   const [folderIntake, setFolderIntake] = useState<LocalFolderIntakeView | null>(null);
-  const [intakeBusy, setIntakeBusy] = useState<"scan" | "approve" | "enqueue" | "more" | null>(null);
+  const [intakeBusy, setIntakeBusy] = useState<"scan" | "approve" | "enqueue" | "more" | "intake-items" | null>(null);
   const [intakeConfirmed, setIntakeConfirmed] = useState(false);
   const [intakeRunConfirmed, setIntakeRunConfirmed] = useState(false);
   const [intakeNotice, setIntakeNotice] = useState<string | null>(null);
@@ -376,6 +377,21 @@ export function EvidenceWorkbench() {
     }
   }
 
+  async function loadNextEvidenceIntakeItems() {
+    if (!folderIntake || intakeBusy !== null) return;
+    setIntakeBusy("intake-items");
+    setIntakeNotice(null);
+    try {
+      const refreshed = await loadMoreEvidenceIntakeItems(folderIntake);
+      setFolderIntake(refreshed);
+      setIntakeNotice(`已载入 ${refreshed.intakeItemPage.loadedCount} / ${refreshed.intakeItemPage.totalCount} 条材料处理记录。`);
+    } catch (reason: unknown) {
+      setIntakeNotice(reason instanceof Error ? `${reason.message} 已载入记录仍保留。` : "后续处理记录载入失败；已载入记录仍保留。");
+    } finally {
+      setIntakeBusy(null);
+    }
+  }
+
   async function readOriginalPage() {
     if (!folderGrant || !selected) {
       setFolderNotice("请先选择并确认本案的本地案卷文件夹。");
@@ -606,7 +622,30 @@ export function EvidenceWorkbench() {
                 <span><strong>{folderIntake.intakeRun.reviewRequiredItems}</strong>需转换或人工处理</span>
                 <span><strong>{folderIntake.intakeRun.blockedItems + folderIntake.intakeRun.failedItems}</strong>已阻断/失败</span>
               </div>
-              <p>非 PDF 文件不会被伪造成页级证据；图片、Word、Excel、邮件和压缩包会进入后续安全转换或人工处理队列。</p>
+              <p>非 PDF 文件不会被伪造成页级证据。系统会先检查真实格式、宏与外链、危险路径、加密和异常压缩，再决定登记、待转换或阻断。</p>
+              {folderIntake.intakeItems.length > 0 && (
+                <div className={styles.intakeItemList}>
+                  <div className={styles.intakeItemHeading}>
+                    <strong>材料处理清单</strong>
+                    <span>已显示 {folderIntake.intakeItemPage.loadedCount} / {folderIntake.intakeItemPage.totalCount}</span>
+                  </div>
+                  {folderIntake.intakeItems.map((item) => (
+                    <div className={styles.intakeItemRow} key={item.itemId}>
+                      <span className={styles.intakeItemState}>{intakeItemStatusLabel(item.status)}</span>
+                      <div>
+                        <strong>{item.relativePath}</strong>
+                        <small>{folderKindLabel(item.detectedKind)} · {intakeOutcomeLabel(item.outcomeCode)}</small>
+                      </div>
+                      <span>第 {item.attemptCount || 0} 次处理</span>
+                    </div>
+                  ))}
+                  {folderIntake.intakeItemPage.hasMore && (
+                    <button disabled={intakeBusy !== null} onClick={() => void loadNextEvidenceIntakeItems()} type="button">
+                      {intakeBusy === "intake-items" ? "正在载入…" : "继续载入 100 条处理记录"}
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           )}
           {intakeNotice && <div className={styles.auditNotice} role="status">{intakeNotice}</div>}
@@ -976,6 +1015,64 @@ function intakeRunStatusLabel(status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "PART
   if (status === "RUNNING") return "本机正在核验并登记材料";
   if (status === "SUCCEEDED") return "当前范围的材料已完成登记";
   return "材料接收完成，但仍有需要处理的文件";
+}
+
+function intakeItemStatusLabel(status: LocalFolderIntakeView["intakeItems"][number]["status"]): string {
+  const labels: Record<LocalFolderIntakeView["intakeItems"][number]["status"], string> = {
+    QUEUED: "等待处理",
+    RUNNING: "正在检查",
+    REGISTERED: "已登记",
+    REVIEW_REQUIRED: "待转换",
+    BLOCKED: "已阻断",
+    FAILED: "处理失败",
+  };
+  return labels[status];
+}
+
+function intakeOutcomeLabel(code: string | null): string {
+  if (!code) return "尚无处理结论";
+  const labels: Record<string, string> = {
+    IMAGE_CONVERSION_REQUIRED: "图片结构已核验，等待生成安全 PDF",
+    HEIC_CONVERSION_REQUIRED: "HEIC 签名已核验，等待隔离转换",
+    WORD_CONVERSION_REQUIRED: "Word 容器已核验，等待隔离转换",
+    SPREADSHEET_CONVERSION_REQUIRED: "表格容器已核验，等待隔离转换",
+    LEGACY_SPREADSHEET_CONVERSION_REQUIRED: "旧版表格等待隔离转换",
+    TEXT_CONVERSION_REQUIRED: "文本结构已核验，等待排版",
+    EMAIL_CONVERSION_REQUIRED: "邮件结构已核验，等待安全展开",
+    ARCHIVE_EXPANSION_REQUIRES_APPROVAL: "压缩包结构已核验，展开前需批准",
+    UNSUPPORTED_FILE_TYPE: "暂不支持自动处理",
+    MALWARE_DETECTED: "本机扫描发现恶意内容",
+    MALWARE_SCAN_INDETERMINATE: "本机扫描未得出可信结论",
+    EMPTY_FILE: "空文件",
+    FILE_SIGNATURE_MISMATCH: "扩展名与真实格式不一致",
+    IMAGE_FORMAT_UNSUPPORTED: "图片格式不受支持",
+    IMAGE_PIXEL_LIMIT: "图片像素规模超过安全上限",
+    IMAGE_MULTIFRAME_UNSUPPORTED: "多帧图片暂不自动处理",
+    IMAGE_MALFORMED: "图片结构损坏",
+    OFFICE_ACTIVE_CONTENT: "Office 文件含宏、ActiveX 或嵌入对象",
+    OFFICE_EXTERNAL_RELATIONSHIP: "Office 文件含外部链接",
+    OFFICE_UNSAFE_RELATIONSHIP: "Office 文件包含越界关系路径",
+    OFFICE_CONTAINER_MALFORMED: "Office 文件结构损坏",
+    OFFICE_RELATIONSHIP_MALFORMED: "Office 关系文件损坏",
+    OFFICE_XML_ACTIVE_CONTENT: "Office XML 含主动内容声明",
+    ARCHIVE_UNSAFE_PATH: "压缩包含越界路径",
+    ARCHIVE_DUPLICATE_PATH: "压缩包含冲突路径",
+    ARCHIVE_ENCRYPTED: "压缩包已加密",
+    ARCHIVE_SYMBOLIC_LINK: "压缩包含符号链接",
+    ARCHIVE_ENTRY_LIMIT: "压缩包条目过多",
+    ARCHIVE_ENTRY_SIZE_LIMIT: "压缩包单项过大",
+    ARCHIVE_TOTAL_SIZE_LIMIT: "压缩包展开规模过大",
+    ARCHIVE_COMPRESSION_RATIO_LIMIT: "压缩比例异常",
+    ARCHIVE_MALFORMED: "压缩包结构损坏",
+    TEXT_BINARY_CONTENT: "文件含二进制内容，不是可信文本",
+    TEXT_ENCODING_UNSUPPORTED: "文本编码不受支持",
+    TEXT_CONTROL_CONTENT: "文本含异常控制字符",
+    EMAIL_MALFORMED: "邮件结构损坏",
+    EMAIL_PART_LIMIT: "邮件组成部分过多",
+    EMAIL_UNSAFE_ATTACHMENT_NAME: "邮件附件名包含危险路径",
+    RECOVERY_ATTEMPTS_EXHAUSTED: "自动恢复次数已用尽",
+  };
+  return labels[code] ?? `需要管理员复核（${code}）`;
 }
 
 function folderChangeLabel(kind: LocalFolderIntakeView["files"][number]["changeKind"]): string {

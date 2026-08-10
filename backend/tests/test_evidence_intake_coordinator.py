@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 import unittest
+import zipfile
 
 from reportlab.pdfgen import canvas
 
@@ -113,12 +114,14 @@ class EvidenceIntakeCoordinatorTests(unittest.TestCase):
             root.mkdir()
             source = root / "微信转账记录" / "2022.xlsx"
             source.parent.mkdir()
-            source.write_bytes(b"synthetic spreadsheet")
+            with zipfile.ZipFile(source, "w") as archive:
+                archive.writestr("[Content_Types].xml", "<Types/>")
+                archive.writestr("xl/workbook.xml", "<workbook/>")
             result, persistence = self.coordinate(root, source, "SPREADSHEET")
         self.assertEqual(result.outcome, "REVIEW_REQUIRED")
-        self.assertEqual(result.reason_code, "SPREADSHEET_RENDER_REQUIRED")
+        self.assertEqual(result.reason_code, "SPREADSHEET_CONVERSION_REQUIRED")
         self.assertEqual([name for name, _ in persistence.calls], ["finalize"])
-        self.assertEqual(persistence.calls[0][1]["outcome_code"], "SPREADSHEET_RENDER_REQUIRED")
+        self.assertEqual(persistence.calls[0][1]["outcome_code"], "SPREADSHEET_CONVERSION_REQUIRED")
 
 
 if __name__ == "__main__":

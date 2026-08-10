@@ -32,7 +32,10 @@ from case_kernel.evidence_manifest_postgres import (
     PersistentLocalFolderFileListPage,
     PersistentLocalFolderIntakeSummary,
 )
-from case_kernel.evidence_intake_postgres import PersistentEvidenceIntakeSummary
+from case_kernel.evidence_intake_postgres import (
+    PersistentEvidenceIntakeItemListPage,
+    PersistentEvidenceIntakeSummary,
+)
 from case_kernel.formal_calculation_postgres import PersistentFormalCalculationSnapshot
 from case_kernel.fact_claim_ledger import AssertionOrigin, FactAssertion, FactStatus
 from case_kernel.models import Actor, Role
@@ -345,6 +348,31 @@ class FakePersistentEvidenceStore:
                 "created_at": datetime(2026, 8, 10, 8, 5, tzinfo=timezone.utc).isoformat(),
                 "completed_at": None,
             },
+        )
+
+    def list_evidence_intake_item_page(self, **kwargs):
+        self.calls.append(("evidence_intake_items", kwargs))
+        now = datetime(2026, 8, 10, 8, 6, tzinfo=timezone.utc)
+        return PersistentEvidenceIntakeItemListPage(
+            matter_id=kwargs["matter_id"],
+            matter_version=5,
+            run_id=kwargs["run_id"],
+            total_count=1,
+            items=(
+                {
+                    "item_id": str(uuid4()),
+                    "relative_path": "微信转账记录/2022.xlsx",
+                    "detected_kind": "SPREADSHEET",
+                    "status": "REVIEW_REQUIRED",
+                    "attempt_count": 1,
+                    "outcome_code": "SPREADSHEET_CONVERSION_REQUIRED",
+                    "evidence_file_id": None,
+                    "created_at": now.isoformat(),
+                    "completed_at": now.isoformat(),
+                },
+            ),
+            next_cursor=None,
+            has_more=False,
         )
 
     def enqueue_evidence_intake_run(self, **kwargs):
@@ -1150,6 +1178,14 @@ class PersistentApiTests(unittest.TestCase):
             intake_run = client.get(f"/v1/matters/{self.matter_id}/evidence-intake-runs/current")
             self.assertEqual(intake_run.status_code, 200, intake_run.text)
             self.assertEqual(intake_run.json()["run"]["queued_items"], 1)
+            intake_items = client.get(
+                f"/v1/matters/{self.matter_id}/evidence-intake-runs/{intake_run.json()['run']['run_id']}/items"
+                "?limit=100&expected_version=5"
+            )
+            self.assertEqual(intake_items.status_code, 200, intake_items.text)
+            self.assertEqual(intake_items.json()["items"][0]["outcome_code"], "SPREADSHEET_CONVERSION_REQUIRED")
+            self.assertNotIn("lease_id", intake_items.text)
+            self.assertNotIn("expected_sha256", intake_items.text)
             queued = client.post(
                 f"/v1/matters/{self.matter_id}/evidence-intake-runs",
                 headers={"Idempotency-Key": "evidence-intake-enqueue-api-001"},

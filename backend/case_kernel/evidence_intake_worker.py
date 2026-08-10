@@ -18,6 +18,7 @@ from pypdf import PdfReader
 from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject
 
 from .local_access_grants import AuthorizedOriginalFile
+from .material_format_inspection import inspect_non_pdf_material
 
 
 class EvidenceIntakeBlocked(ValueError):
@@ -93,16 +94,6 @@ class EvidenceIntakeInspection:
     scanner_definitions_version: str
 
 
-_REVIEW_CODES = {
-    "IMAGE": "IMAGE_RENDER_REQUIRED",
-    "WORD_DOCUMENT": "WORD_RENDER_REQUIRED",
-    "SPREADSHEET": "SPREADSHEET_RENDER_REQUIRED",
-    "TEXT": "TEXT_REVIEW_REQUIRED",
-    "EMAIL": "EMAIL_REVIEW_REQUIRED",
-    "ARCHIVE": "ARCHIVE_REVIEW_REQUIRED",
-    "OTHER": "UNSUPPORTED_FILE_TYPE",
-}
-
 _DANGEROUS_PDF_NAMES = {
     "/AA",
     "/EmbeddedFile",
@@ -156,15 +147,16 @@ def inspect_authorized_original(
         )
 
     if detected_kind != "PDF":
-        reason = _REVIEW_CODES.get(detected_kind, "UNSUPPORTED_FILE_TYPE")
+        format_inspection = inspect_non_pdf_material(source.path, detected_kind=detected_kind)
         result = _result(
             source,
             detected_kind=detected_kind,
             receipt=receipt,
-            outcome="REVIEW_REQUIRED",
-            reason_code=reason,
+            outcome=format_inspection.outcome,
+            reason_code=format_inspection.reason_code,
             media_type=None,
             page_count=None,
+            format_inspection_hash=format_inspection.details_hash,
         )
         _verify_immutable_source(source)
         return result
@@ -281,9 +273,10 @@ def _result(
     reason_code: str | None,
     media_type: str | None,
     page_count: int | None,
+    format_inspection_hash: str | None = None,
 ) -> EvidenceIntakeInspection:
     payload = {
-        "schema_version": "evidence-intake-inspection-v1",
+        "schema_version": "evidence-intake-inspection-v2",
         "relative_path": source.relative_path,
         "byte_size": source.byte_size,
         "content_sha256": source.sha256,
@@ -293,6 +286,7 @@ def _result(
         "reason_code": reason_code,
         "media_type": media_type,
         "page_count": page_count,
+        "format_inspection_hash": format_inspection_hash,
     }
     inspection_hash = sha256(json.dumps(payload, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return EvidenceIntakeInspection(

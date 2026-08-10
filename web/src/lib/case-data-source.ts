@@ -154,6 +154,17 @@ export type LocalFolderIntakeView = {
     createdAt: string;
     completedAt: string | null;
   } | null;
+  intakeItems: {
+    itemId: string;
+    relativePath: string;
+    detectedKind: string;
+    status: "QUEUED" | "RUNNING" | "REGISTERED" | "REVIEW_REQUIRED" | "BLOCKED" | "FAILED";
+    attemptCount: number;
+    outcomeCode: string | null;
+    evidenceFileId: string | null;
+    completedAt: string | null;
+  }[];
+  intakeItemPage: { loadedCount: number; totalCount: number; nextCursor: string | null; hasMore: boolean };
 };
 
 export type OriginalPagePreviewDelivery = {
@@ -521,6 +532,25 @@ type PersistentEvidenceIntakeSummary = {
     created_at: string;
     completed_at: string | null;
   } | null;
+};
+
+type PersistentEvidenceIntakeItemPage = {
+  matter_id: string;
+  matter_version: number;
+  run_id: string;
+  total_count: number;
+  items: {
+    item_id: string;
+    relative_path: string;
+    detected_kind: string;
+    status: "QUEUED" | "RUNNING" | "REGISTERED" | "REVIEW_REQUIRED" | "BLOCKED" | "FAILED";
+    attempt_count: number;
+    outcome_code: string | null;
+    evidence_file_id: string | null;
+    completed_at: string | null;
+  }[];
+  next_cursor: string | null;
+  has_more: boolean;
 };
 
 type PersistentFormalCalculationSnapshot = {
@@ -1407,10 +1437,17 @@ export async function loadLocalFolderIntake(
       files: [],
       filePage: { loadedCount: 0, totalCount: 0, nextCursor: null, hasMore: false },
       intakeRun: mapEvidenceIntakeRun(runSummary.run),
+      intakeItems: [],
+      intakeItemPage: { loadedCount: 0, totalCount: 0, nextCursor: null, hasMore: false },
     };
   }
-  const page = await loadPersistentLocalFolderFilePage(config, displayed.scan_id, summary.matter_version, null);
-  return mapLocalFolderIntake(summary, page, runSummary);
+  const [page, intakeItemPage] = await Promise.all([
+    loadPersistentLocalFolderFilePage(config, displayed.scan_id, summary.matter_version, null),
+    runSummary.run
+      ? loadPersistentEvidenceIntakeItemPage(config, runSummary.run.run_id, summary.matter_version, null)
+      : Promise.resolve(null),
+  ]);
+  return mapLocalFolderIntake(summary, page, runSummary, intakeItemPage);
 }
 
 export async function loadMoreLocalFolderFiles(
@@ -1430,6 +1467,30 @@ export async function loadMoreLocalFolderFiles(
     files: mergeById(intake.files, mapLocalFolderFiles(page.items), (item) => `${item.changeKind}:${item.relativePath}`),
     filePage: {
       loadedCount: Math.min(page.total_count, intake.filePage.loadedCount + page.items.length),
+      totalCount: page.total_count,
+      nextCursor: page.next_cursor,
+      hasMore: page.has_more,
+    },
+  };
+}
+
+export async function loadMoreEvidenceIntakeItems(
+  intake: LocalFolderIntakeView,
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LocalFolderIntakeView> {
+  if (!intake.intakeRun || !intake.intakeItemPage.hasMore || !intake.intakeItemPage.nextCursor) return intake;
+  if (config.kind !== "persistent-preview") throw new Error("只有本机持久化工作台可以继续读取材料处理清单。");
+  const page = await loadPersistentEvidenceIntakeItemPage(
+    config,
+    intake.intakeRun.runId,
+    intake.matterVersion,
+    intake.intakeItemPage.nextCursor,
+  );
+  return {
+    ...intake,
+    intakeItems: mergeById(intake.intakeItems, mapEvidenceIntakeItems(page.items), (item) => item.itemId),
+    intakeItemPage: {
+      loadedCount: Math.min(page.total_count, intake.intakeItemPage.loadedCount + page.items.length),
       totalCount: page.total_count,
       nextCursor: page.next_cursor,
       hasMore: page.has_more,
@@ -1540,6 +1601,29 @@ async function loadPersistentLocalFolderFilePage(
   if (!response.ok || !("items" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "案卷文件清单不可用"));
   if (payload.matter_version !== matterVersion || payload.scan_id !== scanId) {
     throw new Error("案卷盘点在载入文件期间已变化，请重新载入。");
+  }
+  return payload;
+}
+
+async function loadPersistentEvidenceIntakeItemPage(
+  config: Extract<CaseDataSourceConfig, { kind: "persistent-preview" }>,
+  runId: string,
+  matterVersion: number,
+  cursor: string | null,
+): Promise<PersistentEvidenceIntakeItemPage> {
+  const query: Record<string, string> = { limit: "100", expected_version: String(matterVersion) };
+  if (cursor) query.cursor = cursor;
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/evidence-intake-runs/${runId}/items`,
+    { headers: { Accept: "application/json" } },
+    "desktop-session",
+    query,
+  );
+  const payload = (await response.json()) as PersistentEvidenceIntakeItemPage | ErrorEnvelope;
+  if (!response.ok || !("items" in payload)) throw new Error(errorMessage(payload as ErrorEnvelope, "材料处理清单不可用"));
+  if (payload.matter_version !== matterVersion || payload.run_id !== runId) {
+    throw new Error("案件在载入材料处理清单期间已变化，请重新载入。");
   }
   return payload;
 }
@@ -2055,6 +2139,7 @@ function mapLocalFolderIntake(
   summary: PersistentLocalFolderIntakeSummary,
   page: PersistentLocalFolderFilePage,
   runSummary: PersistentEvidenceIntakeSummary,
+  intakeItemPage: PersistentEvidenceIntakeItemPage | null,
 ): LocalFolderIntakeView {
   const displayed = summary.candidate_scan ?? summary.approved_scan;
   return {
@@ -2071,6 +2156,13 @@ function mapLocalFolderIntake(
       hasMore: page.has_more,
     },
     intakeRun: mapEvidenceIntakeRun(runSummary.run),
+    intakeItems: mapEvidenceIntakeItems(intakeItemPage?.items ?? []),
+    intakeItemPage: {
+      loadedCount: intakeItemPage?.items.length ?? 0,
+      totalCount: intakeItemPage?.total_count ?? 0,
+      nextCursor: intakeItemPage?.next_cursor ?? null,
+      hasMore: intakeItemPage?.has_more ?? false,
+    },
   };
 }
 
@@ -2091,6 +2183,19 @@ function mapEvidenceIntakeRun(run: PersistentEvidenceIntakeSummary["run"]): Loca
     createdAt: run.created_at,
     completedAt: run.completed_at,
   };
+}
+
+function mapEvidenceIntakeItems(items: PersistentEvidenceIntakeItemPage["items"]): LocalFolderIntakeView["intakeItems"] {
+  return items.map((item) => ({
+    itemId: item.item_id,
+    relativePath: item.relative_path,
+    detectedKind: item.detected_kind,
+    status: item.status,
+    attemptCount: item.attempt_count,
+    outcomeCode: item.outcome_code,
+    evidenceFileId: item.evidence_file_id,
+    completedAt: item.completed_at,
+  }));
 }
 
 function mapLocalFolderScanSummary(item: PersistentLocalFolderScanSummary): LocalFolderScanSummary {

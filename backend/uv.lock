@@ -375,6 +375,7 @@ source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
+    { name = "pillow" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pypdf" },
     { name = "reportlab" },
@@ -384,7 +385,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "httpx2" },
-    { name = "pillow" },
     { name = "pyinstaller" },
 ]
 
@@ -392,6 +392,7 @@ dev = [
 requires-dist = [
     { name = "cryptography", specifier = ">=50,<51" },
     { name = "fastapi", specifier = ">=0.115,<1" },
+    { name = "pillow", specifier = ">=12.2,<13" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
     { name = "pypdf", specifier = ">=6.10,<7" },
     { name = "reportlab", specifier = ">=4.4,<5" },
@@ -401,7 +402,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx2", specifier = ">=2.7,<3" },
-    { name = "pillow", specifier = ">=12.2,<13" },
     { name = "pyinstaller", specifier = ">=6.21,<7" },
 ]
 

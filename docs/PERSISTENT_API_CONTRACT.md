@@ -24,7 +24,7 @@
 
 `GET /v1/matters/{matter_id}/local-folder-intake` 返回当前候选与已批准案卷范围的脱敏摘要；`POST /local-folder-scans` 只接受当前 OS 绑定会话持有的短时 `folder_grant_id`，由服务端扫描已授权目录并保存候选，浏览器不能提交自组装文件清单。`GET /local-folder-scans/{scan_id}/files` 以案件版本和扫描 UUID 绑定的游标返回最多 100 条相对路径差异。`POST /local-folder-scans/{scan_id}/approve` 仅主办律师可调用，绑定案件版本、Manifest 哈希和批准输入哈希；成功后旧案卷范围及其证据/提交依赖失效。所有响应均不返回绝对路径、授权令牌、设备号或 inode。
 
-`GET /evidence-intake-runs/current` 返回当前已批准范围的接收汇总；`POST /evidence-intake-runs` 必须携带短时 folder grant，服务端重新扫描并确认 Manifest 未变化后才排队。Worker 的 claim/heartbeat/complete/finalize 路由只接受数据库 SYSTEM_WORKER 权限；单项租约绑定运行、扫描、相对路径、大小与哈希，完成时再核对登记原件。普通页面不取得租约 ID、扫描器输出或绝对路径。
+`GET /evidence-intake-runs/current` 返回当前已批准范围的接收汇总；`GET /evidence-intake-runs/{run_id}/items` 以案件版本、运行 UUID 和稳定游标返回最多 100 项材料状态，只含相对路径、类型、终态原因和必要展示字段。`POST /evidence-intake-runs` 必须携带短时 folder grant，服务端重新扫描并确认 Manifest 未变化后才排队。Worker 的 claim/heartbeat/complete/finalize 路由只接受数据库 SYSTEM_WORKER 权限；单项租约绑定运行、扫描、相对路径、大小与哈希，完成时再核对登记原件。普通页面不取得租约 ID、源哈希、扫描器输出或绝对路径。
 
 派生件先通过 `/access` 取得 45—90 秒的一次性 Bearer，再通过 `Authorization` 请求头读取 `/content`；令牌、对象键和绝对路径不得进入 URL、证据快照或前端日志。读取只接受当前 `VERIFIED` 且仍属于 `LOCKED` Manifest 的记录、当前案件服务端身份和数值型 loopback 客户端；成功读取后令牌立即失效。
 

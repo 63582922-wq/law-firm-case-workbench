@@ -917,6 +917,30 @@ class PersistentEvidenceIntakeSummaryResponse(BaseModel):
     run: PersistentEvidenceIntakeRunSnapshot | None
 
 
+class PersistentEvidenceIntakeItemSnapshot(BaseModel):
+    item_id: UUID
+    relative_path: str = Field(min_length=1, max_length=4096)
+    detected_kind: Literal[
+        "PDF", "IMAGE", "WORD_DOCUMENT", "SPREADSHEET", "TEXT", "EMAIL", "ARCHIVE", "OTHER"
+    ]
+    status: Literal["QUEUED", "RUNNING", "REGISTERED", "REVIEW_REQUIRED", "BLOCKED", "FAILED"]
+    attempt_count: int = Field(ge=0, le=3)
+    outcome_code: str | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{2,79}$")
+    evidence_file_id: UUID | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class PersistentEvidenceIntakeItemPageResponse(BaseModel):
+    matter_id: UUID
+    matter_version: int = Field(ge=1)
+    run_id: UUID
+    total_count: int = Field(ge=0)
+    items: tuple[PersistentEvidenceIntakeItemSnapshot, ...]
+    next_cursor: str | None = Field(default=None, min_length=20, max_length=512)
+    has_more: bool
+
+
 class PersistentEvidenceIntakeClaimRequest(BaseModel):
     expected_version: int = Field(ge=1)
     lease_seconds: int = Field(default=120, ge=30, le=300)
