@@ -67,6 +67,9 @@ export function SubmissionWorkbench() {
   const approvedCourtProducts = review.workProducts.filter(
     (item) => item.status === "APPROVED" && item.audience === "COURT_SUBMISSION",
   );
+  const supersededCourtProducts = review.workProducts.filter(
+    (item) => item.status === "STALE" && item.audience === "COURT_SUBMISSION",
+  );
   const currentBundle = review.currentBundleId
     ? review.bundles.find((item) => item.bundleId === review.currentBundleId) ?? null
     : null;
@@ -113,6 +116,7 @@ export function SubmissionWorkbench() {
       <div className={styles.submissionSummary}>
         <Summary label="已批准法院文件" value={`${approvedCourtProducts.length} 份`} note="内部底稿不会进入" />
         <Summary label="当前锁定版" value={currentBundle ? "1 份" : "无"} note="每案最多一个" />
+        <Summary label="已过期旧版" value={`${supersededCourtProducts.length} 份`} note="不会再进入提交包" />
         <Summary label="币种" value={currentBundle?.currency ?? "CNY"} note="金额文件必须明确" />
         <Summary label="已核验导出" value={review.currentExport ? "已形成" : "未形成"} note={review.currentExport ? `${review.currentExport.componentCount} 个文件` : "不得上传法院"} />
       </div>
@@ -161,6 +165,27 @@ export function SubmissionWorkbench() {
           <p>委托手续、律所函和身份材料是否必需，应由具体法院要求与本案代理关系决定，并纳入同一 QA 清单。</p>
         </aside>
       </div>
+
+      {supersededCourtProducts.length > 0 && (
+        <section className={styles.submissionPanel} aria-labelledby="superseded-document-title">
+          <div className={styles.submissionPanelHeading}>
+            <div><p className={styles.eyebrow}>版本控制</p><h3 id="superseded-document-title">已过期的法院文书版本</h3></div>
+            <span>仅供追溯，不可重新选入</span>
+          </div>
+          <div className={styles.submissionChecklist}>
+            {supersededCourtProducts.map((item, index) => (
+              <article key={item.workProductId}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <div>
+                  <strong>{documentKindLabel(item.documentKind)}</strong>
+                  <small>{item.staleReason ?? "该版本已失效，不能进入法院提交包。"}</small>
+                </div>
+                <em>{shortHash(item.artifactSha256)}</em>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
 
       <ReviewableOfficeDrafts />
 

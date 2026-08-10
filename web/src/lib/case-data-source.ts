@@ -346,6 +346,7 @@ export type SubmissionReviewView = {
     pageCount: number | null;
     status: string;
     approvalHash: string | null;
+    staleReason: string | null;
   }[];
   bundles: {
     bundleId: string;
@@ -850,6 +851,7 @@ type PersistentSubmissionSnapshot = {
     page_count: number | null;
     status: string;
     approval_hash: string | null;
+    stale_reason: string | null;
   }[];
   bundles: {
     bundle_id: string;
@@ -3251,6 +3253,7 @@ function mapPersistentSubmission(
       pageCount: item.page_count,
       status: item.status,
       approvalHash: item.approval_hash,
+      staleReason: item.stale_reason ?? null,
     })),
     bundles: payload.bundles.map((item) => ({
       bundleId: item.bundle_id,
