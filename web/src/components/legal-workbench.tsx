@@ -5,6 +5,7 @@ import {
   caseDataSourceConfig,
   approveLegalFactBinding,
   approveCaseLegalEvent,
+  approveCaseLegalBundle,
   loadLegalReview,
   loadCaseReview,
   loadEvidenceReview,
@@ -49,6 +50,10 @@ export function LegalWorkbench() {
   });
   const [eventBusy, setEventBusy] = useState(false);
   const [eventNotice, setEventNotice] = useState<string | null>(null);
+  const [bundleSegments, setBundleSegments] = useState([newBundleSegment()]);
+  const [bundleApproved, setBundleApproved] = useState(false);
+  const [bundleBusy, setBundleBusy] = useState(false);
+  const [bundleNotice, setBundleNotice] = useState<string | null>(null);
   const [lprRule, setLprRule] = useState({
     ruleId: "",
     ruleVersion: "",
@@ -304,6 +309,34 @@ export function LegalWorkbench() {
     }
   }
 
+  function updateBundleSegment(segmentId: string, patch: Partial<BundleSegmentDraft>) {
+    setBundleSegments((prior) => prior.map((segment) => segment.segmentId === segmentId ? { ...segment, ...patch } : segment));
+  }
+
+  async function approveRuleBundle() {
+    if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
+    if (!bundleApproved) {
+      setBundleNotice("请先确认：规则期间连续、每段的规则与触发事件适配，并且适用锚点已经完成法律核对。");
+      return;
+    }
+    setBundleBusy(true);
+    setBundleNotice(null);
+    try {
+      const receipt = await approveCaseLegalBundle({
+        expectedVersion: review.matterVersion,
+        segments: bundleSegments,
+      });
+      const refreshed = await loadLegalReview();
+      setReview(refreshed);
+      setBundleApproved(false);
+      setBundleNotice(`案件法律规则包已获批准；案件版本更新为 ${receipt.matterVersion}。旧规则包与依赖计算将按服务端规则失效。`);
+    } catch (reason: unknown) {
+      setBundleNotice(reason instanceof Error ? reason.message : "案件法律规则包未获批准");
+    } finally {
+      setBundleBusy(false);
+    }
+  }
+
   const legalFormulaSources = review.sources.filter(
     (source) => source.snapshotId
       && source.verificationStatus === "VERIFIED"
@@ -328,6 +361,8 @@ export function LegalWorkbench() {
   const includedEvidencePages = evidenceReview?.pages.filter(
     (page) => page.disposition === "INCLUDE" && page.decisionId !== null,
   ) ?? [];
+  const approvedRuleVersions = review.ruleVersions.filter((rule) => rule.status === "APPROVED");
+  const approvedLegalEvents = review.legalEvents.filter((event) => event.status === "APPROVED");
 
   return (
     <section className={styles.legalArea} aria-label="法律规则">
@@ -656,6 +691,26 @@ export function LegalWorkbench() {
           <div><p className={styles.eyebrow}>计算入口</p><h3 id="legal-bundle-title">当前案件法律规则包</h3></div>
           <span>{review.currentBundle ? `哈希 ${shortHash(review.currentBundle.bundleHash)}` : "未批准"}</span>
         </div>
+        {review.status === "reviewable" && (
+          <form className={styles.legalBundleForm} onSubmit={(event) => { event.preventDefault(); void approveRuleBundle(); }}>
+            <div className={styles.legalBundleFormHeading}><div><strong>批准连续案件规则包</strong><small>每一段选择已批准规则及其匹配的法律事件；系统会再次校验规则生效期、事实锚点、来源许可和连续性。</small></div><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="button" onClick={() => setBundleSegments((prior) => [...prior, newBundleSegment()])}>添加规则期间</button></div>
+            <div className={styles.legalBundleSegments}>
+              {bundleSegments.map((segment, index) => (
+                <article key={segment.segmentId}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <label><span>规则版本</span><select required value={segment.ruleVersionId} onChange={(event) => { const rule = approvedRuleVersions.find((item) => item.ruleVersionId === event.target.value); updateBundleSegment(segment.segmentId, { ruleVersionId: event.target.value, issueKey: rule?.issueKey ?? "" }); }}><option value="">选择已批准规则</option>{approvedRuleVersions.map((rule) => <option key={rule.ruleVersionId} value={rule.ruleVersionId}>{rule.issueKey} · {rule.ruleVersion}</option>)}</select></label>
+                  <label><span>触发法律事件</span><select required value={segment.triggerEventId} onChange={(event) => updateBundleSegment(segment.segmentId, { triggerEventId: event.target.value })}><option value="">选择已批准事件</option>{approvedLegalEvents.map((legalEvent) => <option key={legalEvent.legalEventId} value={legalEvent.legalEventId}>{eventLabel(legalEvent.eventKind)} · {legalEvent.localDate}</option>)}</select></label>
+                  <label><span>开始 / 结束</span><div><input required type="date" value={segment.startDate} onChange={(event) => updateBundleSegment(segment.segmentId, { startDate: event.target.value })} /><input required type="date" value={segment.endDate} onChange={(event) => updateBundleSegment(segment.segmentId, { endDate: event.target.value })} /></div></label>
+                  <label><span>适用锚点</span><input required value={segment.applicabilityAnchor} onChange={(event) => updateBundleSegment(segment.segmentId, { applicabilityAnchor: event.target.value })} placeholder="例如 起诉时司法保护标准" /></label>
+                  <button aria-label={`移除第 ${index + 1} 个规则期间`} disabled={bundleBusy || bundleSegments.length === 1} type="button" onClick={() => setBundleSegments((prior) => prior.filter((item) => item.segmentId !== segment.segmentId))}>移除</button>
+                </article>
+              ))}
+            </div>
+            <label className={styles.legalBundleCheck}><input checked={bundleApproved} onChange={(event) => setBundleApproved(event.target.checked)} type="checkbox" /><span>我确认每一期间连续无空档、触发事件与规则匹配，且已审查对应法律依据、事实锚点和官方利率参数来源。</span></label>
+            <div className={styles.legalBundleActions}><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="submit">{bundleBusy ? "正在批准规则包…" : "批准案件规则包"}</button><small>提交后旧批准规则包与依赖计算自动转为失效，不能继续作为当前提交依据。</small></div>
+            {bundleNotice && <p className={styles.legalBundleNotice} role="status">{bundleNotice}</p>}
+          </form>
+        )}
         {review.bundleSegments.length ? (
           <div className={styles.legalTimeline}>
             {review.bundleSegments.map((segment, index) => (
@@ -670,6 +725,28 @@ export function LegalWorkbench() {
       </section>
     </section>
   );
+}
+
+type BundleSegmentDraft = {
+  segmentId: string;
+  issueKey: string;
+  ruleVersionId: string;
+  triggerEventId: string;
+  startDate: string;
+  endDate: string;
+  applicabilityAnchor: string;
+};
+
+function newBundleSegment(): BundleSegmentDraft {
+  return {
+    segmentId: crypto.randomUUID(),
+    issueKey: "",
+    ruleVersionId: "",
+    triggerEventId: "",
+    startDate: "",
+    endDate: "",
+    applicabilityAnchor: "",
+  };
 }
 
 function SummaryCell({ label, value, note }: { label: string; value: string; note: string }) {

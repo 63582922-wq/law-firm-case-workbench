@@ -352,6 +352,12 @@ export type LegalEventReceipt = {
   requestId: string | null;
 };
 
+export type LegalBundleReceipt = {
+  objectId: string;
+  matterVersion: number;
+  requestId: string | null;
+};
+
 export type SubmissionReviewView = {
   sourceKind: "synthetic-alpha" | "persistent-preview";
   sourceLabel: string;
@@ -1752,6 +1758,97 @@ export async function approveCaseLegalEvent(
   }
   if (payload.object_type !== "CASE_LEGAL_EVENT") {
     throw new Error("法律事件回执类型不一致，已停止后续处理。");
+  }
+  return {
+    objectId: payload.object_id,
+    matterVersion: payload.matter_version,
+    requestId: response.headers.get("X-Request-ID"),
+  };
+}
+
+export async function approveCaseLegalBundle(
+  input: {
+    expectedVersion: number;
+    segments: {
+      segmentId: string;
+      issueKey: string;
+      ruleVersionId: string;
+      triggerEventId: string;
+      startDate: string;
+      endDate: string;
+      applicabilityAnchor: string;
+    }[];
+  },
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<LegalBundleReceipt> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已启用的本机持久化工作台可以批准案件法律规则包。");
+  }
+  if (!input.segments.length) throw new Error("请至少添加一个规则期间。");
+  const segments = input.segments.map((segment) => ({
+    ...segment,
+    issueKey: segment.issueKey.trim(),
+    applicabilityAnchor: segment.applicabilityAnchor.trim(),
+  })).sort((left, right) => left.startDate.localeCompare(right.startDate) || left.endDate.localeCompare(right.endDate));
+  for (const segment of segments) {
+    if (!segment.issueKey || !segment.ruleVersionId || !segment.triggerEventId || !segment.startDate || !segment.endDate || !segment.applicabilityAnchor) {
+      throw new Error("每个规则期间都必须选择规则、触发事件、起止日期并填写适用锚点。");
+    }
+    if (segment.startDate >= segment.endDate) throw new Error("规则期间必须有明确且非空的起止日期。");
+  }
+  for (let index = 1; index < segments.length; index += 1) {
+    if (segments[index - 1].endDate !== segments[index].startDate) {
+      throw new Error("规则期间必须首尾连续，不能留空档或重叠。");
+    }
+  }
+  const approvalHash = await sha256Text([
+    "case-legal-bundle-approval-v1",
+    config.matterId,
+    String(input.expectedVersion),
+    ...segments.flatMap((segment) => [
+      segment.segmentId,
+      segment.issueKey,
+      segment.ruleVersionId,
+      segment.triggerEventId,
+      segment.startDate,
+      segment.endDate,
+      segment.applicabilityAnchor,
+    ]),
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/legal-bundles`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: input.expectedVersion,
+        segments: segments.map((segment) => ({
+          segment_id: segment.segmentId,
+          issue_key: segment.issueKey,
+          rule_version_id: segment.ruleVersionId,
+          trigger_event_id: segment.triggerEventId,
+          start_date: segment.startDate,
+          end_date: segment.endDate,
+          applicability_anchor: segment.applicabilityAnchor,
+        })),
+        approval_hash: approvalHash,
+      }),
+    });
+  } catch {
+    throw new Error("连接在规则包审批确认前中断。请刷新法律快照核对结果；系统不会自动重复提交。");
+  }
+  const payload = (await response.json()) as
+    | { object_id: string; matter_version: number; object_type: string }
+    | ErrorEnvelope;
+  if (!response.ok || !("object_id" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "案件法律规则包未获批准"));
+  }
+  if (payload.object_type !== "CASE_LEGAL_BUNDLE") {
+    throw new Error("规则包审批回执类型不一致，已停止后续处理。");
   }
   return {
     objectId: payload.object_id,
