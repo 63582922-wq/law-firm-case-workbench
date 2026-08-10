@@ -45,6 +45,7 @@ export type DesktopEnrollmentVaultStatus = {
 export type DesktopModelProviderStatus = {
   providerId: "deepseek" | "qwen";
   displayName: string;
+  modelId: string;
   configured: boolean;
 };
 

@@ -328,8 +328,8 @@ export function IdentitySecurityWorkbench({
           />
           <ModelProviderRow
             provider={modelProviderStatuses?.find((item) => item.providerId === "qwen")}
-            fallbackName="Qwen（视觉、OCR 与版面解析）"
-            note="用于扫描件、图片、表格和 PDF 页面的视觉识别；不会自动上传案卷。"
+            fallbackName="通义千问百炼 Qwen3.5-OCR（视觉、OCR 与版面解析）"
+            note="固定使用 qwen3.5-ocr：用于扫描件、图片、表格和 PDF 页面识别；不会自动上传案卷。"
             busy={modelProviderBusy === "qwen"}
             onConfigure={() => void configureModelProvider("qwen")}
             onRemove={() => void removeModelProvider("qwen")}
@@ -453,7 +453,7 @@ function ModelProviderRow({
     <article>
       <div>
         <strong>{provider?.displayName ?? fallbackName}</strong>
-        <small>{note}</small>
+        <small>{provider ? `${provider.modelId} · ${note}` : note}</small>
       </div>
       <em className={configured ? styles.modelProviderReady : styles.modelProviderMissing}>{configured ? "已在本机配置" : "未配置"}</em>
       <div className={styles.modelProviderActions}>

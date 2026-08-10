@@ -32,7 +32,14 @@ impl ModelProvider {
     pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::DeepSeek => "DeepSeek（文本与推理）",
-            Self::Qwen => "Qwen（视觉、OCR 与版面解析）",
+            Self::Qwen => "通义千问百炼 Qwen3.5-OCR（视觉、OCR 与版面解析）",
+        }
+    }
+
+    fn model_id(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "deepseek-v4-pro",
+            Self::Qwen => "qwen3.5-ocr",
         }
     }
 
@@ -49,6 +56,7 @@ impl ModelProvider {
 pub(crate) struct ModelProviderStatus {
     provider_id: String,
     display_name: String,
+    model_id: String,
     configured: bool,
 }
 
@@ -125,6 +133,7 @@ impl ModelProviderVault {
         Ok(ModelProviderStatus {
             provider_id: provider.id().to_string(),
             display_name: provider.display_name().to_string(),
+            model_id: provider.model_id().to_string(),
             configured,
         })
     }

@@ -8,7 +8,7 @@
 
 ## 决定
 
-1. 桌面端仅允许固定白名单供应商 `deepseek` 与 `qwen` 的 API Key 配置；不允许用户输入自定义 Base URL、任意模型 ID 或代理地址。
+1. 桌面端仅允许固定白名单供应商 `deepseek` 与 `qwen` 的 API Key 配置；首版固定模型分别为 `deepseek-v4-pro` 与阿里云百炼 `qwen3.5-ocr`。不允许用户输入自定义 Base URL、任意模型 ID 或代理地址。
 2. API Key 必须经 macOS 原生 `NSSecureTextField` 输入，并由 Rust 直接写入 macOS Keychain；WebView、Tauri 命令参数、React 状态、案卷数据库和外部请求账本永远不接收 Key 明文。
 3. 页面只取得供应商标识、显示名称和“已配置/未配置”状态。更换 Key 覆盖同一 Keychain 项，移除操作需要 macOS 原生确认。
 4. 配置 Key 与调用授权严格分离。没有本案有效的外部请求预授权，即使 Key 已配置也不得向任何供应商发送材料。

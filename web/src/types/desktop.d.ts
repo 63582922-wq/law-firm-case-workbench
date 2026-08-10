@@ -40,16 +40,19 @@ declare global {
       modelProviderStatuses(): Promise<Array<{
         providerId: "deepseek" | "qwen";
         displayName: string;
+        modelId: string;
         configured: boolean;
       }> | null>;
       configureModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;
+        modelId: string;
         configured: boolean;
       }>;
       removeModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;
+        modelId: string;
         configured: boolean;
       }>;
       initializeInstallation(): Promise<{
