@@ -96,7 +96,17 @@ PUBLIC_SOURCES: tuple[PublicSource, ...] = (
         source_id="SPC-PUBLIC-CASE-RESEARCH",
         publisher="最高人民法院及依法公开裁判文书站点",
         source_tier="PUBLIC_CASE_RESEARCH",
-        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "gongbao.court.gov.cn", "cicc.court.gov.cn", "pccz.court.gov.cn"}),
+        allowed_domains=frozenset(
+            {
+                "court.gov.cn",
+                "www.court.gov.cn",
+                "gongbao.court.gov.cn",
+                "cicc.court.gov.cn",
+                "pccz.court.gov.cn",
+                "rmfyalk.court.gov.cn",
+                "wenshu.court.gov.cn",
+            }
+        ),
         topics=frozenset({"民间借贷", "证据", "本金", "已付利息"}),
     ),
 )

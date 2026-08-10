@@ -207,6 +207,27 @@ fn desktop_runtime_status(runtime: State<'_, LocalApiRuntime>) -> DesktopRuntime
     snapshot_runtime(&runtime)
 }
 
+#[tauri::command]
+fn desktop_enrollment_vault_status(vault: State<'_, EnrollmentVault>) -> EnrollmentVaultStatus {
+    vault.status()
+}
+
+#[tauri::command]
+fn initialize_desktop_installation(
+    vault: State<'_, EnrollmentVault>,
+    confirmation: String,
+) -> Result<EnrollmentVaultStatus, String> {
+    vault.initialize_installation(&confirmation)
+}
+
+#[tauri::command]
+fn disable_local_enrollment(
+    vault: State<'_, EnrollmentVault>,
+    confirmation: String,
+) -> Result<EnrollmentVaultStatus, String> {
+    vault.disable_local_enrollment(&confirmation)
+}
+
 fn validate_matter_id(matter_id: &str) -> Result<(), String> {
     Uuid::parse_str(matter_id)
         .map(|_| ())
@@ -274,6 +295,7 @@ pub fn run() {
         .setup(|app| {
             let runtime = LocalApiRuntime::default();
             app.manage(runtime.clone());
+            app.manage(EnrollmentVault::default());
             if let Err(message) = start_local_api(app.handle(), runtime.clone()) {
                 mark_runtime_blocked(&runtime, &message);
             }
@@ -281,6 +303,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_runtime_status,
+            desktop_enrollment_vault_status,
+            initialize_desktop_installation,
+            disable_local_enrollment,
             select_case_folder
         ])
         .build(tauri::generate_context!())
@@ -346,3 +371,6 @@ mod tests {
         assert!(verify_ready_payload(payload.as_bytes(), "b").is_err());
     }
 }
+mod enrollment_vault;
+
+use enrollment_vault::{EnrollmentVault, EnrollmentVaultStatus};

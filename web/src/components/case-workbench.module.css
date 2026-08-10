@@ -342,6 +342,14 @@
 .securityBoundaryList li:first-child { border-top: 0; }
 .securityBoundaryList strong { font-size: 11px; }
 .securityBoundaryList span { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }
+.securityActions { margin-top: 18px; padding: 17px; display: grid; grid-template-columns: minmax(280px, 1fr) minmax(420px, 1.3fr); gap: 18px 24px; align-items: center; border: 1px solid var(--line-strong); background: var(--sheet-muted); }
+.securityActions h3 { margin: 5px 0 7px; font: 600 18px var(--font-serif); }
+.securityActions p:not(.eyebrow) { color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
+.securityActionButtons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.securityActionButtons button { min-height: 40px; padding: 9px 11px; border: 1px solid var(--ink); color: var(--sheet); background: var(--ink); font: inherit; font-size: 10px; cursor: pointer; }
+.securityActionButtons button:disabled { border-color: var(--line-strong); color: var(--ink-faint); background: var(--sheet); cursor: not-allowed; }
+.securityActionButtons .securityDangerButton { grid-column: 1 / -1; border-color: var(--red); color: var(--red); background: var(--red-soft); }
+.securityActionMessage { grid-column: 1 / -1; padding-top: 10px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 10px; line-height: 1.6; }
 .securityNotice { margin-top: 18px; padding: 14px 16px; display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 16px; border: 1px solid #d7b7ae; background: var(--red-soft); color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
 .securityNotice strong { color: var(--red); }
 
@@ -350,5 +358,5 @@
   .calculationArea { padding-right: 20px; padding-left: 20px; }.calculationGrid { grid-template-columns: 1fr; }.calculationInspector { display: grid; grid-template-columns: 185px minmax(0, 1fr); column-gap: 17px; }.calculationInspector h3 { grid-column: 1; grid-row: 2; }.calculationInspector ul { grid-column: 2; grid-row: 1 / span 2; }.calculationTrace { grid-column: 1 / -1; }
   .legalArea { padding-right: 20px; padding-left: 20px; }.legalGrid { grid-template-columns: 1fr; }.legalGuardrail { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.legalGuardrail h3 { grid-column: 1; }.legalGuardrail ol { grid-column: 2; grid-row: 1 / span 3; }.legalGuardrail > p:last-child { grid-column: 1 / -1; }.legalCaptureRuns { grid-template-columns: 1fr; }
   .submissionArea { padding-right: 20px; padding-left: 20px; }.submissionGrid { grid-template-columns: 1fr; }.submissionBoundary { display: grid; grid-template-columns: 185px minmax(0, 1fr); gap: 8px 18px; }.submissionBoundary h3 { grid-column: 1; }.submissionBoundary dl { grid-column: 2; grid-row: 1 / span 2; }.submissionBoundary > p:last-child { grid-column: 1 / -1; }.submissionExportState { grid-template-columns: 1fr; }
-  .securityArea { padding-right: 20px; padding-left: 20px; }.securityStatusGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.securityStatusGrid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }.securityStatusGrid > div:nth-child(4) { border-top: 1px solid var(--line); }.securityColumns { grid-template-columns: 1fr; }
+  .securityArea { padding-right: 20px; padding-left: 20px; }.securityStatusGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }.securityStatusGrid > div:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }.securityStatusGrid > div:nth-child(4) { border-top: 1px solid var(--line); }.securityColumns, .securityActions { grid-template-columns: 1fr; }
 }

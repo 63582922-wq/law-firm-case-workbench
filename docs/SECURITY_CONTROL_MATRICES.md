@@ -62,7 +62,7 @@ authorization_actor / authorized_at / expires_at / status
 | 本机 API 启动 | Tauri Rust 主进程启动随应用分发的自包含 sidecar；前端无 Shell execute/spawn/kill 权限 | 安装器签名、公证、升级与回滚验收 |
 | 父子进程绑定 | 64 个十六进制字符的随机挑战只经 stdin 发送；sidecar 回执必须匹配协议、挑战摘要、有效 PID 和动态端口 | 对发布签名和 sidecar 文件哈希增加启动前证明 |
 | 网络边界 | 仅绑定数值型 `127.0.0.1` 动态端口；当前无 OpenAPI/Docs/案件路由 | 持久 API 增加严格 Origin/CORS、速率限制和最小安全响应头 |
-| 身份会话 | 律所 Ed25519 签名登记、严格字段、30 天有效期上限、设备秘密摘要绑定、Keychain 双项目只读；一次性 bootstrap、只存令牌摘要、最长 30 分钟 Bearer、撤销/过期、`tauri://localhost` 与数值 loopback均有自动测试；数据库每次复核 active user 与未撤销本案角色 | 真实签发/续期/撤销服务、生产公钥轮换、Keychain 初始化/恢复 UI、专用 PostgreSQL 整链；不得由浏览器请求角色 |
+| 身份会话 | 律所 Ed25519 签名登记、严格字段、30 天有效期上限、设备摘要绑定、Keychain 双项目只读；Tauri 原生 Keychain API 可显式初始化并回读 32 字节安装秘密、只读状态、仅删除本机登记且不冒充远程撤销，秘密不经命令参数/WebView；一次性 bootstrap、令牌摘要、最长 30 分钟 Bearer、撤销/过期、`tauri://localhost` 与数值 loopback均有自动测试；数据库每次复核 active user 与未撤销本案角色 | 真实签发/续期/撤销服务、生产公钥轮换、后端验签凭证保存/恢复、远程撤销清单与专用 PostgreSQL 整链；不得由浏览器请求角色 |
 | 生命周期 | 桌面退出时终止 sidecar；sidecar 同时监测父 PID 与 stdin；实测退出后无残留进程 | 崩溃恢复、休眠/唤醒、升级中断和多窗口/单实例策略 |
 
 OS 当前登录会话只证明本机进程上下文，不证明执业身份、律所归属或案件授权。三者必须分层验证；在登记身份和专用数据库缺失时，sidecar 即使健康也只能报告“案件仍禁用”。

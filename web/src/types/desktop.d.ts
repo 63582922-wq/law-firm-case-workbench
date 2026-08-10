@@ -12,6 +12,30 @@ declare global {
         identityPhase: "NOT_ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
         persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
+      enrollmentVaultStatus(): Promise<{
+        phase:
+          | "NOT_INITIALIZED"
+          | "INSTALLATION_READY"
+          | "CREDENTIAL_PRESENT_UNVERIFIED"
+          | "BROKEN_LOCAL_CREDENTIAL"
+          | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
+          | "UNAVAILABLE";
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      } | null>;
+      initializeInstallation(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
+      disableLocalEnrollment(): Promise<{
+        phase: string;
+        message: string;
+        installationInitialized: boolean;
+        enrollmentEnvelopePresent: boolean;
+      }>;
       selectCaseFolder(input: { matterId: string }): Promise<{ selectedRoot: string } | null>;
     };
   }

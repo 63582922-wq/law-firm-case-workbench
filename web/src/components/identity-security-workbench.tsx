@@ -1,4 +1,12 @@
-import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
+"use client";
+
+import { useEffect, useState } from "react";
+import {
+  disableLocalEnrollment,
+  initializeDesktopInstallation,
+  readDesktopEnrollmentVaultStatus,
+} from "@/lib/desktop-bridge";
+import type { DesktopEnrollmentVaultStatus, DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import styles from "./case-workbench.module.css";
 
 export function IdentitySecurityWorkbench({
@@ -6,9 +14,69 @@ export function IdentitySecurityWorkbench({
 }: {
   desktopRuntime: DesktopRuntimeStatus | null;
 }) {
+  const [vaultStatus, setVaultStatus] = useState<DesktopEnrollmentVaultStatus | null>(null);
+  const [vaultBusy, setVaultBusy] = useState<"initialize" | "disable" | null>(null);
+  const [vaultMessage, setVaultMessage] = useState<string | null>(null);
+  const [disableArmed, setDisableArmed] = useState(false);
   const processReady = desktopRuntime?.phase === "READY";
   const identityEnrolled = false;
   const persistenceConfigured = false;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function refreshVault() {
+      try {
+        const status = await readDesktopEnrollmentVaultStatus();
+        if (!cancelled) setVaultStatus(status);
+      } catch {
+        if (!cancelled) {
+          setVaultStatus({
+            phase: "UNAVAILABLE",
+            message: "无法读取 macOS Keychain 状态；案件访问保持禁用。",
+            installationInitialized: false,
+            enrollmentEnvelopePresent: false,
+          });
+        }
+      }
+    }
+    void refreshVault();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function initializeVault() {
+    setVaultBusy("initialize");
+    setVaultMessage(null);
+    try {
+      const status = await initializeDesktopInstallation();
+      setVaultStatus(status);
+      setVaultMessage("本机安装秘密已写入 macOS Keychain；尚未取得律所签名登记。没有上传任何案件材料。");
+    } catch (error) {
+      setVaultMessage(readableError(error, "本机安全存储初始化失败，未启用身份。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
+
+  async function clearLocalEnrollment() {
+    if (!disableArmed) {
+      setDisableArmed(true);
+      setVaultMessage("再次点击将只删除本机登记凭证；不会删除安装秘密，也不会代表律所服务端已撤销。 ");
+      return;
+    }
+    setVaultBusy("disable");
+    try {
+      const status = await disableLocalEnrollment();
+      setVaultStatus(status);
+      setVaultMessage(status.message);
+      setDisableArmed(false);
+    } catch (error) {
+      setVaultMessage(readableError(error, "本机登记未能清除；远程撤销状态没有改变。"));
+    } finally {
+      setVaultBusy(null);
+    }
+  }
 
   return (
     <section className={styles.securityArea} aria-label="身份与安全">
@@ -65,7 +133,7 @@ export function IdentitySecurityWorkbench({
               律所管理员或统一身份服务核验律师后，以受信 Ed25519 私钥签发短期凭证。
             </FlowStep>
             <FlowStep index="03" title="本机 Keychain 绑定" state="未开始">
-              凭证与 32 字节安装秘密分开保存；复制凭证到另一台电脑不能登录。
+              凭证与 32 字节安装秘密分开保存；复制凭证到另一台电脑不能登录。当前：{vaultStatus?.message ?? "请从桌面版读取 Keychain 状态。"}
             </FlowStep>
             <FlowStep index="04" title="数据库逐案授权" state="未开始">
               每次读写重新检查在职状态、未撤销的本案角色和律所隔离策略。
@@ -89,12 +157,49 @@ export function IdentitySecurityWorkbench({
         </aside>
       </div>
 
+      <section className={styles.securityActions} aria-labelledby="security-actions-title">
+        <div>
+          <p className={styles.eyebrow}>本机操作</p>
+          <h3 id="security-actions-title">先准备安全存储，再等待律所签发</h3>
+          <p>初始化只在本机 Keychain 生成并保存安装秘密，不会创建律师身份、选择角色、连接数据库或上传案卷。</p>
+        </div>
+        <div className={styles.securityActionButtons}>
+          <button
+            disabled={vaultBusy !== null || vaultStatus === null || vaultStatus.installationInitialized}
+            onClick={() => void initializeVault()}
+            type="button"
+          >
+            {vaultBusy === "initialize" ? "正在写入并复核…" : vaultStatus?.installationInitialized ? "本机安全存储已就绪" : "初始化本机安全存储"}
+          </button>
+          <button disabled type="button" title="需要律所签发服务、生产公钥和管理员核验">
+            使用律所激活码登记
+          </button>
+          {vaultStatus?.enrollmentEnvelopePresent ? (
+            <button
+              className={styles.securityDangerButton}
+              disabled={vaultBusy !== null}
+              onClick={() => void clearLocalEnrollment()}
+              type="button"
+            >
+              {vaultBusy === "disable" ? "正在清除…" : disableArmed ? "确认只停用本机" : "只停用本机登记"}
+            </button>
+          ) : null}
+        </div>
+        {vaultMessage ? <p className={styles.securityActionMessage} role="status">{vaultMessage}</p> : null}
+      </section>
+
       <div className={styles.securityNotice} role="status">
-        <strong>为什么现在没有“立即登记”按钮</strong>
-        <span>真实律所签发服务和生产公钥尚未部署。此时开放导入或自助选角色会制造假登录，因此界面只展示可验证状态，不提供无效操作。</span>
+        <strong>为什么“使用律所激活码登记”仍被禁用</strong>
+        <span>真实律所签发服务和生产公钥尚未部署。当前可以安全初始化本机 Keychain，但不能导入任意凭证、自助选角色或制造假登录。</span>
       </div>
     </section>
   );
+}
+
+function readableError(error: unknown, fallback: string): string {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
 }
 
 function StatusCell({

@@ -15,9 +15,39 @@ export type DesktopRuntimeStatus = {
   persistencePhase: "NOT_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
 };
 
+export type DesktopEnrollmentVaultStatus = {
+  phase:
+    | "NOT_INITIALIZED"
+    | "INSTALLATION_READY"
+    | "CREDENTIAL_PRESENT_UNVERIFIED"
+    | "BROKEN_LOCAL_CREDENTIAL"
+    | "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED"
+    | "UNAVAILABLE";
+  message: string;
+  installationInitialized: boolean;
+  enrollmentEnvelopePresent: boolean;
+};
+
 export async function readDesktopRuntimeStatus(): Promise<DesktopRuntimeStatus | null> {
   if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined) return null;
   return invoke<DesktopRuntimeStatus>("desktop_runtime_status");
+}
+
+export async function readDesktopEnrollmentVaultStatus(): Promise<DesktopEnrollmentVaultStatus | null> {
+  if (typeof window === "undefined" || window.__TAURI_INTERNALS__ === undefined) return null;
+  return invoke<DesktopEnrollmentVaultStatus>("desktop_enrollment_vault_status");
+}
+
+export async function initializeDesktopInstallation(): Promise<DesktopEnrollmentVaultStatus> {
+  return invoke<DesktopEnrollmentVaultStatus>("initialize_desktop_installation", {
+    confirmation: "INIT_LOCAL_KEYCHAIN",
+  });
+}
+
+export async function disableLocalEnrollment(): Promise<DesktopEnrollmentVaultStatus> {
+  return invoke<DesktopEnrollmentVaultStatus>("disable_local_enrollment", {
+    confirmation: "DISABLE_LOCAL_ENROLLMENT",
+  });
 }
 
 export function installDesktopBridge(): void {
@@ -27,6 +57,9 @@ export function installDesktopBridge(): void {
 
   window.lawCaseDesktop = {
     runtimeStatus: readDesktopRuntimeStatus,
+    enrollmentVaultStatus: readDesktopEnrollmentVaultStatus,
+    initializeInstallation: initializeDesktopInstallation,
+    disableLocalEnrollment,
     async selectCaseFolder({ matterId }) {
       if (!UUID_PATTERN.test(matterId)) {
         throw new Error("案件标识无效，未打开本机文件夹选择器。");
