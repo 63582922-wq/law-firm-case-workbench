@@ -60,7 +60,7 @@ change_log:
 | `claim_scope_analysis` | 承认、争议和范围候选 | 正式回应立场 |
 | `transaction_ledger_build` | 逐笔交易和证据映射 | 台账完整性 |
 | `payment_classification_review` | 付款性质候选 | 还本/付息/不明性质 |
-| `legal_rule_research` | 候选规则、有效期间和官方依据 | 正式法律路径 |
+| `legal_rule_research` | 已注册官方来源候选规划（不联网） | 选择来源、正式法律路径 |
 | `interest_scenario_build` | 计算参数和影响 | 参数及正式情景 |
 | `interest_calculation` | 逐期本金、利息、冲抵和总额 | 计算结果 |
 | `evidence_matrix_build` | 争点—事实—证据—责任矩阵 | 争点和证据用途 |
@@ -80,7 +80,6 @@ compare_page_fingerprints
 create_annotated_derivative
 merge_selected_pages
 search_authoritative_rules
-get_rule_snapshot
 build_transaction_ledger
 calculate_interest_schedule
 reconcile_payments

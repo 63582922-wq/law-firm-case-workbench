@@ -134,6 +134,36 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
         self.assertEqual(len(output_hash), 64)
         self.assertEqual(draft.sections[0].paragraphs[0], "案号为（2026）粤01民初100号。")
 
+    def test_legal_research_only_prepares_registered_public_source_candidates(self) -> None:
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "lawyer approval"):
+            self.gateway.execute(
+                skill_id="legal_rule_research",
+                tool_id="search_authoritative_rules",
+                payload={"issue": "民间借贷利率保护", "proposed_query": "民间借贷 过渡规则"},
+                granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
+                lawyer_approved=False,
+                release_locked=False,
+            )
+        result, output_hash = self.gateway.execute(
+            skill_id="legal_rule_research",
+            tool_id="search_authoritative_rules",
+            payload={"issue": "民间借贷利率保护", "proposed_query": "民间借贷 过渡规则"},
+            granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
+            lawyer_approved=True,
+            release_locked=False,
+        )
+        self.assertIn("SPC-PRIVATE-LENDING-2020-SECOND-REVISION", result.candidate_source_ids)
+        self.assertEqual(len(output_hash), 64)
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "candidate planning was blocked"):
+            self.gateway.execute(
+                skill_id="legal_rule_research",
+                tool_id="search_authoritative_rules",
+                payload={"issue": "民间借贷", "proposed_query": "当事人电话 13800138000"},
+                granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
+                lawyer_approved=True,
+                release_locked=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

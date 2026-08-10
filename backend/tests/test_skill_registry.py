@@ -47,7 +47,7 @@ class CaseSkillRegistryTests(unittest.TestCase):
             lawyer_approved=True,
             release_locked=False,
         )
-        self.assertTrue(tool.allows_external_network)
+        self.assertFalse(tool.allows_external_network)
         self.assertFalse(tool.mutates_originals)
 
     def test_unlisted_tool_cannot_be_smuggled_through_a_skill(self) -> None:

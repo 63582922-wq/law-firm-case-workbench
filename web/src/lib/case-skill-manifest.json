@@ -83,8 +83,7 @@
     },
     {
       "allowed_tools": [
-        "search_authoritative_rules",
-        "get_rule_snapshot"
+        "search_authoritative_rules"
       ],
       "approval_gate": "LAWYER_REVIEW",
       "maturity": "IMPLEMENTED",
@@ -92,13 +91,14 @@
       "prohibited_actions": [
         "不得改写、删除或移动律师选择的原始案卷文件",
         "不得把案卷内容发送给未获批准的外部服务",
-        "不得以模型结论替代律师审批或确定性计算"
+        "不得以模型结论替代律师审批或确定性计算",
+        "不得由候选规划直接访问网络；外部抓取必须另经律师授权的官方来源队列"
       ],
       "required_scopes": [
         "PUBLIC_RESEARCH_READ"
       ],
       "skill_id": "legal_rule_research",
-      "title": "官方法源与公开研究检索",
+      "title": "官方法源研究候选规划",
       "version": "1.0.0"
     },
     {

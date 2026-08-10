@@ -24,6 +24,7 @@ from .private_lending_transition_planner import (
     plan_private_lending_interest_transition,
 )
 from .reviewable_draft_worker import create_reviewable_docx_draft, create_reviewable_xlsx_ledger
+from .research_gateway import PublicResearchGateway, ResearchBlocked
 from .document_consistency_reviewer import (
     ApprovedDocumentSnapshot,
     CanonicalDocumentField,
@@ -98,6 +99,14 @@ class CaseSkillToolGateway:
                 documents=_document_snapshots(payload),
                 canonical_fields=_canonical_fields(payload),
             )
+        elif tool_id == "search_authoritative_rules":
+            try:
+                result = PublicResearchGateway().prepare_plan(
+                    issue=_text(payload, "issue"),
+                    proposed_query=_text(payload, "proposed_query"),
+                )
+            except ResearchBlocked as error:
+                raise SkillToolGatewayBlocked("official research candidate planning was blocked") from error
         elif tool_id == "plan_private_lending_transition":
             result = plan_private_lending_interest_transition(
                 contract_formed_on=_optional_date(payload, "contract_formed_on"),
