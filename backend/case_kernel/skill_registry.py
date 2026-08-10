@@ -116,14 +116,14 @@ class CaseSkillRegistry:
         return tuple(sorted(self._skills.values(), key=lambda skill: skill.skill_id))
 
 
-def default_case_skill_registry() -> CaseSkillRegistry:
+def default_case_skill_registry(*, reviewable_office_drafts_enabled: bool = False) -> CaseSkillRegistry:
     """Return the product's explicit current capability surface.
 
-    Word/Excel authoring and Office-to-PDF rendering remain GATED until the
-    isolated conversion, managed-pair persistence, lawyer UI, packaging and
-    release workflow are all wired.  This prevents the interface from
-    advertising a completed legal work product before the complete safe path
-    exists.
+    Word/Excel authoring and Office-to-PDF rendering remain GATED by default.
+    A trusted desktop composition may enable the review-pair tools only after
+    it has supplied the isolated converter, encrypted artifact store and
+    review-pair persistence path.  This prevents a browser or generic Agent
+    from merely toggling a capability flag.
     """
     tools = (
         ToolDefinition("register_source_file", "1.0.0", frozenset({CapabilityScope.CASE_READ}), False, False, False),
@@ -152,9 +152,9 @@ def default_case_skill_registry() -> CaseSkillRegistry:
         SkillDefinition("material_inventory", "1.0.0", "材料盘点与安全读取", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("register_source_file", "inspect_pdf_structure", "inspect_non_pdf_structure"), ApprovalGate.MATERIAL_SCOPE, "EvidenceInventory", no_original_mutation),
         SkillDefinition("evidence_pdf_normalization", "1.0.0", "图片与文本证据 PDF 规范化", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("normalize_image_or_text_pdf", "render_registered_page"), ApprovalGate.MATERIAL_SCOPE, "NormalizedEvidencePdf", no_original_mutation),
         SkillDefinition("office_reading", "1.0.0", "Word 与 Excel 受控读取", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("parse_office_document",), ApprovalGate.MATERIAL_SCOPE, "OfficeExtraction", no_original_mutation),
-        SkillDefinition("office_pdf_rendering", "1.0.0", "Word 与 Excel 隔离转 PDF", SkillMaturity.GATED, frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("render_office_to_pdf",), ApprovalGate.MATERIAL_SCOPE, "RenderedOfficePdf", no_original_mutation),
-        SkillDefinition("document_drafting", "1.0.0", "答辩状和说明文书草拟", SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_docx_draft", "create_pdf_derivative"), ApprovalGate.LAWYER_REVIEW, "DraftDocument", no_original_mutation),
-        SkillDefinition("spreadsheet_ledger", "1.0.0", "交易台账与核算表生成", SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_xlsx_ledger",), ApprovalGate.LAWYER_REVIEW, "LedgerWorkbook", no_original_mutation),
+        SkillDefinition("office_pdf_rendering", "1.0.0", "Word 与 Excel 隔离转 PDF", SkillMaturity.IMPLEMENTED if reviewable_office_drafts_enabled else SkillMaturity.GATED, frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("render_office_to_pdf",), ApprovalGate.MATERIAL_SCOPE, "RenderedOfficePdf", no_original_mutation),
+        SkillDefinition("document_drafting", "1.0.0", "答辩状和说明文书草拟", SkillMaturity.IMPLEMENTED if reviewable_office_drafts_enabled else SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_docx_draft", "create_pdf_derivative"), ApprovalGate.LAWYER_REVIEW, "DraftDocument", no_original_mutation),
+        SkillDefinition("spreadsheet_ledger", "1.0.0", "交易台账与核算表生成", SkillMaturity.IMPLEMENTED if reviewable_office_drafts_enabled else SkillMaturity.GATED, frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}), ("create_reviewable_xlsx_ledger",), ApprovalGate.LAWYER_REVIEW, "LedgerWorkbook", no_original_mutation),
         SkillDefinition("document_consistency_review", "1.0.0", "文书一致性与来源缺口审查", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.CASE_READ}), ("review_document_consistency",), ApprovalGate.NONE, "DocumentConsistencyReport", no_original_mutation),
         SkillDefinition("legal_rule_research", "1.0.0", "官方法源研究候选规划", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}), ("search_authoritative_rules",), ApprovalGate.LAWYER_REVIEW, "LegalResearchCandidates", no_original_mutation + ("不得由候选规划直接访问网络；外部抓取必须另经律师授权的官方来源队列",)),
         SkillDefinition("interest_calculation", "1.0.0", "利息与本息冲抵计算", SkillMaturity.IMPLEMENTED, frozenset({CapabilityScope.FORMAL_CALCULATION}), ("plan_private_lending_transition", "calculate_interest_schedule"), ApprovalGate.LAWYER_REVIEW, "InterestCalculation", no_original_mutation),

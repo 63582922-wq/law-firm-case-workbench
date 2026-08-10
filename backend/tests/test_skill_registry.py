@@ -60,6 +60,17 @@ class CaseSkillRegistryTests(unittest.TestCase):
                 release_locked=False,
             )
 
+    def test_reviewable_office_skills_require_trusted_runtime_enablement(self) -> None:
+        enabled = default_case_skill_registry(reviewable_office_drafts_enabled=True)
+        tool = enabled.authorize_tool(
+            skill_id="document_drafting",
+            tool_id="create_reviewable_docx_draft",
+            granted_scopes=frozenset({CapabilityScope.MANAGED_DERIVATIVE_WRITE}),
+            lawyer_approved=True,
+            release_locked=False,
+        )
+        self.assertTrue(tool.writes_only_managed_derivatives)
+
 
 if __name__ == "__main__":
     unittest.main()

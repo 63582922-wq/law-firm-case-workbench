@@ -27,6 +27,7 @@ from .agent_execution_postgres import PostgresAgentExecutionStore
 from .document_consistency_postgres import PostgresDocumentConsistencyReviewStore
 from .external_request_postgres import PostgresExternalRequestStore
 from .submission_postgres import PostgresSubmissionStore
+from .skill_registry import default_case_skill_registry
 from .store import InMemoryMatterStore, MatterStore
 
 
@@ -184,7 +185,12 @@ def build_runtime_services(
         reviewable_draft_store=PostgresReviewableDraftStore(
             dsn, artifact_reader=artifact_reader
         ),
-        agent_execution_store=PostgresAgentExecutionStore(dsn),
+        agent_execution_store=PostgresAgentExecutionStore(
+            dsn,
+            registry=default_case_skill_registry(
+                reviewable_office_drafts_enabled=office_converter is not None and artifact_store is not None
+            ),
+        ),
         document_consistency_store=PostgresDocumentConsistencyReviewStore(dsn),
         external_request_store=PostgresExternalRequestStore(dsn),
         artifact_store=artifact_store,

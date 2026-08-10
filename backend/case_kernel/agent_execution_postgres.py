@@ -40,6 +40,19 @@ class AgentToolProposal:
 
 
 @dataclass(frozen=True)
+class ExecutableAgentToolProposal:
+    """The minimal immutable proposal a SYSTEM_WORKER may execute."""
+
+    proposal_id: str
+    run_id: str
+    skill_id: str
+    skill_version: str
+    tool_id: str
+    approval_gate: str
+    input_hash: str
+
+
+@dataclass(frozen=True)
 class PersistentAgentExecutionSnapshot:
     matter_id: str
     matter_version: int
@@ -171,6 +184,7 @@ class PostgresAgentExecutionStore:
                 idempotency_key=idempotency_key, command_name=command_name, payload_hash=request_hash,
                 allowed_roles=self._EXECUTOR_ROLES,
             )
+
             if prior is not None:
                 return prior
             proposal = connection.execute(
@@ -183,6 +197,19 @@ class PostgresAgentExecutionStore:
             ).fetchone()
             if proposal is None:
                 raise KeyError(proposal_id)
+            if status == "SUCCEEDED":
+                completed = connection.execute(
+                    """
+                    SELECT 1
+                    FROM agent_tool_execution_receipts
+                    WHERE proposal_id = %s AND matter_id = %s AND firm_id = %s
+                      AND status = 'SUCCEEDED'
+                    LIMIT 1
+                    """,
+                    (proposal_id, matter_id, actor.firm_id),
+                ).fetchone()
+                if completed is not None:
+                    raise CaseLedgerPersistenceBlocked("Agent Tool proposal already has a successful execution receipt")
             connection.execute(
                 """
                 INSERT INTO agent_tool_execution_receipts (
@@ -203,6 +230,62 @@ class PostgresAgentExecutionStore:
                                "error_code": error_code.strip() if isinstance(error_code, str) else None},
                 stale_submission=False, stale_calculations=False,
             )
+
+    def get_executable_proposal(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        proposal_id: str,
+    ) -> ExecutableAgentToolProposal:
+        """Return one immutable proposal to the dedicated local worker only.
+
+        The browser never receives this executor view.  A successful receipt
+        makes the proposal non-executable, preventing a retry from silently
+        creating a second managed derivative.
+        """
+
+        _validate_read_identity(matter_id=matter_id, actor=actor)
+        _require_roles(actor, self._EXECUTOR_ROLES)
+        _validate_uuid_text("proposal_id", proposal_id)
+        with self._read_transaction(actor.firm_id) as connection:
+            _authorize_matter_read(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                allowed_roles=self._EXECUTOR_ROLES,
+            )
+            row = connection.execute(
+                """
+                SELECT proposal.proposal_id, proposal.run_id, proposal.skill_id,
+                       proposal.skill_version, proposal.tool_id, proposal.approval_gate,
+                       proposal.input_hash
+                FROM agent_action_proposals proposal
+                WHERE proposal.proposal_id = %s
+                  AND proposal.matter_id = %s
+                  AND proposal.firm_id = %s
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM agent_tool_execution_receipts receipt
+                      WHERE receipt.proposal_id = proposal.proposal_id
+                        AND receipt.firm_id = proposal.firm_id
+                        AND receipt.matter_id = proposal.matter_id
+                        AND receipt.status = 'SUCCEEDED'
+                  )
+                """,
+                (proposal_id, matter_id, actor.firm_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(proposal_id)
+        return ExecutableAgentToolProposal(
+            proposal_id=str(row["proposal_id"]),
+            run_id=str(row["run_id"]),
+            skill_id=row["skill_id"],
+            skill_version=row["skill_version"],
+            tool_id=row["tool_id"],
+            approval_gate=row["approval_gate"],
+            input_hash=row["input_hash"],
+        )
 
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentAgentExecutionSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)

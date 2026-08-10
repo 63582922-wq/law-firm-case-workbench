@@ -38,6 +38,16 @@ class _Connection:
             return _Result({"version": 4, "permitted": True})
         if "FROM agent_action_proposals" in normalized and "FOR KEY SHARE" in normalized:
             return _Result({"proposal_id": self.proposal_id, "skill_id": "office_reading", "tool_id": "parse_office_document", "input_hash": "c" * 64})
+        if "FROM agent_action_proposals proposal" in normalized:
+            return _Result({
+                "proposal_id": self.proposal_id,
+                "run_id": str(uuid4()),
+                "skill_id": "document_drafting",
+                "skill_version": "1.0.0",
+                "tool_id": "create_reviewable_docx_draft",
+                "approval_gate": "LAWYER_REVIEW",
+                "input_hash": "c" * 64,
+            })
         if "UPDATE matters SET version = version + 1" in normalized:
             return _Result({"version": 5})
         return _Result()
@@ -102,6 +112,17 @@ class AgentExecutionPostgresTests(TestCase):
                 idempotency_key="agent-receipt-002", proposal_id=str(uuid4()),
                 status="BLOCKED", output_hash="e" * 64,
             )
+
+    def test_system_worker_reads_only_an_unfinished_minimal_execution_proposal(self) -> None:
+        connection = _Connection()
+        proposal = self._run(connection, lambda: self.store.get_executable_proposal(
+            matter_id=self.matter_id, actor=self.worker, proposal_id=connection.proposal_id,
+        ))
+        self.assertEqual(proposal.proposal_id, connection.proposal_id)
+        self.assertEqual(proposal.tool_id, "create_reviewable_docx_draft")
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("NOT EXISTS", sql)
+        self.assertIn("agent_tool_execution_receipts", sql)
 
 
 if __name__ == "__main__":
