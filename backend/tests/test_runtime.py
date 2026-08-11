@@ -67,6 +67,75 @@ class RuntimeSettingsTests(unittest.TestCase):
                 }
             )
 
+    def test_commercial_production_requires_its_own_acknowledgement_and_non_preview_database(self) -> None:
+        base = {
+            "CASE_WORKBENCH_RUNTIME_MODE": "commercial-production",
+            "CASE_WORKBENCH_POSTGRES_DSN": "postgresql://synthetic-user:synthetic-password@localhost/lawcase_production",
+        }
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "ENABLE_COMMERCIAL_PRODUCTION"):
+            RuntimeSettings.from_environment(base)
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "persistent-preview acknowledgement"):
+            RuntimeSettings.from_environment(
+                {
+                    **base,
+                    "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION": "YES",
+                    "CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW": "YES",
+                }
+            )
+        for database_name in ("lawcase_preview", "lawcase_test"):
+            with self.subTest(database_name=database_name), self.assertRaisesRegex(
+                RuntimeConfigurationBlocked, "cannot use a database name"
+            ):
+                RuntimeSettings.from_environment(
+                    {
+                        **base,
+                        "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION": "YES",
+                        "CASE_WORKBENCH_POSTGRES_DSN": f"postgresql://localhost/{database_name}",
+                    }
+                )
+
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "ending in _production"):
+            RuntimeSettings.from_environment(
+                {
+                    **base,
+                    "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION": "YES",
+                    "CASE_WORKBENCH_POSTGRES_DSN": "postgresql://localhost/lawcase_dev",
+                }
+            )
+
+        settings = RuntimeSettings.from_environment(
+            {
+                **base,
+                "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION": "YES",
+            }
+        )
+        self.assertEqual(settings.mode, RuntimeMode.COMMERCIAL_PRODUCTION)
+        self.assertTrue(settings.commercial_production_confirmed)
+        with patch("case_kernel.postgres_store.psycopg.connect") as matter_connect, patch(
+            "case_kernel.case_ledger_postgres.psycopg.connect"
+        ) as ledger_connect:
+            services = build_runtime_services(settings)
+        self.assertEqual(services.persistence_label, "commercial-production")
+        self.assertNotIn("synthetic-password", repr(settings))
+        matter_connect.assert_not_called()
+        ledger_connect.assert_not_called()
+
+    def test_commercial_production_cannot_be_constructed_without_the_explicit_confirmation(self) -> None:
+        settings = RuntimeSettings(
+            mode=RuntimeMode.COMMERCIAL_PRODUCTION,
+            _postgres_dsn="postgresql://localhost/lawcase_production",
+        )
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "explicit production acknowledgement"):
+            build_runtime_services(settings)
+
+        unsafe_database_name = RuntimeSettings(
+            mode=RuntimeMode.COMMERCIAL_PRODUCTION,
+            _postgres_dsn="postgresql://localhost/lawcase_dev",
+            _commercial_production_confirmed=True,
+        )
+        with self.assertRaisesRegex(RuntimeConfigurationBlocked, "ending in _production"):
+            build_runtime_services(unsafe_database_name)
+
     def test_persistent_preview_builds_adapters_without_opening_a_connection_or_exposing_dsn(self) -> None:
         settings = RuntimeSettings.from_environment(
             {

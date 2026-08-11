@@ -3,14 +3,15 @@ import {
   alphaCalculationPreviewRequest,
   type CalculationPreview,
 } from "@/lib/synthetic-calculation";
-import { persistentApiFetch } from "@/lib/persistent-api-client";
+import { persistentApiFetch, validateDesktopGrant } from "@/lib/persistent-api-client";
+import { isDesktopNativeShell, readDesktopSessionGrant, type DesktopRuntimeStatus } from "@/lib/desktop-bridge";
 import { syntheticMatter } from "@/lib/synthetic-matter";
 import officialSourceCatalog from "../../../knowledge/official_sources/registry.json";
 
 export type CaseDataSourceConfig =
-  | { kind: "synthetic-alpha"; label: "本机合成数据" }
-  | { kind: "persistent-preview"; label: "持久化内部预览"; apiBase: string | null; matterId: string }
-  | { kind: "persistent-disabled"; label: "持久化模式未启用"; reason: string };
+  | { kind: "synthetic-alpha"; label: "演示资料" }
+  | { kind: "persistent-preview"; label: "本机案件资料"; apiBase: string | null; matterId: string }
+  | { kind: "persistent-disabled"; label: "案件资料库未连接"; reason: string };
 
 export type PersistentWorkspaceTarget = {
   apiBase: string | null;
@@ -631,6 +632,29 @@ export type ExternalOcrAuthorizationReceipt = {
   requestIdHeader: string | null;
 };
 
+/**
+ * Public metadata for one bounded case-plan request.  The actual compact
+ * case projection is deliberately not returned to the WebView; native code
+ * retrieves it only after this exact preflight has been recorded.
+ */
+export type CasePlanningPreflight = {
+  matterVersion: number;
+  inputHash: string;
+  selectedFieldIds: ["case-plan:minimal-projection"];
+  providerId: "deepseek";
+  processorRegion: "cn-beijing";
+  serviceId: "deepseek-v4-pro";
+  callCap: 1;
+  policyManifestHash: string;
+  allowedSkillTools: { skillId: string; toolId: string }[];
+};
+
+export type CasePlanAuthorizationReceipt = {
+  requestId: string;
+  matterVersion: number;
+  requestIdHeader: string | null;
+};
+
 type SyntheticReview = {
   mode: "synthetic-alpha-only";
   fact_snapshot_hash: string;
@@ -1132,6 +1156,7 @@ type ErrorEnvelope = { code?: string; message?: string; request_id?: string; det
 
 const ACTIVE_MATTER_STORAGE_KEY = "lawcase.active-persistent-matter.v1";
 const MATTER_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+let desktopPersistentWorkspaceEnabled = false;
 
 export let caseDataSourceConfig = resolveCaseDataSourceConfig({
   mode: process.env.NEXT_PUBLIC_CASE_DATA_SOURCE,
@@ -1139,17 +1164,49 @@ export let caseDataSourceConfig = resolveCaseDataSourceConfig({
   matterId: process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID,
 });
 
+export function isDesktopCaseWorkspaceShell(): boolean {
+  return isDesktopNativeShell();
+}
+
+export function isReadyDesktopPersistentWorkspace(status: DesktopRuntimeStatus | null): boolean {
+  return isDesktopCaseWorkspaceShell()
+    && status?.phase === "READY"
+    && status.identityPhase === "ENROLLED"
+    && status.enrollmentTrustPhase === "READY"
+    && status.sessionPhase === "READY"
+    && status.persistencePhase === "CONFIGURED";
+}
+
+/**
+ * Enables the in-memory case workspace only after native code has confirmed a
+ * ready, enrolled desktop session.  The short-lived grant is intentionally
+ * not retained here: every later case request asks native code for a fresh
+ * loopback base and Bearer again.
+ */
+export async function enableReadyDesktopPersistentWorkspace(
+  status: DesktopRuntimeStatus | null,
+): Promise<CaseDataSourceConfig> {
+  if (!isReadyDesktopPersistentWorkspace(status)) {
+    throw new Error("本机案件工作区尚未完成身份、会话和资料库核验。");
+  }
+  validateDesktopGrant(await readDesktopSessionGrant());
+  desktopPersistentWorkspaceEnabled = true;
+  return restoreActivePersistentMatter();
+}
+
 /**
  * A persistent desktop can be ready before the first case exists.  Keep that
  * state distinct from a malformed data-source configuration so the lawyer's
  * first action is a real audited create command, not an example case.
  */
 export function getPersistentWorkspaceTarget(): PersistentWorkspaceTarget | null {
-  if ((process.env.NEXT_PUBLIC_CASE_DATA_SOURCE?.trim() || "") !== "persistent-preview") return null;
-  if (process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID?.trim()) return null;
-  const apiBase = process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE?.trim().replace(/\/$/, "") || "";
-  if (apiBase && !isAllowedPreviewOrigin(apiBase)) return null;
-  return { apiBase: apiBase || null };
+  if ((process.env.NEXT_PUBLIC_CASE_DATA_SOURCE?.trim() || "") === "persistent-preview") {
+    if (process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID?.trim()) return null;
+    const apiBase = process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE?.trim().replace(/\/$/, "") || "";
+    if (apiBase && !isAllowedPreviewOrigin(apiBase)) return null;
+    return { apiBase: apiBase || null };
+  }
+  return desktopPersistentWorkspaceEnabled ? { apiBase: null } : null;
 }
 
 export function restoreActivePersistentMatter(): CaseDataSourceConfig {
@@ -1158,6 +1215,11 @@ export function restoreActivePersistentMatter(): CaseDataSourceConfig {
   const matterId = window.sessionStorage.getItem(ACTIVE_MATTER_STORAGE_KEY)?.trim() || "";
   if (!MATTER_ID_PATTERN.test(matterId)) {
     if (matterId) window.sessionStorage.removeItem(ACTIVE_MATTER_STORAGE_KEY);
+    caseDataSourceConfig = {
+      kind: "persistent-disabled",
+      label: "案件资料库未连接",
+      reason: "尚未选择案件；请新建案件或从已有案件继续。",
+    };
     return caseDataSourceConfig;
   }
   if (caseDataSourceConfig.kind === "persistent-preview" && caseDataSourceConfig.matterId === matterId) {
@@ -1165,7 +1227,7 @@ export function restoreActivePersistentMatter(): CaseDataSourceConfig {
   }
   caseDataSourceConfig = {
     kind: "persistent-preview",
-    label: "持久化内部预览",
+    label: "本机案件资料",
     apiBase: target.apiBase,
     matterId,
   };
@@ -1179,7 +1241,7 @@ export function activatePersistentMatter(matterId: string): CaseDataSourceConfig
   window.sessionStorage.setItem(ACTIVE_MATTER_STORAGE_KEY, matterId);
   caseDataSourceConfig = {
     kind: "persistent-preview",
-    label: "持久化内部预览",
+    label: "本机案件资料",
     apiBase: target.apiBase,
     matterId,
   };
@@ -1188,32 +1250,40 @@ export function activatePersistentMatter(matterId: string): CaseDataSourceConfig
 
 export function clearActivePersistentMatter(): CaseDataSourceConfig {
   if (typeof window !== "undefined") window.sessionStorage.removeItem(ACTIVE_MATTER_STORAGE_KEY);
-  caseDataSourceConfig = resolveCaseDataSourceConfig({
-    mode: process.env.NEXT_PUBLIC_CASE_DATA_SOURCE,
-    apiBase: process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE,
-    matterId: process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID,
-  });
+  if (getPersistentWorkspaceTarget()) {
+    caseDataSourceConfig = {
+      kind: "persistent-disabled",
+      label: "案件资料库未连接",
+      reason: "尚未选择案件；请新建案件或从已有案件继续。",
+    };
+  } else {
+    caseDataSourceConfig = resolveCaseDataSourceConfig({
+      mode: process.env.NEXT_PUBLIC_CASE_DATA_SOURCE,
+      apiBase: process.env.NEXT_PUBLIC_PERSISTENT_CASE_API_BASE,
+      matterId: process.env.NEXT_PUBLIC_PERSISTENT_MATTER_ID,
+    });
+  }
   return caseDataSourceConfig;
 }
 
 export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: string; matterId?: string }): CaseDataSourceConfig {
   const mode = input.mode?.trim() || "synthetic-alpha";
-  if (mode === "synthetic-alpha") return { kind: "synthetic-alpha", label: "本机合成数据" };
+  if (mode === "synthetic-alpha") return { kind: "synthetic-alpha", label: "演示资料" };
   if (mode !== "persistent-preview") {
-    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "数据源模式无法识别，已停止读取。" };
+    return { kind: "persistent-disabled", label: "案件资料库未连接", reason: "案件资料库尚未启用，请先在工作台设置中完成启用。" };
   }
   const apiBase = input.apiBase?.trim().replace(/\/$/, "") || "";
   const matterId = input.matterId?.trim() || "";
   if (!matterId) {
-    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "缺少案件标识，未回退到合成数据。" };
+    return { kind: "persistent-disabled", label: "案件资料库未连接", reason: "请先建立或打开一宗案件。" };
   }
   if (apiBase && !isAllowedPreviewOrigin(apiBase)) {
-    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "持久化服务地址不符合本机或 HTTPS 安全边界。" };
+    return { kind: "persistent-disabled", label: "案件资料库未连接", reason: "本机案件资料服务尚未就绪，请在工作台设置中检查。" };
   }
   if (!MATTER_ID_PATTERN.test(matterId)) {
-    return { kind: "persistent-disabled", label: "持久化模式未启用", reason: "案件标识不是有效 UUID，已停止读取。" };
+    return { kind: "persistent-disabled", label: "案件资料库未连接", reason: "当前案件无法打开，请重新从案件列表选择。" };
   }
-  return { kind: "persistent-preview", label: "持久化内部预览", apiBase: apiBase || null, matterId };
+  return { kind: "persistent-preview", label: "本机案件资料", apiBase: apiBase || null, matterId };
 }
 
 export async function createPersistentMatter(title: string): Promise<PersistentMatterCreateReceipt> {
@@ -2401,7 +2471,7 @@ export async function loadDocumentConsistencyReview(
   if (config.kind === "synthetic-alpha") {
     return {
       sourceKind: "synthetic-alpha",
-      sourceLabel: "合成模式未运行正式文书审查",
+      sourceLabel: "演示案件不生成正式文书审查",
       matterVersion: null,
       snapshotHash: null,
       requestId: null,
@@ -2509,7 +2579,7 @@ export async function loadReviewableOfficeDrafts(
   if (config.kind === "synthetic-alpha") {
     return {
       sourceKind: "synthetic-alpha",
-      sourceLabel: "合成模式不提供可编辑文书",
+      sourceLabel: "演示案件不提供可编辑文书",
       matterVersion: null,
       snapshotHash: null,
       requestId: null,
@@ -2617,7 +2687,7 @@ export async function loadAgentExecutionAudit(
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") {
     return {
-      sourceKind: "synthetic-alpha", sourceLabel: "合成模式不执行 Agent", matterVersion: null,
+      sourceKind: "synthetic-alpha", sourceLabel: "演示案件不执行 AI 办案动作", matterVersion: null,
       snapshotHash: null, requestId: null, runs: [], proposals: [], receipts: [],
     };
   }
@@ -2658,7 +2728,7 @@ export async function loadExternalRequestAudit(
   if (config.kind === "persistent-disabled") throw new Error(config.reason);
   if (config.kind === "synthetic-alpha") {
     return {
-      sourceKind: "synthetic-alpha", sourceLabel: "合成模式不进行外部调用", matterVersion: null,
+      sourceKind: "synthetic-alpha", sourceLabel: "演示案件不进行外部调用", matterVersion: null,
       snapshotHash: null, requestId: null, authorizations: [], attempts: [],
     };
   }
@@ -2689,6 +2759,176 @@ export async function loadExternalRequestAudit(
       outputHash: item.output_hash, errorCode: item.error_code, createdAt: item.created_at,
     })),
   };
+}
+
+/**
+ * Read only the consent metadata for the fixed DeepSeek case-plan action.
+ * The browser never sees the case projection that will be sent to the model.
+ */
+export async function loadCasePlanningPreflight(
+  config: CaseDataSourceConfig = caseDataSourceConfig,
+): Promise<CasePlanningPreflight> {
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已打开的真实案件可以生成办案计划。 ");
+  }
+  const response = await persistentApiFetch(
+    config,
+    `/v1/matters/${config.matterId}/agent-planning/preflight`,
+    { headers: { Accept: "application/json" } },
+  );
+  const payload = (await response.json()) as {
+    matter_version?: unknown;
+    input_hash?: unknown;
+    selected_field_ids?: unknown;
+    provider_id?: unknown;
+    processor_region?: unknown;
+    service_id?: unknown;
+    call_cap?: unknown;
+    policy_manifest_hash?: unknown;
+    allowed_skill_tools?: unknown;
+  } | ErrorEnvelope;
+  if (!response.ok || !("matter_version" in payload)) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "本案 AI 办案计划暂时不可用。"));
+  }
+  const skills = payload.allowed_skill_tools;
+  if (
+    !Number.isInteger(payload.matter_version)
+    || (payload.matter_version as number) < 1
+    || typeof payload.input_hash !== "string"
+    || !/^[0-9a-f]{64}$/i.test(payload.input_hash)
+    || !Array.isArray(payload.selected_field_ids)
+    || payload.selected_field_ids.length !== 1
+    || payload.selected_field_ids[0] !== "case-plan:minimal-projection"
+    || payload.provider_id !== "deepseek"
+    || payload.processor_region !== "cn-beijing"
+    || payload.service_id !== "deepseek-v4-pro"
+    || payload.call_cap !== 1
+    || typeof payload.policy_manifest_hash !== "string"
+    || !/^[0-9a-f]{64}$/i.test(payload.policy_manifest_hash)
+    || !Array.isArray(skills)
+    || skills.length < 1
+    || skills.length > 32
+    || skills.some((item) => !isSkillToolPair(item))
+  ) {
+    throw new Error("本案 AI 办案计划的授权信息不完整；未发送任何案件内容。 ");
+  }
+  return {
+    matterVersion: payload.matter_version as number,
+    inputHash: payload.input_hash.toLowerCase(),
+    selectedFieldIds: ["case-plan:minimal-projection"],
+    providerId: "deepseek",
+    processorRegion: "cn-beijing",
+    serviceId: "deepseek-v4-pro",
+    callCap: 1,
+    policyManifestHash: payload.policy_manifest_hash.toLowerCase(),
+    allowedSkillTools: skills.map((item) => ({
+      skillId: (item as { skill_id: string }).skill_id,
+      toolId: (item as { tool_id: string }).tool_id,
+    })),
+  };
+}
+
+/**
+ * Record one lawyer-confirmed, one-call preflight for the fixed case-plan
+ * task.  This does not execute the plan or expose the compact case projection.
+ */
+export async function authorizeDeepSeekCasePlan(input: {
+  preflight: CasePlanningPreflight;
+  retentionPolicy: string;
+  trainingPolicy: string;
+  costCapMinor: number;
+  expiresAt: string;
+  confirmation: string;
+  config?: CaseDataSourceConfig;
+}): Promise<CasePlanAuthorizationReceipt> {
+  const config = input.config ?? caseDataSourceConfig;
+  if (config.kind !== "persistent-preview") {
+    throw new Error("只有已打开的真实案件可以授权 AI 办案计划。 ");
+  }
+  const { preflight } = input;
+  if (
+    !Number.isInteger(preflight.matterVersion)
+    || preflight.matterVersion < 1
+    || !/^[0-9a-f]{64}$/i.test(preflight.inputHash)
+    || preflight.providerId !== "deepseek"
+    || preflight.processorRegion !== "cn-beijing"
+    || preflight.serviceId !== "deepseek-v4-pro"
+    || preflight.callCap !== 1
+    || preflight.selectedFieldIds.length !== 1
+    || preflight.selectedFieldIds[0] !== "case-plan:minimal-projection"
+  ) {
+    throw new Error("案件计划授权信息已变化；请重新读取本案状态。 ");
+  }
+  if (!input.retentionPolicy.trim() || !input.trainingPolicy.trim() || input.retentionPolicy.length > 240 || input.trainingPolicy.length > 240) {
+    throw new Error("必须使用律所已确认的模型数据处理政策。 ");
+  }
+  if (!Number.isInteger(input.costCapMinor) || input.costCapMinor < 0 || input.costCapMinor > 10_000_000) {
+    throw new Error("AI 办案计划的成本上限无效。 ");
+  }
+  const expiresAt = new Date(input.expiresAt);
+  const now = Date.now();
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() < now + 60_000 || expiresAt.getTime() > now + 24 * 60 * 60 * 1000) {
+    throw new Error("本次 AI 办案计划的授权有效期必须为现在起 1 分钟至 24 小时。 ");
+  }
+  if (input.confirmation !== "CONFIRM_MINIMAL_CASE_PLAN") {
+    throw new Error("请确认仅发送最小案件快照后再建立本次授权。 ");
+  }
+  const authorizationHash = await sha256Text([
+    "deepseek-case-plan-authorization-v1",
+    config.matterId,
+    String(preflight.matterVersion),
+    preflight.inputHash.toLowerCase(),
+    preflight.providerId,
+    preflight.processorRegion,
+    preflight.serviceId,
+    preflight.selectedFieldIds.join(","),
+    input.retentionPolicy.trim(),
+    input.trainingPolicy.trim(),
+    String(input.costCapMinor),
+    expiresAt.toISOString(),
+    input.confirmation,
+  ].join("|"));
+  let response: Response;
+  try {
+    response = await persistentApiFetch(config, `/v1/matters/${config.matterId}/external-requests`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Idempotency-Key": crypto.randomUUID(),
+      },
+      body: JSON.stringify({
+        expected_version: preflight.matterVersion,
+        request_kind: "MODEL",
+        purpose: "生成案件受控办案计划（仅最小快照）",
+        provider_id: preflight.providerId,
+        processor_region: preflight.processorRegion,
+        retention_policy: input.retentionPolicy.trim(),
+        training_policy: input.trainingPolicy.trim(),
+        selected_field_ids: preflight.selectedFieldIds,
+        service_id: preflight.serviceId,
+        call_cap: preflight.callCap,
+        cost_currency: "CNY",
+        cost_cap_minor: input.costCapMinor,
+        input_hash: preflight.inputHash.toLowerCase(),
+        authorization_hash: authorizationHash,
+        expires_at: expiresAt.toISOString(),
+      }),
+    });
+  } catch {
+    throw new Error("连接在 AI 办案计划授权确认前中断。请刷新案件后核对，系统不会重复提交。 ");
+  }
+  const payload = (await response.json()) as { object_id?: string; matter_version?: number; object_type?: string } | ErrorEnvelope;
+  if (
+    !response.ok
+    || !("object_type" in payload)
+    || payload.object_type !== "EXTERNAL_REQUEST"
+    || !MATTER_ID_PATTERN.test(payload.object_id ?? "")
+    || !Number.isInteger(payload.matter_version)
+  ) {
+    throw new Error(errorMessage(payload as ErrorEnvelope, "本次 AI 办案计划授权未记录。"));
+  }
+  return { requestId: payload.object_id!, matterVersion: payload.matter_version!, requestIdHeader: response.headers.get("X-Request-ID") };
 }
 
 /**
@@ -3601,7 +3841,7 @@ export async function confirmSyntheticFact(factId: string): Promise<CaseReviewVi
 function mapSyntheticReview(payload: SyntheticReview, requestId: string | null): CaseReviewView {
   return {
     sourceKind: "synthetic-alpha",
-    sourceLabel: "本机合成数据",
+    sourceLabel: "演示资料",
     matterTitle: null,
     matterVersion: null,
     snapshotHash: payload.fact_snapshot_hash,
@@ -3682,18 +3922,18 @@ function mapSyntheticEvidence(): EvidenceReviewView {
   const pages: EvidenceReviewPage[] = syntheticMatter.evidence.map((item) => ({
     pageId: `synthetic-page-${item.page}`,
     fileId: "synthetic-wechat-ledger",
-    originalLabel: "[合成] 微信交易记录.pdf",
+    originalLabel: "演示微信交易记录.pdf",
     pageNumber: item.page,
     decisionId: item.confidence === "已核验" ? `synthetic-decision-${item.page}` : null,
     disposition: item.confidence === "已核验" ? "INCLUDE" : null,
-    reason: item.confidence === "已核验" ? "[合成] 与目标主体相关。" : null,
+    reason: item.confidence === "已核验" ? "[演示] 与目标主体相关。" : null,
     pendingDecision: null,
-    annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[合成] 相关交易行", status: "APPROVED" }] : [],
+    annotations: item.confidence === "已核验" ? [{ annotationId: `synthetic-annotation-${item.page}`, x0: 0.08, y0: 0.32, x1: 0.92, y1: 0.52, label: "[演示] 相关交易行", status: "APPROVED" }] : [],
     syntheticPreview: { date: item.date, amount: item.amount, counterpart: item.counterpart, confidence: item.confidence, note: item.note },
   }));
   return {
     sourceKind: "synthetic-alpha",
-    sourceLabel: "本机合成数据",
+    sourceLabel: "演示资料",
     matterVersion: null,
     snapshotHash: "synthetic-evidence-manifest-preview",
     manifestReadinessHash: "synthetic-evidence-readiness-preview",
@@ -3702,7 +3942,7 @@ function mapSyntheticEvidence(): EvidenceReviewView {
     unresolvedPageCount: pages.filter((page) => !page.decisionId).length,
     pendingDecisionCount: 0,
     unresolvedDuplicateCount: 1,
-    originals: [{ fileId: "synthetic-wechat-ledger", originalLabel: "[合成] 微信交易记录.pdf", originalFileSha256: "synthetic-only", pageCount: syntheticMatter.evidence.length }],
+    originals: [{ fileId: "synthetic-wechat-ledger", originalLabel: "演示微信交易记录.pdf", originalFileSha256: "synthetic-only", pageCount: syntheticMatter.evidence.length }],
     pages,
     pagePage: { loadedCount: pages.length, totalCount: pages.length, nextCursor: null, hasMore: false },
     duplicateGroups: [{
@@ -3710,7 +3950,7 @@ function mapSyntheticEvidence(): EvidenceReviewView {
       status: "CANDIDATE",
       canonicalPageId: null,
       pageIds: ["synthetic-page-17", "synthetic-page-18"],
-      pageLabels: { "synthetic-page-17": "[合成] 微信交易记录.pdf · 第 17 页", "synthetic-page-18": "[合成] 微信交易记录.pdf · 第 18 页" },
+      pageLabels: { "synthetic-page-17": "演示微信交易记录.pdf · 第 17 页", "synthetic-page-18": "演示微信交易记录.pdf · 第 18 页" },
     }],
     lockedManifest: null,
     derivatives: [],
@@ -3868,7 +4108,7 @@ function mapLocalFolderFiles(items: PersistentLocalFolderFilePage["items"]): Loc
 function mapSyntheticCalculation(payload: CalculationPreview, requestId: string | null): CalculationReviewView {
   return {
     sourceKind: "synthetic-alpha",
-    sourceLabel: "本机合成数据",
+    sourceLabel: "演示资料",
     status: "ready",
     emptyReason: null,
     matterVersion: null,
@@ -4297,9 +4537,9 @@ function mapPersistentLegalReview(
 function syntheticSubmissionView(): SubmissionReviewView {
   return {
     sourceKind: "synthetic-alpha",
-    sourceLabel: "本机合成模式",
+    sourceLabel: "演示案件",
     status: "blocked",
-    statusReason: "合成模式不建立可提交文件、锁定版或导出回执；这里只展示正式流程的必备门禁。",
+    statusReason: "演示案件仅展示提交前需要完成的步骤，不能生成法院提交文件。",
     matterVersion: null,
     stage: null,
     snapshotHash: null,
@@ -4394,6 +4634,15 @@ function paymentApplication(nature?: string): string {
 function errorMessage(payload: ErrorEnvelope, fallback: string): string {
   const message = payload.message || payload.detail || fallback;
   return payload.request_id ? `${message}（请求号 ${payload.request_id}）` : message;
+}
+
+function isSkillToolPair(value: unknown): value is { skill_id: string; tool_id: string } {
+  if (!value || typeof value !== "object") return false;
+  const item = value as { skill_id?: unknown; tool_id?: unknown };
+  return typeof item.skill_id === "string"
+    && typeof item.tool_id === "string"
+    && /^[A-Za-z0-9_-]{1,120}$/.test(item.skill_id)
+    && /^[A-Za-z0-9_-]{1,120}$/.test(item.tool_id);
 }
 
 function isAllowedPreviewOrigin(value: string): boolean {

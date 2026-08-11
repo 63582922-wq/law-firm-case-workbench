@@ -107,7 +107,7 @@ export function ReviewableOfficeDrafts() {
       {notice && <p className={styles.officeDraftNotice} role="status">{notice}</p>}
       {!review ? <div className={styles.calculationLoading}>正在读取可审阅文书候选件…</div> : review.pairs.length === 0 ? (
         <div className={styles.officeDraftEmpty}>
-          <strong>{review.sourceKind === "synthetic-alpha" ? "合成模式不生成可编辑文书" : "当前没有可审阅的内部 Word / Excel 草稿"}</strong>
+          <strong>{review.sourceKind === "synthetic-alpha" ? "演示案件不生成可编辑文书" : "当前没有可审阅的内部 Word / Excel 草稿"}</strong>
           <span>{review.sourceKind === "synthetic-alpha" ? "不会以示例文书替代真实案件材料。" : "系统生成后必须先形成“可编辑源件 + PDF 审阅稿”的核验对，才会出现在这里。"}</span>
         </div>
       ) : (

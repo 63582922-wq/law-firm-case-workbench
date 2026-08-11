@@ -1,9 +1,10 @@
 """Assemble the guarded persistent desktop runtime without opening case routes by default.
 
 This module is deliberately a narrow composition root.  It connects only an
-already-enrolled desktop identity, an explicitly acknowledged preview database,
-and a Keychain-protected encrypted artifact directory.  It never provisions a
-key, accepts a key from HTTP, or accepts an artifact directory from a browser.
+already-enrolled desktop identity, an explicitly acknowledged persistent
+database mode, and a Keychain-protected encrypted artifact directory.  It
+never provisions a key, accepts a key from HTTP, or accepts an artifact
+directory from a browser.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from case_kernel.local_intake_authorizations import LocalEvidenceIntakeAuthoriza
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.original_page_access import OriginalPageAccessBroker
 from case_kernel.reviewable_draft_access import ReviewableOfficeDraftAccessBroker
-from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeServices, RuntimeSettings, build_runtime_services
+from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeServices, RuntimeSettings, build_runtime_services
 from case_kernel.submission_access import SubmissionExportAccessBroker
 
 from .desktop_identity_runtime import DesktopIdentityRuntime
@@ -35,7 +36,7 @@ _MANAGED_ROOT_ENV = "CASE_WORKBENCH_MANAGED_ARTIFACT_ROOT"
 
 
 class DesktopPersistentRuntimeBlocked(RuntimeError):
-    """A desktop preview runtime has not met every local security prerequisite."""
+    """A desktop persistent runtime has not met every local security prerequisite."""
 
 
 @dataclass(frozen=True)
@@ -62,9 +63,9 @@ def build_desktop_persistent_runtime(
         settings = RuntimeSettings.from_environment(environ)
     except RuntimeConfigurationBlocked as error:
         raise DesktopPersistentRuntimeBlocked("persistent runtime configuration is invalid") from error
-    if settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
+    if not settings.mode.is_persistent:
         raise DesktopPersistentRuntimeBlocked(
-            "persistent desktop runtime requires postgres-internal-preview mode"
+            "persistent desktop runtime requires an explicitly guarded PostgreSQL mode"
         )
 
     managed_root = _configured_managed_root(environ)

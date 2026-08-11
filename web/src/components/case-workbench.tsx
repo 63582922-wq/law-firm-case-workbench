@@ -7,12 +7,21 @@ import { FactsWorkbench } from "@/components/facts-workbench";
 import { LegalWorkbench } from "@/components/legal-workbench";
 import { IdentitySecurityWorkbench } from "@/components/identity-security-workbench";
 import { SubmissionWorkbench } from "@/components/submission-workbench";
+import { CaseAssistantPlan } from "@/components/case-assistant-plan";
+import {
+  LocalStandaloneFeatureUnavailable,
+  LocalStandaloneOnboarding,
+  LocalStandaloneCaseHome,
+} from "@/components/local-standalone-onboarding";
 import {
   activatePersistentMatter,
   caseDataSourceConfig,
   clearActivePersistentMatter,
   createPersistentMatter,
+  enableReadyDesktopPersistentWorkspace,
   getPersistentWorkspaceTarget,
+  isDesktopCaseWorkspaceShell,
+  isReadyDesktopPersistentWorkspace,
   loadCaseReview,
   loadPersistentMatterList,
   restoreActivePersistentMatter,
@@ -21,38 +30,103 @@ import {
   type PersistentMatterListItem,
 } from "@/lib/case-data-source";
 import { readDesktopRuntimeStatus } from "@/lib/desktop-bridge";
-import type { DesktopRuntimeStatus } from "@/lib/desktop-bridge";
-import { stageLabels, syntheticMatter } from "@/lib/synthetic-matter";
+import type { DesktopRuntimeStatus, LocalCaseSummary } from "@/lib/desktop-bridge";
+import {
+  activateLocalStandaloneCase,
+  clearActiveLocalStandaloneCase,
+  isReadyLocalStandaloneWorkspace,
+  restoreActiveLocalStandaloneCase,
+} from "@/lib/local-standalone-case-source";
+import { syntheticMatter } from "@/lib/synthetic-matter";
 import styles from "./case-workbench.module.css";
 
 type View = "overview" | "evidence" | "facts" | "legal" | "calculation" | "bundle" | "security";
+type DesktopWorkspaceState = "not-applicable" | "checking" | "ready" | "blocked";
+type LocalStandaloneState = "not-applicable" | "checking" | "ready";
 
 const navItems: ReadonlyArray<{ id: View | "facts" | "bundle"; label: string; href?: string }> = [
-  { id: "overview", label: "案件总览", href: "/" },
-  { id: "evidence", label: "证据核验", href: "/evidence" },
-  { id: "facts", label: "事实与争点", href: "/facts" },
-  { id: "legal", label: "法律规则", href: "/legal" },
-  { id: "calculation", label: "利息测算", href: "/calculation" },
-  { id: "bundle", label: "提交材料", href: "/bundle" },
-  { id: "security", label: "身份与安全", href: "/security" },
+  { id: "overview", label: "办案首页", href: "/" },
+  { id: "evidence", label: "收集材料", href: "/evidence" },
+  { id: "facts", label: "核对案情", href: "/facts" },
+  { id: "legal", label: "法律依据", href: "/legal" },
+  { id: "calculation", label: "还款与利息", href: "/calculation" },
+  { id: "bundle", label: "应诉材料", href: "/bundle" },
+  { id: "security", label: "工作台设置", href: "/security" },
 ];
 
+const lawyerProgress = ["收集材料", "核对案情", "确定法律与利息口径", "形成应诉材料"] as const;
+
 export function CaseWorkbench({ initialView = "overview" }: { initialView?: View }) {
-  const [view] = useState<View>(initialView);
+  const [view, setView] = useState<View>(initialView);
   const [sourceConfig, setSourceConfig] = useState<CaseDataSourceConfig>(caseDataSourceConfig);
+  const [workspaceRestored, setWorkspaceRestored] = useState(() => getPersistentWorkspaceTarget() === null);
   const [desktopRuntime, setDesktopRuntime] = useState<DesktopRuntimeStatus | null>(null);
+  const [desktopRuntimeRefreshKey, setDesktopRuntimeRefreshKey] = useState(0);
+  const [desktopWorkspaceState, setDesktopWorkspaceState] = useState<DesktopWorkspaceState>(() => (
+    isDesktopCaseWorkspaceShell() ? "checking" : "not-applicable"
+  ));
+  const [desktopWorkspaceMessage, setDesktopWorkspaceMessage] = useState<string | null>(null);
+  const [localStandaloneState, setLocalStandaloneState] = useState<LocalStandaloneState>(() => (
+    isDesktopCaseWorkspaceShell() ? "checking" : "not-applicable"
+  ));
+  const [localStandaloneCase, setLocalStandaloneCase] = useState<LocalCaseSummary | null>(null);
+  const [localStandaloneRestoreMessage, setLocalStandaloneRestoreMessage] = useState<string | null>(null);
   const unresolvedCount = syntheticMatter.evidence.filter((item) => item.confidence !== "已核验").length;
-  const currentStageIndex = view === "bundle" ? 4 : view === "legal" || view === "calculation" ? 2 : 1;
+  const currentStageIndex = view === "bundle" ? 3 : view === "legal" || view === "calculation" ? 2 : view === "facts" ? 1 : 0;
   const syntheticSource = sourceConfig.kind === "synthetic-alpha";
-  const workspaceAwaitingCase = sourceConfig.kind === "persistent-disabled" && getPersistentWorkspaceTarget() !== null;
+  const displaySyntheticSource = syntheticSource && desktopWorkspaceState === "not-applicable";
+  const localStandaloneReady = isReadyLocalStandaloneWorkspace(desktopRuntime);
+  const localStandaloneRestoring = localStandaloneReady && localStandaloneState === "checking";
+  const localStandaloneAwaitingCase = localStandaloneReady && localStandaloneState === "ready" && localStandaloneCase === null;
+  const localStandaloneCaseOpen = localStandaloneReady && localStandaloneCase !== null;
+  const workspaceAwaitingCase = localStandaloneAwaitingCase || (sourceConfig.kind === "persistent-disabled" && getPersistentWorkspaceTarget() !== null);
+  const restoringPersistentWorkspace = getPersistentWorkspaceTarget() !== null && !workspaceRestored;
+  const desktopRuntimeNeedsSetup = isDesktopCaseWorkspaceShell()
+    && desktopRuntime !== null
+    && desktopRuntime.phase !== "STARTING"
+    && !localStandaloneReady
+    && !isReadyDesktopPersistentWorkspace(desktopRuntime);
+  const desktopWorkspaceChecking = isDesktopCaseWorkspaceShell()
+    && (desktopRuntime === null
+      || desktopRuntime.phase === "STARTING"
+      || (desktopWorkspaceState === "checking" && isReadyDesktopPersistentWorkspace(desktopRuntime)));
+  const desktopWorkspaceBlocked = desktopWorkspaceState === "blocked" || desktopRuntimeNeedsSetup;
+  const resolvedDesktopWorkspaceMessage = desktopWorkspaceState === "blocked"
+    ? desktopWorkspaceMessage
+    : desktopRuntimeNeedsSetup
+      ? desktopRuntime?.message ?? "本机案件工作区尚未完成身份、会话和资料库核验。"
+      : desktopWorkspaceMessage;
+  const localFeatureLabel = navItems.find((item) => item.id === view)?.label ?? "该功能";
 
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let unavailableBridgeAttempts = 0;
     const refresh = async () => {
       try {
         const status = await readDesktopRuntimeStatus();
-        if (cancelled || status === null) return;
+        if (cancelled) return;
+        if (status === null) {
+          unavailableBridgeAttempts += 1;
+          if (unavailableBridgeAttempts < 4) {
+            timer = setTimeout(refresh, 180);
+            return;
+          }
+          setDesktopRuntime({
+            phase: "BLOCKED",
+            message: "未能连接桌面工作台接口；请重新启动应用后再试。",
+            apiBase: null,
+            processId: null,
+            identityPhase: "UNAVAILABLE",
+            enrollmentTrustPhase: "UNAVAILABLE",
+            sessionPhase: "UNAVAILABLE",
+            sessionExpiresAt: null,
+            persistencePhase: "UNAVAILABLE",
+            evidenceIntakeWorkerPhase: "UNAVAILABLE",
+            officialSourceCaptureWorkerPhase: "UNAVAILABLE",
+          });
+          return;
+        }
         setDesktopRuntime(status);
         if (status.phase === "STARTING") timer = setTimeout(refresh, 350);
       } catch {
@@ -78,33 +152,86 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [desktopRuntimeRefreshKey]);
 
   useEffect(() => {
+    if (getPersistentWorkspaceTarget() === null) return;
     const timer = window.setTimeout(() => {
       const restored = restoreActivePersistentMatter();
       setSourceConfig((current) => current === restored ? current : restored);
+      setWorkspaceRestored(true);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    void Promise.resolve().then(async () => {
+      if (!active) return;
+      if (!localStandaloneReady) {
+        if (desktopRuntime !== null && desktopRuntime.workspaceMode !== "LOCAL_STANDALONE") {
+          setLocalStandaloneState("not-applicable");
+          setLocalStandaloneCase(null);
+          setLocalStandaloneRestoreMessage(null);
+        }
+        return;
+      }
+      setLocalStandaloneState("checking");
+      try {
+        const { caseSummary, message } = await restoreActiveLocalStandaloneCase();
+        if (!active) return;
+        setLocalStandaloneCase(caseSummary);
+        setLocalStandaloneRestoreMessage(message);
+        setLocalStandaloneState("ready");
+      } catch {
+        if (!active) return;
+        setLocalStandaloneCase(null);
+        setLocalStandaloneRestoreMessage("无法读取上次打开的本机案件；你可以从案件目录重新打开。 ");
+        setLocalStandaloneState("ready");
+      }
+    });
+    return () => { active = false; };
+  }, [desktopRuntime, localStandaloneReady]);
+
+  useEffect(() => {
+    if (!isDesktopCaseWorkspaceShell()) return;
+    if (desktopRuntime === null || desktopRuntime.phase === "STARTING" || !isReadyDesktopPersistentWorkspace(desktopRuntime)) return;
+
+    let active = true;
+    void enableReadyDesktopPersistentWorkspace(desktopRuntime)
+      .then((nextSourceConfig) => {
+        if (!active) return;
+        setSourceConfig(nextSourceConfig);
+        setWorkspaceRestored(true);
+        setDesktopWorkspaceState("ready");
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setDesktopWorkspaceState("blocked");
+        setDesktopWorkspaceMessage(reason instanceof Error ? reason.message : "无法取得本机案件会话；没有打开或创建案件。");
+      });
+    return () => {
+      active = false;
+    };
+  }, [desktopRuntime]);
+
   return (
     <main className={styles.shell}>
       <header className={styles.topbar}>
-        <div className={styles.brand} aria-label="律所案件 AI 工作台">
+        <div className={styles.brand} aria-label="律师办案工作台">
           <span className={styles.brandMark}>案</span>
-          <span>律所案件 AI 工作台</span>
-          <small>{syntheticSource ? "内部合成 Alpha" : sourceConfig.label}</small>
+          <span>律师办案工作台</span>
+          <small>{displaySyntheticSource ? "演示案件" : desktopWorkspaceChecking ? "正在核验本机工作区" : desktopWorkspaceBlocked ? "本机工作台未就绪" : localStandaloneRestoring ? "正在打开本机案件" : localStandaloneAwaitingCase ? "本机建案" : localStandaloneCaseOpen ? "本机案件" : workspaceAwaitingCase ? "新建案件" : sourceConfig.label}</small>
         </div>
         <div className={styles.topbarMeta}>
-          <span>{syntheticSource ? "当前角色：主办律师（合成）" : workspaceAwaitingCase ? "先建立本案的受审计台账" : "身份来源：服务端会话与数据库案件角色"}</span>
+          <span>{displaySyntheticSource ? "主办律师视图" : desktopWorkspaceChecking ? "正在确认本机办案资格" : desktopWorkspaceBlocked ? "请先完成本机工作台设置" : localStandaloneRestoring ? "正在恢复本机案件" : localStandaloneAwaitingCase ? "先选择资料文件夹" : localStandaloneCaseOpen ? "个人本机办案" : workspaceAwaitingCase ? "先建立案件，再导入资料" : "本案工作区"}</span>
           <span className={styles.dot} aria-hidden="true" />
-          <span>{syntheticSource ? "不连接真实案件材料" : workspaceAwaitingCase ? "等待新建案件" : sourceConfig.kind === "persistent-disabled" ? "持久化数据源未启用" : "持久化内部预览"}</span>
+          <span>{displaySyntheticSource ? "仅供流程演示" : desktopWorkspaceChecking ? "尚未读取或创建案件" : desktopWorkspaceBlocked ? "没有读取演示案情或本案材料" : localStandaloneRestoring ? "尚未读取材料" : localStandaloneAwaitingCase ? "等待资料根关联" : localStandaloneCaseOpen ? localStandaloneCase?.inventory ? "本机材料已盘点" : "资料尚未盘点" : workspaceAwaitingCase ? "等待新建案件" : sourceConfig.kind === "persistent-disabled" ? "案件服务未连接" : "材料留在本机受控范围"}</span>
           {desktopRuntime ? (
             <>
               <span className={styles.dot} aria-hidden="true" />
               <span className={desktopRuntime.phase === "BLOCKED" || desktopRuntime.phase === "STOPPED" ? styles.runtimeBlocked : styles.runtimeState}>
-                {desktopRuntime.phase === "READY" ? "本机服务已就绪（案件仍禁用）" : desktopRuntime.message}
+                {desktopRuntime.phase === "READY" ? "办案服务已就绪" : desktopRuntime.message}
               </span>
             </>
           ) : null}
@@ -113,34 +240,47 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
 
       <section className={styles.caseHeader} aria-labelledby="case-title">
         <div>
-          <p className={styles.eyebrow}>{syntheticSource ? `案件卷宗 / ${syntheticMatter.matterNo}` : "持久化案件 / 由版本化快照读取"}</p>
-          <h1 id="case-title">{syntheticSource ? syntheticMatter.title : workspaceAwaitingCase ? "建立案件工作区" : sourceConfig.kind === "persistent-disabled" ? "持久化案件尚未启用" : "案件标题将在事实台账中核验"}</h1>
-          <p className={styles.caseSubline}>{syntheticSource ? `${syntheticMatter.client} · ${syntheticMatter.court} · 争议对方：${syntheticMatter.opponent}` : workspaceAwaitingCase ? "先建立一个受审计的案件台账，再选择本地案卷文件夹。" : sourceConfig.kind === "persistent-disabled" ? sourceConfig.reason : "不会以合成案件内容回退或覆盖持久化案件状态"}</p>
+          <p className={styles.eyebrow}>{displaySyntheticSource ? `案件编号 / ${syntheticMatter.matterNo}` : localStandaloneCaseOpen ? "本机案件工作区" : "案件工作区"}</p>
+          <h1 id="case-title">{displaySyntheticSource ? syntheticMatter.title : desktopWorkspaceChecking ? "正在核验本机案件工作区" : desktopWorkspaceBlocked ? "本机案件工作区暂不可用" : localStandaloneRestoring ? "正在恢复本机案件" : localStandaloneAwaitingCase ? "从本地资料建立案件" : localStandaloneCaseOpen ? localStandaloneCase?.title : workspaceAwaitingCase ? "建立案件工作区" : sourceConfig.kind === "persistent-disabled" ? "案件资料库尚未启用" : "案件标题将在事实台账中核验"}</h1>
+          <p className={styles.caseSubline}>{displaySyntheticSource ? `${syntheticMatter.client} · ${syntheticMatter.court} · 对方：${syntheticMatter.opponent}` : desktopWorkspaceChecking ? "正在确认桌面身份、会话和资料库状态；尚未读取或创建案件。" : desktopWorkspaceBlocked ? resolvedDesktopWorkspaceMessage ?? "请先检查工作台设置。" : localStandaloneRestoring ? "正在读取本机案件目录；尚未读取资料文件夹。" : localStandaloneAwaitingCase ? "先选择本案资料文件夹，再建立一个仅保存在本机的案件。" : localStandaloneCaseOpen ? localStandaloneCase?.inventory ? `资料根：${localStandaloneCase.materialRoot.displayName} · 已只读盘点 ${localStandaloneCase.inventory.totalFiles} 个文件` : `资料根：${localStandaloneCase?.materialRoot.displayName ?? "未关联"} · 尚未开始材料盘点` : workspaceAwaitingCase ? "先建立一个案件，再选择本地资料文件夹。" : sourceConfig.kind === "persistent-disabled" ? sourceConfig.reason : "从已核验材料汇总案件进展"}</p>
         </div>
         <div className={styles.deadline}>
-          <span>{syntheticSource ? "最近期限" : "期限状态"}</span>
-          <strong>{syntheticSource ? syntheticMatter.deadline : "尚未接入持久化期限台账"}</strong>
-          <em>{syntheticSource ? "合成演示时间，不代表真实法律期限" : "系统不会沿用合成期限"}</em>
+          <span>{displaySyntheticSource ? "下一项期限" : desktopWorkspaceChecking || desktopWorkspaceBlocked ? "工作台状态" : localStandaloneReady ? "本机办案状态" : "期限提醒"}</span>
+          <strong>{displaySyntheticSource ? syntheticMatter.deadline : desktopWorkspaceChecking ? "正在核验" : desktopWorkspaceBlocked ? "暂不打开案件" : localStandaloneRestoring ? "正在恢复" : localStandaloneAwaitingCase ? "等待建案" : localStandaloneCaseOpen ? localStandaloneCase?.inventory ? "材料已盘点" : "等待材料盘点" : "尚未接入持久化期限台账"}</strong>
+          <em>{displaySyntheticSource ? "演示时间，不代表真实法律期限" : desktopWorkspaceChecking || desktopWorkspaceBlocked ? "不会以演示案件代替真实案件" : localStandaloneReady ? localStandaloneCase?.inventory ? "尚未形成正式办案结论" : "资料内容尚未读取" : "由律师确认后纳入提醒"}</em>
         </div>
-        {!syntheticSource && !workspaceAwaitingCase ? (
+        {localStandaloneCaseOpen ? (
+          <button className={styles.caseSwitch} onClick={() => {
+            clearActiveLocalStandaloneCase();
+            setLocalStandaloneCase(null);
+            setLocalStandaloneRestoreMessage(null);
+            setLocalStandaloneState("ready");
+            setView("overview");
+            window.history.replaceState(null, "", "/");
+          }} type="button">切换案件</button>
+        ) : !displaySyntheticSource && !desktopWorkspaceChecking && !desktopWorkspaceBlocked && !workspaceAwaitingCase ? (
           <button className={styles.caseSwitch} onClick={() => {
             clearActivePersistentMatter();
             setSourceConfig(caseDataSourceConfig);
+            setView("overview");
+            window.history.replaceState(null, "", "/");
           }} type="button">切换案件</button>
         ) : null}
       </section>
 
       <div className={styles.workspace}>
         <aside className={styles.sidebar} aria-label="案件导航">
-          <p className={styles.sideLabel}>工作区</p>
+          <p className={styles.sideLabel}>本案工作</p>
           <nav>
             {navItems.map((item) => {
               const active = item.id === view;
-              const lockedUntilCaseCreated = workspaceAwaitingCase && item.id !== "overview" && item.id !== "security";
-              if (lockedUntilCaseCreated) {
+              const protectedItem = item.id !== "overview" && item.id !== "security";
+              const lockedUntilCaseCreated = (workspaceAwaitingCase || desktopWorkspaceChecking || desktopWorkspaceBlocked) && protectedItem;
+              const lockedUntilLocalCapability = localStandaloneCaseOpen && protectedItem;
+              if (lockedUntilCaseCreated || lockedUntilLocalCapability) {
                 return (
                   <button className={styles.navItem} key={item.id} disabled type="button">
-                    <span>{item.label}</span><small>先新建案件</small>
+                    <span>{item.label}</span><small>{lockedUntilLocalCapability ? localStandaloneCase?.inventory ? "待正式能力" : "待材料盘点" : desktopWorkspaceBlocked ? "先完成设置" : desktopWorkspaceChecking ? "正在核验" : "先新建案件"}</small>
                   </button>
                 );
               }
@@ -170,9 +310,9 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
             })}
           </nav>
           <div className={styles.sidebarRule} />
-          <p className={styles.sideLabel}>流程位置</p>
+          <p className={styles.sideLabel}>本案进度</p>
           <ol className={styles.stageList}>
-            {stageLabels.map((label, index) => (
+            {lawyerProgress.map((label, index) => (
               <li className={index === currentStageIndex ? styles.stageCurrent : index < currentStageIndex ? styles.stageDone : ""} key={label}>
                 <span>{String(index + 1).padStart(2, "0")}</span>{label}
               </li>
@@ -180,36 +320,118 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
           </ol>
         </aside>
 
-        {view === "overview" && workspaceAwaitingCase ? (
-          <PersistentWorkspaceSetup onMatterCreated={(matterId) => {
-            activatePersistentMatter(matterId);
-            setSourceConfig(caseDataSourceConfig);
+        {view === "security" ? (
+          <IdentitySecurityWorkbench desktopRuntime={desktopRuntime} />
+        ) : desktopWorkspaceChecking ? (
+          <section className={styles.content} aria-label="正在核验本机案件工作区">
+            <div className={styles.evidenceLoading}>正在确认本机身份、会话和案件资料库…</div>
+          </section>
+        ) : desktopWorkspaceBlocked ? (
+          <DesktopWorkspaceBlocked
+            message={resolvedDesktopWorkspaceMessage}
+            onRetry={() => {
+              setDesktopWorkspaceState("checking");
+              setDesktopWorkspaceMessage(null);
+              setDesktopRuntime(null);
+              setDesktopRuntimeRefreshKey((current) => current + 1);
+            }}
+          />
+        ) : restoringPersistentWorkspace ? (
+          <section className={styles.content} aria-label="正在打开案件工作区">
+            <div className={styles.evidenceLoading}>正在恢复本机案件工作区…</div>
+          </section>
+        ) : localStandaloneRestoring ? (
+          <section className={styles.content} aria-label="正在恢复本机案件">
+            <div className={styles.evidenceLoading}>正在读取本机案件目录；尚未读取资料文件夹…</div>
+          </section>
+        ) : localStandaloneAwaitingCase ? (
+          <LocalStandaloneOnboarding initialNotice={localStandaloneRestoreMessage} onCaseOpened={(caseSummary) => {
+            activateLocalStandaloneCase(caseSummary);
+            setLocalStandaloneCase(caseSummary);
+            setLocalStandaloneRestoreMessage(null);
+            setLocalStandaloneState("ready");
+            setView("overview");
+            window.history.replaceState(null, "", "/");
+          }} />
+        ) : localStandaloneCaseOpen && localStandaloneCase !== null ? (
+          view === "overview" ? (
+            <LocalStandaloneCaseHome
+              caseSummary={localStandaloneCase}
+              onCaseUpdated={(caseSummary) => {
+                activateLocalStandaloneCase(caseSummary);
+                setLocalStandaloneCase(caseSummary);
+              }}
+              onShowCaseList={() => {
+                clearActiveLocalStandaloneCase();
+                setLocalStandaloneCase(null);
+                setLocalStandaloneRestoreMessage(null);
+                setLocalStandaloneState("ready");
+                setView("overview");
+                window.history.replaceState(null, "", "/");
+              }}
+            />
+          ) : (
+            <LocalStandaloneFeatureUnavailable
+              caseSummary={localStandaloneCase}
+              featureLabel={localFeatureLabel}
+              onReturnHome={() => {
+                setView("overview");
+                window.history.replaceState(null, "", "/");
+              }}
+            />
+          )
+        ) : view === "overview" && workspaceAwaitingCase ? (
+          <PersistentWorkspaceSetup onMatterCreated={async (matterId) => {
+            const nextSourceConfig = activatePersistentMatter(matterId);
+            setSourceConfig(nextSourceConfig);
+            setView("evidence");
+            window.history.pushState(null, "", "/evidence");
           }} />
         ) : view === "overview" ? (
-          <Overview unresolvedCount={unresolvedCount} syntheticSource={syntheticSource} />
+          <Overview unresolvedCount={unresolvedCount} sourceConfig={sourceConfig} syntheticSource={displaySyntheticSource} />
         ) : view === "evidence" ? (
           <EvidenceManifestWorkbench />
         ) : view === "facts" ? <FactsWorkbench /> : view === "legal" ? <LegalWorkbench /> : view === "calculation" ? (
           <CalculationWorkbench />
-        ) : view === "bundle" ? <SubmissionWorkbench /> : (
-          <IdentitySecurityWorkbench desktopRuntime={desktopRuntime} />
-        )}
+        ) : <SubmissionWorkbench />}
       </div>
 
       <footer className={styles.footer}>
-        <span>{syntheticSource ? "内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件" : "持久化内部预览 · 仅在依赖、审批、本机编译与导出核验全部通过后形成法院 ZIP"}</span>
-        <span>所有结论、取舍与锁定均须由具备权限的人员在后续流程确认</span>
+        <span>{displaySyntheticSource ? "演示案件：用于确认办案流程和界面，不代表真实案情或法律意见" : desktopWorkspaceChecking || desktopWorkspaceBlocked ? "尚未读取、创建或变更任何案件材料" : localStandaloneReady ? localStandaloneCase?.inventory ? "本机清单来自只读盘点；尚未形成事实、法律或提交结论" : "资料根仅在本机关联；未取得盘点回执前不显示任何材料结果" : "每一项结论均可追溯至材料并由律师确认"}</span>
+        <span>原始材料不被改写；对外发送前须逐次取得授权</span>
       </footer>
     </main>
   );
 }
 
-function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matterId: string) => void }) {
+function DesktopWorkspaceBlocked({ message, onRetry }: { message: string | null; onRetry: () => void }) {
+  return (
+    <section className={styles.content} aria-label="本机案件工作区未就绪">
+      <div className={styles.contentTopline}><span>办案首页</span><span className={styles.statusPill}>尚未打开案件</span></div>
+      <article className={styles.nextDecision}>
+        <div>
+          <p className={styles.eyebrow}>本机工作台未就绪</p>
+          <h2>暂不能新建、打开或读取案件</h2>
+          <p>{message ?? "请先完成本机身份、会话和案件资料库核验。"}</p>
+          <p>系统没有以演示案情代替真实案件，也没有读取、创建或修改任何案件材料。</p>
+        </div>
+        <div className={styles.caseSetupActions}>
+          <button onClick={onRetry} type="button">重新核验</button>
+          <a className={styles.primaryAction} href="/security">查看工作台设置</a>
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matterId: string) => Promise<void> }) {
   const [title, setTitle] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [matters, setMatters] = useState<PersistentMatterListItem[]>([]);
   const [listState, setListState] = useState<"loading" | "ready" | "blocked">("loading");
+  const [listReloadKey, setListReloadKey] = useState(0);
+  const [openingMatterId, setOpeningMatterId] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -225,7 +447,7 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
         setNotice(reason instanceof Error ? reason.message : "案件列表读取失败。");
       });
     return () => { active = false; };
-  }, []);
+  }, [listReloadKey]);
 
   async function createMatter(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -233,7 +455,12 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
     setBusy(true);
     try {
       const receipt = await createPersistentMatter(title);
-      onMatterCreated(receipt.matterId);
+      try {
+        await onMatterCreated(receipt.matterId);
+      } catch (reason: unknown) {
+        const message = reason instanceof Error ? reason.message : "请刷新页面后从“已有案件”继续。";
+        setNotice(`案件已经建立，但未能打开收集材料页面：${message}`);
+      }
     } catch (reason: unknown) {
       setNotice(reason instanceof Error ? reason.message : "案件未创建；请保留当前页面后重试。");
     } finally {
@@ -241,42 +468,66 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
     }
   }
 
+  async function openMatter(matterId: string) {
+    setNotice(null);
+    setOpeningMatterId(matterId);
+    try {
+      await onMatterCreated(matterId);
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : "请稍后再次尝试。";
+      setNotice(`未能打开该案件：${message}`);
+    } finally {
+      setOpeningMatterId(null);
+    }
+  }
+
+  function retryMatterList() {
+    setNotice(null);
+    setListState("loading");
+    setListReloadKey((current) => current + 1);
+  }
+
   return (
-    <section className={styles.content} aria-label="建立案件工作区">
-      <div className={styles.contentTopline}><span>建立案件工作区</span><span className={styles.statusPill}>尚未读取任何材料</span></div>
+    <section className={styles.content} aria-label="新建或打开案件">
+      <div className={styles.contentTopline}><span>新建或打开案件</span><span className={styles.statusPill}>尚未读取任何材料</span></div>
       <article className={styles.nextDecision}>
         <div>
           <p className={styles.eyebrow}>第一步</p>
-          <h2>先建立案件，再选择资料文件夹</h2>
-          <p>此时只记录中性的工作名称。双方、金额、期限和诉讼立场必须从原始材料中核验，不会被表单预填或推定。</p>
+          <h2>先建一宗案件，再放入资料</h2>
+          <p>先填写便于你识别的案件名称。下一步选择本案资料文件夹；双方、金额、期限和诉讼立场都由材料核对后再形成。</p>
         </div>
       </article>
       <form className={styles.caseSetupForm} onSubmit={(event) => void createMatter(event)}>
         <label>
-          <span>案件工作名称</span>
-          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：测试甲借款纠纷" required />
+          <span>案件名称</span>
+          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：测试甲民间借贷纠纷" required />
         </label>
         <div className={styles.caseSetupActions}>
-          <button type="submit" disabled={busy || title.trim().length < 2}>{busy ? "正在建立…" : "建立案件并进入材料接收"}</button>
-          <small>建立后，系统才会打开“选择资料文件夹”的受控权限和证据盘点流程。</small>
+          <button type="submit" disabled={busy || openingMatterId !== null || title.trim().length < 2}>{busy ? "正在建立…" : "建立案件，下一步选择材料文件夹"}</button>
+          <small>建立后，选择本案资料文件夹。系统先列出文件清单，由你确认后才开始整理。</small>
         </div>
         {notice ? <p className={styles.caseSetupNotice}>{notice}</p> : null}
       </form>
       <section className={styles.casePicker} aria-label="可访问案件">
         <div>
           <p className={styles.eyebrow}>已有案件</p>
-          <h3>{listState === "loading" ? "正在读取可访问案件…" : listState === "blocked" ? "案件列表暂不可用" : matters.length === 0 ? "尚无可访问案件" : "选择一个已有案件"}</h3>
+          <h3>{listState === "loading" ? "正在读取案件…" : listState === "blocked" ? "暂时无法读取案件" : matters.length === 0 ? "还没有案件" : "继续办理已有案件"}</h3>
         </div>
         {listState === "ready" && matters.length > 0 ? (
           <div className={styles.casePickerList}>
             {matters.map((matter) => (
-              <button key={matter.matterId} onClick={() => onMatterCreated(matter.matterId)} type="button">
+              <button disabled={busy || openingMatterId !== null} key={matter.matterId} onClick={() => void openMatter(matter.matterId)} type="button">
                 <span><strong>{matter.title}</strong><small>{matter.stage} · 版本 {matter.version}</small></span>
-                <em>打开</em>
+                <em>{openingMatterId === matter.matterId ? "正在打开…" : "打开"}</em>
               </button>
             ))}
           </div>
-        ) : <small>只显示当前已登记身份在数据库中仍具有有效案件角色的案件。</small>}
+        ) : listState === "blocked" ? (
+          <div className={styles.caseSetupActions}>
+            <button onClick={retryMatterList} type="button">重新读取案件</button>
+            <small>如果本机服务刚启动或刚完成律所登记，可重新读取；不会建立新案件。</small>
+          </div>
+        ) : <small>这里只显示你当前有权限办理的案件。</small>}
       </section>
     </section>
   );
@@ -284,71 +535,108 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
 
 function Overview({
   unresolvedCount,
+  sourceConfig,
   syntheticSource,
 }: {
   unresolvedCount: number;
+  sourceConfig: CaseDataSourceConfig;
   syntheticSource: boolean;
 }) {
   if (!syntheticSource) {
-    return <PersistentOverview />;
+    return <PersistentOverview sourceConfig={sourceConfig} />;
   }
+  return <LawyerDashboard
+    sourceConfig={sourceConfig}
+    status="材料处理中"
+    headline="先整理与对方之间的还款记录"
+    description="工作台已经找到可能相关的交易页。先确认重复页和不相关页面，随后系统会把可用还款记录汇入案件台账。"
+    actionLabel="开始整理材料"
+    actionHref="/evidence"
+    summary={[
+      ["案件类型", "民间借贷纠纷"],
+      ["对方", syntheticMatter.opponent],
+      ["本金", syntheticMatter.principal],
+      ["下一项期限", syntheticMatter.deadline],
+    ]}
+    tasks={[
+      { state: "现在处理", title: "筛选与对方有关的微信交易页", detail: `有 ${unresolvedCount} 页需要你确认是否保留`, href: "/evidence", action: "去整理" },
+      { state: "接下来", title: "核对每笔还款的时间、金额和币种", detail: "不先判断它是否属于本金或利息", href: "/facts", action: "去核对" },
+      { state: "待材料确认", title: "确定法律依据与利息口径", detail: "先确认适用规则和时间边界，不让系统自行选择利率", href: "/legal", action: "看依据" },
+      { state: "接着处理", title: "核算已支付利息与可抵扣本金", detail: "按已确认交易和律师确定的规则计算", href: "/calculation", action: "去核算" },
+      { state: "最后形成", title: "生成答辩材料和证据目录", detail: "所有内容保留来源并由律师确认后导出", href: "/bundle", action: "查看材料" },
+    ]}
+  />;
+}
+
+type DashboardTask = { state: string; title: string; detail: string; href: string; action: string };
+
+function LawyerDashboard({
+  sourceConfig, status, headline, description, actionLabel, actionHref, summary, tasks,
+}: {
+  sourceConfig: CaseDataSourceConfig;
+  status: string;
+  headline: string;
+  description: string;
+  actionLabel: string;
+  actionHref: string;
+  summary: ReadonlyArray<readonly [string, string]>;
+  tasks: ReadonlyArray<DashboardTask>;
+}) {
   return (
-    <section className={styles.content} aria-label="案件总览">
+    <section className={`${styles.content} ${styles.lawyerDashboard}`} aria-label="办案首页">
       <div className={styles.contentTopline}>
-        <span>案件总览</span>
-        <span className={styles.statusPill}>材料核验中</span>
+        <span>办案首页</span>
+        <span className={styles.statusPill}>{status}</span>
       </div>
-      <article className={styles.nextDecision}>
+      <article className={styles.dashboardHero}>
         <div>
-          <p className={styles.eyebrow}>下一项律师决定</p>
-          <h2>确认第 17 与 18 页是否作为重复页处理</h2>
-          <p>系统只标出相同的视觉线索，不删除原始证据，也不推断其法律证明力。</p>
+          <p className={styles.eyebrow}>今天先办这一件</p>
+          <h2>{headline}</h2>
+          <p>{description}</p>
+          <a className={styles.primaryAction} href={actionHref}>{actionLabel}</a>
         </div>
-        <a className={styles.primaryAction} href="/evidence">进入证据核验</a>
+        <div className={styles.dashboardHeroNote}>
+          <strong>AI 会做什么</strong>
+          <span>整理材料、找出待核对项、生成可编辑初稿。</span>
+          <strong>律师要做什么</strong>
+          <span>确认事实、法律口径、对外发送和最终文书。</span>
+        </div>
       </article>
-
-      <section className={styles.overviewGrid}>
-        <article className={styles.paperCard}>
-          <p className={styles.cardKicker}>收件与范围</p>
-          <h3>原始微信交易记录</h3>
-          <dl>
-            <div><dt>已发现页数</dt><dd>6 页（合成）</dd></div>
-            <div><dt>与对方相关</dt><dd>6 页（合成）</dd></div>
-            <div><dt>待人工处理</dt><dd className={styles.warnText}>{unresolvedCount} 页</dd></div>
-          </dl>
-          <p className={styles.cardNote}>导出材料只能引用经核验、人工取舍并锁定的衍生页；原件永远单独保存。</p>
-        </article>
-        <article className={styles.paperCard}>
-          <p className={styles.cardKicker}>金额快照</p>
-          <h3>{syntheticMatter.currency}</h3>
-          <dl>
-            <div><dt>借款本金（合成）</dt><dd>{syntheticMatter.principal}</dd></div>
-            <div><dt>已标记利息（合成）</dt><dd>{syntheticMatter.reviewedInterest}</dd></div>
-            <div><dt>币种显示</dt><dd>人民币 / CNY</dd></div>
-          </dl>
-          <p className={styles.cardNote}>金额是界面合成示例，不能作为利息口径或诉讼策略建议。</p>
-        </article>
+      <CaseAssistantPlan sourceConfig={sourceConfig} />
+      <section className={styles.caseSnapshot} aria-labelledby="case-snapshot-heading">
+        <div className={styles.dashboardSectionHeading}>
+          <div><p className={styles.eyebrow}>案件要点</p><h2 id="case-snapshot-heading">一眼掌握本案</h2></div>
+          <span>来自已登记或已核验材料</span>
+        </div>
+        <dl>
+          {summary.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+        </dl>
       </section>
-
-      <section className={styles.auditBlock} aria-labelledby="audit-heading">
-        <div className={styles.sectionHeading}>
-          <div>
-            <p className={styles.eyebrow}>可追溯性</p>
-            <h2 id="audit-heading">模拟审计记录</h2>
-          </div>
-          <span>只读</span>
+      <section className={styles.caseTaskBoard} aria-labelledby="case-tasks-heading">
+        <div className={styles.dashboardSectionHeading}>
+          <div><p className={styles.eyebrow}>办理路线</p><h2 id="case-tasks-heading">从资料到应诉材料</h2></div>
+          <span>按顺序办，不需要先研究系统</span>
         </div>
-        <div className={styles.auditTable} role="table" aria-label="模拟审计记录">
-          <div className={styles.auditRow} role="row"><span>合成操作员</span><span>创建合成案件</span><span>2026年08月09日 09:30</span></div>
-          <div className={styles.auditRow} role="row"><span>系统</span><span>生成原始页摘要</span><span>2026年08月09日 09:31</span></div>
-          <div className={styles.auditRow} role="row"><span>系统</span><span>标记疑似重复页（17 / 18）</span><span>2026年08月09日 09:32</span></div>
+        <div className={styles.taskList}>
+          {tasks.map((task, index) => (
+            <article key={task.title}>
+              <span className={styles.taskIndex}>{String(index + 1).padStart(2, "0")}</span>
+              <div><small>{task.state}</small><h3>{task.title}</h3><p>{task.detail}</p></div>
+              <a href={task.href}>{task.action}</a>
+            </article>
+          ))}
         </div>
+      </section>
+      <section className={styles.dashboardAssurance} aria-label="工作台原则">
+        <div><strong>原件不改动</strong><span>所有筛选、标框和文书都作为独立工作成果保存。</span></div>
+        <div><strong>每个结论可回看</strong><span>从结论可回到对应材料页、交易或法律依据。</span></div>
+        <div><strong>对外发送有确认</strong><span>模型、网络检索和法院提交都需要明确授权。</span></div>
       </section>
     </section>
   );
 }
 
-function PersistentOverview() {
+function PersistentOverview({ sourceConfig }: { sourceConfig: CaseDataSourceConfig }) {
   const [state, setState] = useState<
     | { status: "loading" }
     | { status: "ready"; review: CaseReviewView }
@@ -357,7 +645,7 @@ function PersistentOverview() {
 
   useEffect(() => {
     let active = true;
-    loadCaseReview()
+    loadCaseReview(sourceConfig)
       .then((review) => {
         if (active) setState({ status: "ready", review });
       })
@@ -370,7 +658,7 @@ function PersistentOverview() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [sourceConfig]);
 
   if (state.status === "loading") {
     return <section className={styles.content} aria-label="案件总览"><div className={styles.calculationLoading}>正在读取版本化案件总览…</div></section>;
@@ -383,7 +671,7 @@ function PersistentOverview() {
           <div>
             <p className={styles.eyebrow}>案件尚未形成可展示的总览快照</p>
             <h2>先确认案卷范围并接收材料</h2>
-            <p>{state.message}。系统不会以示例案情、示例金额、示例期限或模拟审计记录填充真实案件。</p>
+            <p>请稍后重新打开本页，或先检查工作台设置。系统不会以示例案情、示例金额或示例期限填充真实案件。</p>
           </div>
           <a className={styles.primaryAction} href="/evidence">进入证据核验</a>
         </article>
@@ -392,42 +680,25 @@ function PersistentOverview() {
   }
   const { review } = state;
   const awaitsMaterialIntake = review.factPage.totalCount === 0 && review.transactionPage.totalCount === 0 && review.claims.length === 0;
-  return (
-    <section className={styles.content} aria-label="案件总览">
-      <div className={styles.contentTopline}>
-        <span>案件总览</span>
-        <span className={styles.statusPill}>案件版本 {review.matterVersion}</span>
-      </div>
-      <article className={styles.nextDecision}>
-        <div>
-          <p className={styles.eyebrow}>版本化案件快照</p>
-          <h2>{awaitsMaterialIntake ? "案件已建立，请选择资料文件夹" : review.matterTitle ?? "案件标题待核验"}</h2>
-          <p>{awaitsMaterialIntake ? "系统还没有读取任何原始材料。下一步只会盘点所选文件夹，待你确认范围后才进入证据处理。" : "总览仅汇集事实与交易台账的数量和快照标识；金额、利率、期限和诉讼结论仍须进入相应工作区复核。"}</p>
-        </div>
-        <a className={styles.primaryAction} href={awaitsMaterialIntake ? "/evidence" : "/facts"}>{awaitsMaterialIntake ? "选择资料文件夹" : "进入事实与争点"}</a>
-      </article>
-      <section className={styles.overviewGrid} aria-label="案件台账状态">
-        <article className={styles.paperCard}>
-          <p className={styles.cardKicker}>事实台账</p>
-          <h3>{review.factPage.totalCount} 项</h3>
-          <p className={styles.cardNote}>当前页已读取 {review.factPage.loadedCount} 项；待确认 {review.pendingFacts.length} 项。</p>
-        </article>
-        <article className={styles.paperCard}>
-          <p className={styles.cardKicker}>交易台账</p>
-          <h3>{review.transactionPage.totalCount} 项</h3>
-          <p className={styles.cardNote}>当前页已读取 {review.transactionPage.loadedCount} 项；金额与付款性质不在首页推定。</p>
-        </article>
-      </section>
-      <section className={styles.auditBlock} aria-labelledby="persistent-overview-trace">
-        <div className={styles.sectionHeading}>
-          <div><p className={styles.eyebrow}>可追溯性</p><h2 id="persistent-overview-trace">总览快照</h2></div>
-          <span>只读</span>
-        </div>
-        <div className={styles.auditTable} role="table" aria-label="案件总览快照">
-          <div className={styles.auditRow} role="row"><span>数据来源</span><span>{review.sourceLabel}</span><span>案件版本 {review.matterVersion}</span></div>
-          <div className={styles.auditRow} role="row"><span>快照标识</span><span>{review.snapshotHash.slice(0, 16)}…</span><span>{review.requestId ?? "无请求号"}</span></div>
-        </div>
-      </section>
-    </section>
-  );
+  return <LawyerDashboard
+    sourceConfig={sourceConfig}
+    status={awaitsMaterialIntake ? "等待导入资料" : `案件版本 ${review.matterVersion}`}
+    headline={awaitsMaterialIntake ? "把本案资料放进同一个文件夹" : "核对案件事实与付款记录"}
+    description={awaitsMaterialIntake ? "选择资料文件夹后，工作台会先给出材料清单。你确认范围后，才会开始读取、归类和整理。" : "工作台已汇总当前台账。先处理待确认事项，再进入利息口径与应诉材料。"}
+    actionLabel={awaitsMaterialIntake ? "选择资料文件夹" : "继续核对案情"}
+    actionHref={awaitsMaterialIntake ? "/evidence" : "/facts"}
+    summary={[
+      ["已登记事实", `${review.factPage.totalCount} 项`],
+      ["已登记交易", `${review.transactionPage.totalCount} 笔`],
+      ["待你确认", `${review.pendingFacts.length} 项`],
+      ["争点", `${review.issues.length} 项`],
+    ]}
+    tasks={[
+      { state: awaitsMaterialIntake ? "现在处理" : "已开始", title: "收集和整理本案材料", detail: awaitsMaterialIntake ? "选择资料文件夹，确认哪些文件纳入本案" : "材料范围已建立，可继续补充或查看", href: "/evidence", action: "查看材料" },
+      { state: review.pendingFacts.length ? "需要确认" : "下一步", title: "核对案情与还款记录", detail: `${review.factPage.totalCount} 项事实、${review.transactionPage.totalCount} 笔交易在台账中`, href: "/facts", action: "去核对" },
+      { state: "准备中", title: "确定法律依据与利息口径", detail: "先核对适用规则、时间边界和官方依据，再计算金额", href: "/legal", action: "查看依据" },
+      { state: "接着处理", title: "核算还款与利息", detail: "只读取已确认的交易、分类和律师批准的规则", href: "/calculation", action: "去核算" },
+      { state: "最后形成", title: "整理应诉材料", detail: "答辩状、证据目录与核算表均可编辑和逐项确认", href: "/bundle", action: "查看材料" },
+    ]}
+  />;
 }

@@ -1,9 +1,11 @@
 """Self-contained, supervised loopback service for the desktop application.
 
-This process intentionally exposes no case routes until an enrolled lawyer
+The packaged desktop defaults to a bounded local-standalone workspace for
+creating/opening a local case shell and explicitly inventorying a selected
+folder.  Firm-managed case routes remain unavailable until an enrolled lawyer
 profile and guarded persistence dependencies are available.  The Tauri parent
-starts it through a private stdin handshake and verifies the returned challenge
-digest before treating the service as ready.
+starts either route set through a private stdin handshake and verifies the
+returned challenge digest before treating the service as ready.
 """
 
 from __future__ import annotations
@@ -66,6 +68,12 @@ from case_api.desktop_agent_draft_runtime import (
 from case_api.desktop_evidence_intake_runtime import (
     DesktopEvidenceIntakeRuntimeBlocked,
     build_desktop_evidence_intake_runtime,
+)
+from case_api.local_standalone_app import create_local_standalone_app
+from case_api.local_standalone_runtime import (
+    LocalStandaloneRuntime,
+    LocalStandaloneRuntimeBlocked,
+    build_local_standalone_runtime,
 )
 from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
 from case_kernel.runtime import RuntimeConfigurationBlocked, RuntimeMode, RuntimeSettings
@@ -130,7 +138,17 @@ def create_desktop_sidecar_app(
     enrollment_issuer: AuthenticatedFirmEnrollmentIssuer | None = None,
     keychain_runner=None,
     persistent_dependencies: PersistentApiDependencies | None = None,
+    local_standalone_runtime: LocalStandaloneRuntime | None = None,
 ) -> FastAPI:
+    if local_standalone_runtime is not None:
+        if persistent_dependencies is not None:
+            raise ValueError("desktop sidecar cannot combine local standalone and firm-managed dependencies")
+        if parent_api_token is None:
+            raise ValueError("local standalone sidecar requires the native parent token")
+        return create_local_standalone_app(
+            local_standalone_runtime,
+            native_parent_api_token=parent_api_token,
+        )
     if persistent_dependencies is not None:
         # The persistent API includes the same one-use desktop-session exchange
         # route. Returning it directly preserves its request correlation,
@@ -619,21 +637,48 @@ def run() -> int:
         return 78
 
     try:
-        trust = load_desktop_enrollment_trust()
-    except DesktopTrustBootstrapBlocked:
-        trust = blocked_desktop_enrollment_trust()
-    identity = load_desktop_identity(
-        trust=trust,
-        bootstrap_token=parent_api_token,
-    )
-    try:
-        runtime_settings = RuntimeSettings.from_environment(os.environ)
+        # The packaged desktop intentionally defaults to local-first.  The
+        # backend/API default remains synthetic-alpha, so standalone case
+        # storage can never be enabled merely by importing a module.
+        runtime_settings = RuntimeSettings.from_environment(
+            os.environ,
+            default_mode=RuntimeMode.LOCAL_STANDALONE,
+        )
+        local_standalone_runtime = (
+            build_local_standalone_runtime(
+                environ=os.environ,
+                parent_api_token=parent_api_token,
+            )
+            if runtime_settings.mode is RuntimeMode.LOCAL_STANDALONE
+            else None
+        )
+        if local_standalone_runtime is None:
+            try:
+                trust = load_desktop_enrollment_trust()
+            except DesktopTrustBootstrapBlocked:
+                trust = blocked_desktop_enrollment_trust()
+            identity = load_desktop_identity(
+                trust=trust,
+                bootstrap_token=parent_api_token,
+            )
+        else:
+            # A standalone machine is not an enrolled law-firm account.  Do
+            # not consult trust material or Keychain enrollment to fabricate
+            # one; its short loopback session is only local-device access.
+            trust = DesktopEnrollmentTrustRuntime(
+                phase="NOT_CONFIGURED",
+                message="本机基础案卷不需要律所登记。",
+            )
+            identity = DesktopIdentityRuntime(
+                phase="LOCAL",
+                message="本机基础案卷已就绪；未启用律所受管权限。",
+            )
         persistent_runtime = (
             build_desktop_persistent_runtime(
                 identity=identity,
                 environ=os.environ,
             )
-            if runtime_settings.mode is RuntimeMode.POSTGRES_INTERNAL_PREVIEW
+            if runtime_settings.mode.is_persistent
             else None
         )
         capture_runtime = (
@@ -670,16 +715,17 @@ def run() -> int:
         )
     except (
         RuntimeConfigurationBlocked,
+        LocalStandaloneRuntimeBlocked,
         DesktopPersistentRuntimeBlocked,
         DesktopOfficialCaptureRuntimeBlocked,
         DesktopAgentDraftRuntimeBlocked,
         DesktopEvidenceIntakeRuntimeBlocked,
     ):
         server_socket.close()
-        print("本机受控服务的持久化前置条件未通过。", file=sys.stderr, flush=True)
+        print("本机工作台运行前置条件未通过。", file=sys.stderr, flush=True)
         return 78
     enrollment_issuer = None
-    if trust.phase == "READY" and trust.catalog is not None:
+    if local_standalone_runtime is None and trust.phase == "READY" and trust.catalog is not None:
         enrollment_issuer = JsonFirmEnrollmentIssuer(
             PinnedHttpsJsonTransport(
                 origin=trust.catalog.enrollment_api_origin,
@@ -700,9 +746,25 @@ def run() -> int:
                     "challenge_sha256": sha256(challenge.encode("ascii")).hexdigest(),
                     "identity": identity.phase,
                     "persistence": (
-                        "CONFIGURED"
-                        if persistent_runtime is not None
-                        else "NOT_CONFIGURED"
+                        "LOCAL_CONFIGURED"
+                        if local_standalone_runtime is not None
+                        else (
+                            "CONFIGURED"
+                            if persistent_runtime is not None
+                            else "NOT_CONFIGURED"
+                        )
+                    ),
+                    "workspace_mode": (
+                        "LOCAL_STANDALONE"
+                        if local_standalone_runtime is not None
+                        else (
+                            "FIRM_MANAGED"
+                            if persistent_runtime is not None
+                            else "SYNTHETIC_ALPHA"
+                        )
+                    ),
+                    "local_workspace": (
+                        "READY" if local_standalone_runtime is not None else "NOT_CONFIGURED"
                     ),
                     "agent_draft_executor": (
                         "ASSEMBLED"
@@ -733,6 +795,7 @@ def run() -> int:
                 if persistent_runtime is not None
                 else None
             ),
+            local_standalone_runtime=local_standalone_runtime,
         ),
         host="127.0.0.1",
         port=port,

@@ -151,6 +151,35 @@ class ExternalRequestPostgresTests(TestCase):
                 rendered_page_sha256="a" * 64,
             ))
 
+    def test_native_case_plan_requires_the_exact_minimal_projection_preflight(self) -> None:
+        connection = _Connection()
+        original_execute = connection.execute
+
+        def execute(sql, params=None):
+            result = original_execute(sql, params)
+            if "FROM external_request_authorizations" in " ".join(sql.split()) and "SELECT request_kind" in " ".join(sql.split()):
+                result.row.update({
+                    "request_kind": "MODEL",
+                    "provider_id": "deepseek",
+                    "processor_region": "cn-beijing",
+                    "selected_field_ids": ["case-plan:minimal-projection"],
+                    "service_id": "deepseek-v4-pro",
+                    "call_cap": 1,
+                    "input_hash": "a" * 64,
+                })
+            return result
+
+        connection.execute = execute
+        self._run(connection, lambda: self.store.validate_case_plan_execution(
+            matter_id=self.matter_id, actor=self.worker, expected_version=3,
+            request_id=connection.request_id, projection_hash="a" * 64,
+        ))
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "does not match"):
+            self._run(connection, lambda: self.store.validate_case_plan_execution(
+                matter_id=self.matter_id, actor=self.worker, expected_version=3,
+                request_id=connection.request_id, projection_hash="b" * 64,
+            ))
+
 
 if __name__ == "__main__":
     import unittest

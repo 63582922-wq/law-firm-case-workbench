@@ -316,6 +316,19 @@ class PostgresAgentExecutionStore:
         payload = {"matter_id": matter_id, "matter_version": matter["version"], "runs": runs, "proposals": proposals, "receipts": receipts}
         return PersistentAgentExecutionSnapshot(matter_id, matter["version"], tuple(runs), tuple(proposals), tuple(receipts), _payload_hash(payload))
 
+    def policy_manifest_hash(self) -> str:
+        """Return the active server-side Skill registry binding for consent."""
+        return agent_execution_policy_hash(self._registry)
+
+    def planning_skill_tools(self) -> tuple[tuple[str, str], ...]:
+        """Only currently implemented tools may be proposed by a model."""
+        return tuple(
+            (skill.skill_id, tool_id)
+            for skill in self._registry.list_skills()
+            if skill.maturity is SkillMaturity.IMPLEMENTED
+            for tool_id in skill.allowed_tools
+        )
+
     def _validate_proposals(self, proposals: tuple[AgentToolProposal, ...]) -> tuple[AgentToolProposal, ...]:
         if not 1 <= len(proposals) <= 100:
             raise CaseLedgerPersistenceBlocked("Agent run must contain 1 to 100 Tool proposals")

@@ -11,7 +11,11 @@ from zipfile import ZIP_STORED, ZipFile
 from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
-from case_api.persistent_app import PersistentApiDependencies, create_persistent_app
+from case_api.persistent_app import (
+    PersistentApiDependencies,
+    _case_plan_minimal_projection,
+    create_persistent_app,
+)
 from case_api.persistent_identity import (
     AuthenticationMethod,
     DesktopSessionAuthority,
@@ -753,6 +757,12 @@ class FakePersistentAgentExecutionStore:
             proposals=(), receipts=(), snapshot_hash="c" * 64,
         )
 
+    def policy_manifest_hash(self) -> str:
+        return agent_execution_policy_hash(default_case_skill_registry())
+
+    def planning_skill_tools(self) -> tuple[tuple[str, str], ...]:
+        return (("office_reading", "parse_office_document"),)
+
 
 class FakePersistentDocumentConsistencyStore:
     persistent_test_double = True
@@ -792,6 +802,9 @@ class FakePersistentExternalRequestStore:
     def record_external_attempt(self, **kwargs):
         self.calls.append(("attempt", kwargs))
         return CaseLedgerCommandReceipt("RECORD_EXTERNAL_REQUEST_ATTEMPT", kwargs["idempotency_key"], kwargs["matter_id"], kwargs["expected_version"] + 1, str(uuid4()), "EXTERNAL_REQUEST_ATTEMPT", str(uuid4()))
+
+    def validate_case_plan_execution(self, **kwargs):
+        self.calls.append(("validate_case_plan", kwargs))
 
     def get_snapshot(self, *, matter_id: str, actor: Actor):
         self.calls.append(("get_snapshot", {"matter_id": matter_id, "actor": actor}))
@@ -863,6 +876,31 @@ class PersistentApiTests(unittest.TestCase):
         client = TestClient(create_persistent_app())
         self.assertEqual(client.get("/healthz").json()["mode"], "disabled")
         self.assertEqual(client.get(f"/v1/matters/{self.matter_id}/facts").status_code, 404)
+
+    def test_commercial_mode_rejects_direct_dependency_injection_without_explicit_confirmation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit production acknowledgement"):
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=RuntimeSettings(
+                        mode=RuntimeMode.COMMERCIAL_PRODUCTION,
+                        _postgres_dsn="postgresql://localhost/lawcase_production",
+                    ),
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "ending in _production"):
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=RuntimeSettings(
+                        mode=RuntimeMode.COMMERCIAL_PRODUCTION,
+                        _postgres_dsn="postgresql://localhost/lawcase_dev",
+                        _commercial_production_confirmed=True,
+                    ),
+                    case_ledger_store=FakePersistentFactStore(),
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                )
+            )
 
     def test_enabled_api_allows_only_tauri_origin_and_required_webview_headers(self) -> None:
         app = create_persistent_app(
@@ -2200,6 +2238,143 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(name, "plan_agent_run")
         self.assertEqual(call["actor"], self.identity.actor)
         self.assertEqual(call["proposals"][0].tool_id, "parse_office_document")
+
+    def test_agent_planning_preflight_exposes_only_bound_safe_metadata(self) -> None:
+        case_store = FakePersistentFactStore()
+        agent_store = FakePersistentAgentExecutionStore()
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=case_store,
+                    identity_resolver=StaticIdentityResolver(self.identity),
+                    agent_execution_store=agent_store,
+                )
+            )
+        )
+        response = client.get(f"/v1/matters/{self.matter_id}/agent-planning/preflight")
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(
+            set(payload),
+            {
+                "matter_version", "input_hash", "selected_field_ids", "provider_id",
+                "processor_region", "service_id", "call_cap", "policy_manifest_hash",
+                "allowed_skill_tools",
+            },
+        )
+        self.assertEqual(payload["matter_version"], 4)
+        self.assertEqual(payload["provider_id"], "deepseek")
+        self.assertEqual(payload["selected_field_ids"], ["case-plan:minimal-projection"])
+        self.assertEqual(payload["allowed_skill_tools"], [{"skill_id": "office_reading", "tool_id": "parse_office_document"}])
+        self.assertNotIn("[合成]", response.text)
+        self.assertNotIn(self.matter_id, response.text)
+
+    def test_case_plan_projection_excludes_identifiers_and_survives_authorization_version_increment(self) -> None:
+        summary = PersistentCaseReviewSummary(
+            matter_id="secret-matter-id",
+            title="不应外发的案件名称",
+            stage="FACT_REVIEW",
+            version=4,
+            summary_hash="a" * 64,
+            fact_count=3,
+            candidate_fact_count=1,
+            transaction_count=2,
+            claims=(
+                {
+                    "claim_id": "secret-claim-id",
+                    "status": "PENDING",
+                    "response": {"position": "DISPUTE", "text": "不应外发的答辩意见"},
+                },
+            ),
+            issues=(
+                {
+                    "issue_id": "secret-issue-id",
+                    "status": "OPEN",
+                    "claim_count": 1,
+                    "fact_count": 2,
+                    "question": "不应外发的争点文字",
+                },
+            ),
+        )
+        authorized_summary = PersistentCaseReviewSummary(
+            matter_id=summary.matter_id,
+            title=summary.title,
+            stage=summary.stage,
+            # Authorising an external request is itself an append-only event.
+            # The later native check uses this new version, while the model
+            # input must remain the exact hash the lawyer saw before authorising.
+            version=summary.version + 1,
+            summary_hash=summary.summary_hash,
+            fact_count=summary.fact_count,
+            candidate_fact_count=summary.candidate_fact_count,
+            transaction_count=summary.transaction_count,
+            claims=summary.claims,
+            issues=summary.issues,
+        )
+        projection, projection_hash = _case_plan_minimal_projection(summary)
+        authorized_projection, authorized_hash = _case_plan_minimal_projection(authorized_summary)
+        self.assertEqual(projection, authorized_projection)
+        self.assertEqual(projection_hash, authorized_hash)
+        for secret in (
+            "secret-matter-id", "不应外发的案件名称", "secret-claim-id",
+            "不应外发的答辩意见", "secret-issue-id", "不应外发的争点文字",
+        ):
+            self.assertNotIn(secret, projection)
+
+    def test_native_case_plan_input_requires_parent_session_and_returns_no_case_material(self) -> None:
+        now = datetime.now(timezone.utc)
+        authority = DesktopSessionAuthority(
+            actor=self.identity.actor,
+            bootstrap_token="b" * 64,
+            bootstrap_expires_at=now + timedelta(seconds=30),
+            session_expires_at=now + timedelta(minutes=30),
+            token_factory=lambda: "s" * 64,
+        )
+        case_store = FakePersistentFactStore()
+        external_store = FakePersistentExternalRequestStore()
+        agent_store = FakePersistentAgentExecutionStore()
+        worker = Actor(str(uuid4()), self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        client = TestClient(
+            create_persistent_app(
+                PersistentApiDependencies(
+                    settings=self.settings,
+                    case_ledger_store=case_store,
+                    identity_resolver=authority,
+                    desktop_session_authority=authority,
+                    external_request_store=external_store,
+                    agent_execution_store=agent_store,
+                    native_model_worker=worker,
+                ),
+                native_parent_api_token="a" * 64,
+            ),
+            client=("127.0.0.1", 50001),
+        )
+        exchange = client.post(
+            "/v1/desktop-sessions/exchange",
+            headers={"Origin": "tauri://localhost", "X-Desktop-Bootstrap": "b" * 64},
+        )
+        self.assertEqual(exchange.status_code, 200, exchange.text)
+        response = client.get(
+            f"/v1/native-model/matters/{self.matter_id}/agent-plan-input",
+            params={
+                "desktop_session_id": exchange.json()["session_id"],
+                "external_request_id": str(uuid4()),
+                "expected_version": 4,
+            },
+            headers={"Authorization": f"Bearer {'a' * 64}"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["matter_version"], 4)
+        self.assertEqual(payload["policy_manifest_hash"], agent_store.policy_manifest_hash())
+        self.assertEqual(payload["allowed_skill_tools"], [{"skill_id": "office_reading", "tool_id": "parse_office_document"}])
+        self.assertNotIn("[合成]", payload["projection"])
+        self.assertNotIn(self.matter_id, payload["projection"])
+        name, validation = next(item for item in external_store.calls if item[0] == "validate_case_plan")
+        self.assertEqual(name, "validate_case_plan")
+        self.assertEqual(validation["actor"], worker)
+        self.assertEqual(validation["projection_hash"], payload["projection_hash"])
 
 
     def test_agent_execution_routes_fail_closed_without_agent_store(self) -> None:

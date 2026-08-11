@@ -39,13 +39,27 @@ class RuntimeConfigurationBlocked(ValueError):
 
 class RuntimeMode(str, Enum):
     SYNTHETIC_ALPHA = "synthetic-alpha"
+    LOCAL_STANDALONE = "local-standalone"
     POSTGRES_INTERNAL_PREVIEW = "postgres-internal-preview"
+    COMMERCIAL_PRODUCTION = "commercial-production"
+
+    @property
+    def is_persistent(self) -> bool:
+        """Whether this mode may assemble guarded PostgreSQL services."""
+
+        return self in {
+            RuntimeMode.POSTGRES_INTERNAL_PREVIEW,
+            RuntimeMode.COMMERCIAL_PRODUCTION,
+        }
 
 
 @dataclass(frozen=True)
 class RuntimeSettings:
     mode: RuntimeMode
     _postgres_dsn: str | None = field(default=None, repr=False, compare=False)
+    _commercial_production_confirmed: bool = field(
+        default=False, repr=False, compare=False
+    )
     _office_soffice_executable: str | None = field(default=None, repr=False, compare=False)
     _office_pdf_renderer_executable: str | None = field(default=None, repr=False, compare=False)
 
@@ -54,43 +68,119 @@ class RuntimeSettings:
         return self._postgres_dsn
 
     @property
+    def commercial_production_confirmed(self) -> bool:
+        """True only after the dedicated production acknowledgement was parsed."""
+
+        return self._commercial_production_confirmed
+
+    def assert_commercial_production_boundary(self) -> None:
+        """Recheck the production-only safeguards for direct composition roots.
+
+        Normal desktop startup creates settings through ``from_environment``.
+        This method keeps a hand-constructed ``RuntimeSettings`` from becoming
+        an escape hatch in a different composition root or a future test tool.
+        It parses DSN syntax only and never opens a PostgreSQL connection.
+        """
+
+        if self.mode is not RuntimeMode.COMMERCIAL_PRODUCTION:
+            return
+        if not self.commercial_production_confirmed:
+            raise RuntimeConfigurationBlocked(
+                "commercial-production services require an explicit production acknowledgement"
+            )
+        database_name = _postgres_database_name(self.postgres_dsn)
+        if not database_name.lower().endswith("_production"):
+            raise RuntimeConfigurationBlocked(
+                "commercial-production only accepts a dedicated database name ending in _production"
+            )
+
+    @property
     def office_conversion_enabled(self) -> bool:
         return self._office_soffice_executable is not None
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str]) -> "RuntimeSettings":
-        raw_mode = environ.get("CASE_WORKBENCH_RUNTIME_MODE", RuntimeMode.SYNTHETIC_ALPHA.value).strip()
+    def from_environment(
+        cls,
+        environ: Mapping[str, str],
+        *,
+        default_mode: RuntimeMode = RuntimeMode.SYNTHETIC_ALPHA,
+    ) -> "RuntimeSettings":
+        """Parse an explicitly selected runtime without connecting anywhere.
+
+        The backend/API default stays ``synthetic-alpha``.  Only the packaged
+        desktop sidecar deliberately supplies ``local-standalone`` as its
+        default, so importing server code or running ordinary development
+        checks can never silently create a real local case workspace.
+        """
+
+        raw_mode = environ.get("CASE_WORKBENCH_RUNTIME_MODE", default_mode.value).strip()
         try:
             mode = RuntimeMode(raw_mode)
         except ValueError as error:
             raise RuntimeConfigurationBlocked("unsupported CASE_WORKBENCH_RUNTIME_MODE") from error
         dsn = environ.get("CASE_WORKBENCH_POSTGRES_DSN", "").strip()
-        acknowledgement = environ.get("CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW", "")
+        preview_acknowledgement = environ.get(
+            "CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW", ""
+        ).strip()
+        commercial_acknowledgement = environ.get(
+            "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION", ""
+        ).strip()
         office_acknowledgement = environ.get("CASE_WORKBENCH_ENABLE_OFFICE_CONVERSION", "").strip()
         office_soffice = environ.get("CASE_WORKBENCH_OFFICE_SOFFICE", "").strip()
         office_renderer = environ.get("CASE_WORKBENCH_OFFICE_PDF_RENDERER", "").strip()
         office_configured = bool(office_acknowledgement or office_soffice or office_renderer)
 
-        if mode is RuntimeMode.SYNTHETIC_ALPHA:
-            if dsn or acknowledgement or office_configured:
+        if mode in {RuntimeMode.SYNTHETIC_ALPHA, RuntimeMode.LOCAL_STANDALONE}:
+            if dsn or preview_acknowledgement or commercial_acknowledgement or office_configured:
                 raise RuntimeConfigurationBlocked(
-                    "persistent or Office-conversion settings cannot be present while runtime mode is synthetic-alpha"
+                    "persistent, commercial, or Office-conversion settings cannot be present while runtime mode is synthetic-alpha or local-standalone"
                 )
             return cls(mode=mode)
 
-        if acknowledgement != "YES":
-            raise RuntimeConfigurationBlocked(
-                "postgres-internal-preview requires CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW=YES"
-            )
+        if mode is RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
+            if commercial_acknowledgement:
+                raise RuntimeConfigurationBlocked(
+                    "postgres-internal-preview cannot include a commercial-production acknowledgement"
+                )
+            if preview_acknowledgement != "YES":
+                raise RuntimeConfigurationBlocked(
+                    "postgres-internal-preview requires CASE_WORKBENCH_ENABLE_PERSISTENT_PREVIEW=YES"
+                )
+        elif mode is RuntimeMode.COMMERCIAL_PRODUCTION:
+            if preview_acknowledgement:
+                raise RuntimeConfigurationBlocked(
+                    "commercial-production cannot include a persistent-preview acknowledgement"
+                )
+            if commercial_acknowledgement != "YES":
+                raise RuntimeConfigurationBlocked(
+                    "commercial-production requires CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION=YES"
+                )
+        else:  # pragma: no cover - RuntimeMode parsing above makes this unreachable.
+            raise RuntimeConfigurationBlocked("unsupported persistent runtime mode")
         if not dsn:
-            raise RuntimeConfigurationBlocked("postgres-internal-preview requires CASE_WORKBENCH_POSTGRES_DSN")
-        try:
-            database_name = conninfo_to_dict(dsn).get("dbname", "")
-        except Exception as error:
-            raise RuntimeConfigurationBlocked("CASE_WORKBENCH_POSTGRES_DSN is not a valid PostgreSQL connection string") from error
-        if not (database_name.endswith("_preview") or database_name.endswith("_test")):
             raise RuntimeConfigurationBlocked(
-                "internal preview only accepts a dedicated database name ending in _preview or _test"
+                f"{mode.value} requires CASE_WORKBENCH_POSTGRES_DSN"
+            )
+        database_name = _postgres_database_name(dsn)
+        normalized_database_name = database_name.lower()
+        if mode is RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
+            if not (
+                normalized_database_name.endswith("_preview")
+                or normalized_database_name.endswith("_test")
+            ):
+                raise RuntimeConfigurationBlocked(
+                    "internal preview only accepts a dedicated database name ending in _preview or _test"
+                )
+        elif not normalized_database_name.endswith("_production"):
+            if (
+                normalized_database_name.endswith("_preview")
+                or normalized_database_name.endswith("_test")
+            ):
+                raise RuntimeConfigurationBlocked(
+                    "commercial-production cannot use a database name ending in _preview or _test"
+                )
+            raise RuntimeConfigurationBlocked(
+                "commercial-production only accepts a dedicated database name ending in _production"
             )
         if office_configured:
             if office_acknowledgement != "YES":
@@ -104,6 +194,10 @@ class RuntimeSettings:
         return cls(
             mode=mode,
             _postgres_dsn=dsn,
+            _commercial_production_confirmed=(
+                mode is RuntimeMode.COMMERCIAL_PRODUCTION
+                and commercial_acknowledgement == "YES"
+            ),
             _office_soffice_executable=office_soffice or None,
             _office_pdf_renderer_executable=office_renderer or None,
         )
@@ -135,6 +229,24 @@ def load_runtime_settings() -> RuntimeSettings:
     return RuntimeSettings.from_environment(os.environ)
 
 
+def _postgres_database_name(dsn: str | None) -> str:
+    if not dsn:
+        raise RuntimeConfigurationBlocked(
+            "CASE_WORKBENCH_POSTGRES_DSN must name a PostgreSQL database"
+        )
+    try:
+        database_name = conninfo_to_dict(dsn).get("dbname", "")
+    except Exception as error:
+        raise RuntimeConfigurationBlocked(
+            "CASE_WORKBENCH_POSTGRES_DSN is not a valid PostgreSQL connection string"
+        ) from error
+    if not isinstance(database_name, str) or not database_name:
+        raise RuntimeConfigurationBlocked(
+            "CASE_WORKBENCH_POSTGRES_DSN must name a PostgreSQL database"
+        )
+    return database_name
+
+
 def build_runtime_services(
     settings: RuntimeSettings,
     *,
@@ -164,6 +276,16 @@ def build_runtime_services(
             office_pdf_converter=None,
             persistence_label="in-memory-synthetic-only",
         )
+    if settings.mode is RuntimeMode.LOCAL_STANDALONE:
+        raise RuntimeConfigurationBlocked(
+            "local-standalone must be assembled by the isolated local workspace composition root"
+        )
+    if not settings.mode.is_persistent:
+        raise RuntimeConfigurationBlocked("runtime mode cannot assemble persistent services")
+    if (
+        settings.mode is RuntimeMode.COMMERCIAL_PRODUCTION
+    ):
+        settings.assert_commercial_production_boundary()
     dsn = settings.postgres_dsn
     if dsn is None:
         raise RuntimeConfigurationBlocked("persistent runtime settings lost their PostgreSQL DSN")
@@ -211,7 +333,7 @@ def build_runtime_services(
         ),
         artifact_store=artifact_store,
         office_pdf_converter=office_converter,
-        persistence_label="postgres-internal-preview",
+        persistence_label=settings.mode.value,
     )
 
 

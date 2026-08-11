@@ -1,4 +1,4 @@
-"""Independent, fail-closed persistent preview API.
+"""Independent, fail-closed persistent case API.
 
 The synthetic Alpha application never imports or mounts these routes. Without
 explicit dependencies this factory exposes only a disabled health response.
@@ -6,8 +6,10 @@ explicit dependencies this factory exposes only a disabled health response.
 
 from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
 from hmac import compare_digest
 from ipaddress import ip_address
+import json
 from tempfile import TemporaryDirectory
 from typing import Annotated, Protocol
 from urllib.parse import quote
@@ -387,6 +389,10 @@ class PersistentAgentExecutionPort(Protocol):
 
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentAgentExecutionSnapshot: ...
 
+    def policy_manifest_hash(self) -> str: ...
+
+    def planning_skill_tools(self) -> tuple[tuple[str, str], ...]: ...
+
 
 class PersistentDocumentConsistencyPort(Protocol):
     def record_review(self, **kwargs) -> CaseLedgerCommandReceipt: ...
@@ -402,6 +408,8 @@ class PersistentExternalRequestPort(Protocol):
     def record_external_attempt(self, **kwargs) -> CaseLedgerCommandReceipt: ...
 
     def validate_single_page_ocr_execution(self, **kwargs) -> None: ...
+
+    def validate_case_plan_execution(self, **kwargs) -> None: ...
 
 
 class PersistentOcrReviewCandidatePort(Protocol):
@@ -493,8 +501,10 @@ class PersistentApiDependencies:
     ocr_review_candidate_store: PersistentOcrReviewCandidatePort | None = None
 
     def validate(self) -> None:
-        if self.settings.mode is not RuntimeMode.POSTGRES_INTERNAL_PREVIEW:
-            raise ValueError("persistent API requires postgres-internal-preview runtime settings")
+        if not self.settings.mode.is_persistent:
+            raise ValueError("persistent API requires a guarded PostgreSQL runtime mode")
+        if self.settings.mode is RuntimeMode.COMMERCIAL_PRODUCTION:
+            self.settings.assert_commercial_production_boundary()
         if self.desktop_session_authority is not None and self.identity_resolver is not self.desktop_session_authority:
             raise ValueError("desktop bootstrap and identity resolution must use the same authority")
         if not isinstance(self.case_ledger_store, PostgresCaseLedgerStore):
@@ -608,7 +618,7 @@ def create_persistent_app(
     if dependencies is not None:
         dependencies.validate()
     app = FastAPI(
-        title="律所案件 AI 工作台 · 持久化预览 API" if enabled else "律所案件 AI 工作台 · 持久化 API 已禁用",
+        title="律所案件 AI 工作台 · 持久化案件 API" if enabled else "律所案件 AI 工作台 · 持久化 API 已禁用",
         version="0.1.0",
         docs_url="/docs" if enabled else None,
         redoc_url=None,
@@ -653,7 +663,7 @@ def create_persistent_app(
             return {"service": "persistent-case-api", "mode": "disabled", "persistence": "not-configured"}
         return {
             "service": "persistent-case-api",
-            "mode": "postgres-internal-preview",
+            "mode": dependencies.settings.mode.value,
             "persistence": "configured-not-probed",
             "evidence_manifest": "configured" if dependencies.evidence_manifest_store else "not-configured",
             "formal_calculation": "configured" if dependencies.formal_calculation_store else "not-configured",
@@ -1079,6 +1089,40 @@ def create_persistent_app(
             actor=identity.actor,
         )
         return PersistentCaseReviewSummaryResponse.model_validate(summary.__dict__)
+
+    @app.get(
+        "/v1/matters/{matter_id}/agent-planning/preflight",
+        tags=["agent-execution"],
+    )
+    async def get_agent_planning_preflight(
+        matter_id: UUID,
+        identity: Annotated[ServerIdentityContext, Depends(get_identity)],
+        agent_store: Annotated[PersistentAgentExecutionPort, Depends(get_agent_execution_store)],
+    ) -> dict[str, object]:
+        """Expose consent metadata, never the model input itself.
+
+        The WebView receives the exact version/hash needed to create a
+        lawyer-authorised one-call preflight, but the compact case projection
+        remains native-only until that preflight is revalidated server-side.
+        """
+        summary = dependencies.case_ledger_store.get_case_review_summary(
+            matter_id=str(matter_id), actor=identity.actor
+        )
+        _, projection_hash = _case_plan_minimal_projection(summary)
+        return {
+            "matter_version": summary.version,
+            "input_hash": projection_hash,
+            "selected_field_ids": ["case-plan:minimal-projection"],
+            "provider_id": "deepseek",
+            "processor_region": "cn-beijing",
+            "service_id": "deepseek-v4-pro",
+            "call_cap": 1,
+            "policy_manifest_hash": agent_store.policy_manifest_hash(),
+            "allowed_skill_tools": [
+                {"skill_id": skill_id, "tool_id": tool_id}
+                for skill_id, tool_id in agent_store.planning_skill_tools()
+            ],
+        }
 
     @app.get(
         "/v1/matters/{matter_id}/facts",
@@ -3273,6 +3317,56 @@ def create_persistent_app(
             },
         )
 
+    @app.get(
+        "/v1/native-model/matters/{matter_id}/agent-plan-input",
+        include_in_schema=False,
+    )
+    async def deliver_native_case_plan_input(
+        matter_id: UUID,
+        request: Request,
+        desktop_session_id: UUID,
+        external_request_id: UUID,
+        expected_version: int,
+        external_store: Annotated[PersistentExternalRequestPort, Depends(get_external_request_store)],
+        agent_store: Annotated[PersistentAgentExecutionPort, Depends(get_agent_execution_store)],
+    ) -> Response:
+        """Release only the pre-authorised minimal planning projection to native code.
+
+        No original file bytes, OCR text, folder path, transaction rows or
+        free-form prompt are ever accepted by this route.  The caller can only
+        obtain the same canonical projection whose hash the lawyer approved.
+        """
+        identity = require_native_parent(request, str(desktop_session_id))
+        worker = dependencies.native_model_worker
+        if worker is None or worker.firm_id != identity.actor.firm_id:
+            raise PersistentAuthenticationBlocked("native case-planning worker identity is not configured")
+        summary = dependencies.case_ledger_store.get_case_review_summary(
+            matter_id=str(matter_id), actor=identity.actor
+        )
+        projection, projection_hash = _case_plan_minimal_projection(summary)
+        external_store.validate_case_plan_execution(
+            matter_id=str(matter_id), actor=worker, expected_version=expected_version,
+            request_id=str(external_request_id), projection_hash=projection_hash,
+        )
+        return Response(
+            content=json.dumps(
+                {
+                    "matter_version": summary.version,
+                    "projection": projection,
+                    "projection_hash": projection_hash,
+                    "policy_manifest_hash": agent_store.policy_manifest_hash(),
+                    "allowed_skill_tools": [
+                        {"skill_id": skill_id, "tool_id": tool_id}
+                        for skill_id, tool_id in agent_store.planning_skill_tools()
+                    ],
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            media_type="application/json",
+            headers={"Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff"},
+        )
+
     @app.post(
         "/v1/native-model/matters/{matter_id}/external-requests/{request_id}/attempts",
         response_model=CaseLedgerReceiptResponse,
@@ -3432,6 +3526,55 @@ def create_persistent_app(
 
 def _receipt(receipt: CaseLedgerCommandReceipt) -> CaseLedgerReceiptResponse:
     return CaseLedgerReceiptResponse(**receipt.__dict__)
+
+
+def _case_plan_minimal_projection(summary) -> tuple[str, str]:
+    """Canonical, bounded facts-free case context for model planning only.
+
+    The model receives workflow state/counts only, not source material, case
+    IDs, claim wording, personal names, amounts, dates, evidence text or
+    attorney work product.  The ledger version is purposefully checked by the
+    surrounding authorization and is not part of this hash: authorising an
+    external call advances the append-only matter version, but must not make
+    the just-approved, otherwise identical projection impossible to deliver.
+    This keeps the external call useful for choosing registered Skills while
+    making it incapable of determining the case.
+    """
+    payload = {
+        "projection_version": "case-plan-minimal-v1",
+        "matter": {"stage": summary.stage},
+        "review_counts": {
+            "facts": summary.fact_count,
+            "candidate_facts": summary.candidate_fact_count,
+            "transactions": summary.transaction_count,
+            "claims": len(summary.claims),
+            "issues": len(summary.issues),
+        },
+        "claim_states": sorted(
+            (
+                {
+                    "status": item["status"],
+                    "has_response": item.get("response") is not None,
+                    "response_position": item["response"]["position"] if item.get("response") else None,
+                }
+                for item in summary.claims
+            ),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ),
+        "issue_states": sorted(
+            (
+                {
+                    "status": item["status"],
+                    "claim_count": item["claim_count"],
+                    "fact_count": item["fact_count"],
+                }
+                for item in summary.issues
+            ),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return encoded, sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _local_session(identity: ServerIdentityContext) -> LocalSessionProof:

@@ -9,13 +9,15 @@ declare global {
         message: string;
         apiBase: string | null;
         processId: number | null;
-        identityPhase: "NOT_ENROLLED" | "BLOCKED" | "ENROLLED" | "UNAVAILABLE" | "UNKNOWN";
+        identityPhase: "NOT_ENROLLED" | "BLOCKED" | "ENROLLED" | "LOCAL" | "UNAVAILABLE" | "UNKNOWN";
         enrollmentTrustPhase: "NOT_CONFIGURED" | "BLOCKED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
         sessionPhase: "NOT_AVAILABLE" | "STARTING" | "READY" | "EXPIRED" | "UNAVAILABLE" | "UNKNOWN";
         sessionExpiresAt: string | null;
-        persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
+        persistencePhase: "NOT_CONFIGURED" | "CONFIGURED" | "LOCAL_CONFIGURED" | "UNAVAILABLE" | "UNKNOWN";
         evidenceIntakeWorkerPhase: "NOT_CONFIGURED" | "ASSEMBLED" | "UNAVAILABLE" | "UNKNOWN";
         officialSourceCaptureWorkerPhase: "NOT_CONFIGURED" | "ASSEMBLED" | "UNAVAILABLE" | "UNKNOWN";
+        workspaceMode?: "LOCAL_STANDALONE" | "FIRM_MANAGED" | "SYNTHETIC_ALPHA" | "UNAVAILABLE";
+        localWorkspacePhase?: "NOT_CONFIGURED" | "READY" | "UNAVAILABLE" | "UNKNOWN";
       } | null>;
       sessionGrant(): Promise<{
         apiBase: string;
@@ -43,6 +45,7 @@ declare global {
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
+        configurationState: "NOT_CHECKED" | "CONFIGURATION_RECORDED" | "VALIDATED_FOR_CURRENT_SESSION" | "NOT_CONFIGURED";
         configured: boolean;
         connectionReady: boolean;
         connectionLabel: string;
@@ -51,6 +54,7 @@ declare global {
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
+        configurationState: "NOT_CHECKED" | "CONFIGURATION_RECORDED" | "VALIDATED_FOR_CURRENT_SESSION" | "NOT_CONFIGURED";
         configured: boolean;
         connectionReady: boolean;
         connectionLabel: string;
@@ -59,6 +63,7 @@ declare global {
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
+        configurationState: "NOT_CHECKED" | "CONFIGURATION_RECORDED" | "VALIDATED_FOR_CURRENT_SESSION" | "NOT_CONFIGURED";
         configured: boolean;
         connectionReady: boolean;
         connectionLabel: string;
@@ -73,10 +78,21 @@ declare global {
         candidateId: string;
         matterVersion: number;
       }>;
+      executeAuthorizedDeepSeekCasePlan(input: {
+        matterId: string;
+        externalRequestId: string;
+        expectedVersion: number;
+        taskKind: "case_intake" | "evidence_review" | "legal_research" | "interest_review" | "document_review";
+      }): Promise<{
+        runId: string;
+        matterVersion: number;
+        proposalCount: number;
+      }>;
       removeModelProviderKey(providerId: "deepseek" | "qwen"): Promise<{
         providerId: "deepseek" | "qwen";
         displayName: string;
         modelId: string;
+        configurationState: "NOT_CHECKED" | "CONFIGURATION_RECORDED" | "VALIDATED_FOR_CURRENT_SESSION" | "NOT_CONFIGURED";
         configured: boolean;
         connectionReady: boolean;
         connectionLabel: string;
@@ -122,6 +138,62 @@ declare global {
         message: string;
         installationInitialized: boolean;
         enrollmentEnvelopePresent: boolean;
+      }>;
+      selectLocalCaseFolder(): Promise<{
+        selectionId: string;
+        displayName: string;
+        rootFingerprint: string;
+        selectedAt: string;
+      } | null>;
+      createLocalCase(input: { title: string; selectionId: string }): Promise<{
+        caseId: string;
+        title: string;
+        stage: "MATERIALS_PENDING" | "MATERIALS_INVENTORIED";
+        matterVersion: number;
+        materialRoot: { displayName: string; rootFingerprint: string; linkedAt: string };
+        inventory: { scanId: string; rootFingerprint: string; manifestHash: string; scannedAt: string; totalFiles: number; totalBytes: number; skippedSymlinks: number } | null;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      listLocalCases(): Promise<Array<{
+        caseId: string;
+        title: string;
+        stage: "MATERIALS_PENDING" | "MATERIALS_INVENTORIED";
+        matterVersion: number;
+        materialRoot: { displayName: string; rootFingerprint: string; linkedAt: string };
+        inventory: { scanId: string; rootFingerprint: string; manifestHash: string; scannedAt: string; totalFiles: number; totalBytes: number; skippedSymlinks: number } | null;
+        createdAt: string;
+        updatedAt: string;
+      }>>;
+      openLocalCase(caseId: string): Promise<{
+        caseId: string;
+        title: string;
+        stage: "MATERIALS_PENDING" | "MATERIALS_INVENTORIED";
+        matterVersion: number;
+        materialRoot: { displayName: string; rootFingerprint: string; linkedAt: string };
+        inventory: { scanId: string; rootFingerprint: string; manifestHash: string; scannedAt: string; totalFiles: number; totalBytes: number; skippedSymlinks: number } | null;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      reconnectLocalCaseFolder(input: { caseId: string; selectionId: string }): Promise<{
+        caseId: string;
+        title: string;
+        stage: "MATERIALS_PENDING" | "MATERIALS_INVENTORIED";
+        matterVersion: number;
+        materialRoot: { displayName: string; rootFingerprint: string; linkedAt: string };
+        inventory: { scanId: string; rootFingerprint: string; manifestHash: string; scannedAt: string; totalFiles: number; totalBytes: number; skippedSymlinks: number } | null;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+      inventoryLocalCaseFolder(input: { caseId: string; selectionId: string }): Promise<{
+        caseId: string;
+        title: string;
+        stage: "MATERIALS_PENDING" | "MATERIALS_INVENTORIED";
+        matterVersion: number;
+        materialRoot: { displayName: string; rootFingerprint: string; linkedAt: string };
+        inventory: { scanId: string; rootFingerprint: string; manifestHash: string; scannedAt: string; totalFiles: number; totalBytes: number; skippedSymlinks: number } | null;
+        createdAt: string;
+        updatedAt: string;
       }>;
       selectCaseFolder(input: { matterId: string }): Promise<{ selectedRoot: string } | null>;
     };

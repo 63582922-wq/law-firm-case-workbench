@@ -66,14 +66,14 @@ export function CalculationWorkbench() {
         if (!active) return;
         setState({
           status: "blocked",
-          message: error instanceof Error ? error.message : "未取得正式计算服务响应",
+          message: error instanceof Error ? error.message : "暂时无法取得本案利息测算结果",
         });
       }
     }
     void load();
     void loadLegalReview()
       .then((review) => { if (active) setLegalReview(review); })
-      .catch((reason: unknown) => { if (active) setScenarioNotice(reason instanceof Error ? reason.message : "法律规则包快照读取失败"); });
+      .catch((reason: unknown) => { if (active) setScenarioNotice(reason instanceof Error ? reason.message : "暂时无法读取本案适用口径"); });
     return () => {
       active = false;
     };
@@ -85,7 +85,7 @@ export function CalculationWorkbench() {
   async function createScenario() {
     if (!legalReview?.currentBundle || legalReview.matterVersion === null) return;
     if (!scenario.approved) {
-      setScenarioNotice("请先确认：债务单元、计算区间、人民币币种与已批准冲抵顺序已经核对。");
+      setScenarioNotice("请先确认：对应借款项目、测算期间、人民币币种和还款抵扣顺序均已核对。");
       return;
     }
     setScenarioBusy(true);
@@ -107,9 +107,9 @@ export function CalculationWorkbench() {
       setState({ status: "ready", review: calculation });
       setLegalReview(refreshedLegal);
       setScenario((prior) => ({ ...prior, approved: false }));
-      setScenarioNotice(`正式计算与独立复算已完成；案件版本更新为 ${receipt.matterVersion}。`);
+      setScenarioNotice(`本次利息测算及复核已完成；案件版本更新为 ${receipt.matterVersion}。`);
     } catch (reason: unknown) {
-      setScenarioNotice(reason instanceof Error ? reason.message : "正式计算未完成");
+      setScenarioNotice(reason instanceof Error ? reason.message : "利息测算未完成");
     } finally {
       setScenarioBusy(false);
     }
@@ -119,14 +119,14 @@ export function CalculationWorkbench() {
     <section className={styles.calculationArea} aria-label="利息计算">
       <header className={styles.calculationHeading}>
         <div>
-          <p className={styles.eyebrow}>{persistent ? "正式计算 / 持久化快照" : "确定性计算 / 合成预览"}</p>
-          <h2>利息与还款冲抵</h2>
-          <p>{persistent ? "金额只读取经律师批准、独立复算并持久化的结果。" : "本页仅展示本机合成数据，不代表真实案件或法律结论。"}</p>
+          <p className={styles.eyebrow}>{persistent ? "利息测算" : "演示测算"}</p>
+          <h2>利息核算与还款抵扣</h2>
+          <p>{persistent ? "本页仅根据已核对的案件资料和已确认的适用口径生成测算；不自行认定事实或法律结论。" : "本页展示演示资料，不代表真实案件或法律结论。"}</p>
         </div>
         <div className={styles.calculationStatus}>
-          <span>币种</span>
+          <span>计算币种</span>
           <strong>人民币 / CNY</strong>
-          <small>正式计算仅允许人民币分金额</small>
+          <small>本案测算仅支持人民币金额</small>
         </div>
       </header>
 
@@ -134,39 +134,40 @@ export function CalculationWorkbench() {
         <div className={styles.calculationMain}>
           {state.status === "loading" && (
             <section className={styles.calculationLoading} aria-live="polite">
-              正在读取{persistent ? "正式计算快照" : "本机合成计算结果"}；返回前不显示金额结论。
+              正在读取{persistent ? "已确认资料并生成利息测算" : "演示测算结果"}；完成前不显示金额结论。
             </section>
           )}
 
           {state.status === "blocked" && (
             <section className={styles.calculationBlocked} role="alert">
-              <p className={styles.eyebrow}>计算读取已阻断</p>
-              <h3>没有可核验的计算结果</h3>
-              <p>{state.message}</p>
-              <small>系统没有使用静态示例或浏览器计算作为替代。</small>
+              <p className={styles.eyebrow}>暂不能出具测算</p>
+              <h3>目前没有可核对的利息结果</h3>
+              <p>请先检查案件资料、适用依据和本机工作台是否已就绪，然后重新打开本页。</p>
+              <small>资料未就绪时，系统不会以示例金额或临时计算代替本案结果。</small>
+              <button className={styles.candidateAction} onClick={() => window.location.reload()} type="button">重新载入本页</button>
             </section>
           )}
 
           {review?.status === "empty" && (
             <section className={styles.calculationBlocked} role="status">
-              <p className={styles.eyebrow}>尚无正式计算</p>
-              <h3>法律规则包或债务单元尚未就绪</h3>
+              <p className={styles.eyebrow}>尚未开始测算</p>
+              <h3>适用口径或对应借款项目尚未就绪</h3>
               <p>{review.emptyReason}</p>
-              <small>需要先核验交易、付款性质、同日顺序和规则适用期间，再由主办律师批准。</small>
+              <small>请先核对收付款、款项用途、同日先后和适用期间，再由主办律师确认。</small>
             </section>
           )}
 
           {persistent && legalReview?.status === "reviewable" && (
             <form className={styles.formalCalculationForm} onSubmit={(event) => { event.preventDefault(); void createScenario(); }}>
-              <div className={styles.formalCalculationHeading}><div><p className={styles.eyebrow}>正式情景审批</p><h3>按当前规则包运行独立复算</h3><small>利率、交易金额、付款性质和人民币币种均从已批准台账读取；本表不提供这些字段的编辑入口。</small></div><span>{legalReview.currentBundle ? `规则包 v${legalReview.currentBundle.version}` : "尚无已批准规则包"}</span></div>
+              <div className={styles.formalCalculationHeading}><div><p className={styles.eyebrow}>开始利息测算</p><h3>确认本次测算范围</h3><small>利率、收付款金额、款项用途和人民币币种均来自已确认的案件资料；本页不能直接改写这些资料。</small></div><span>{legalReview.currentBundle ? `适用口径 v${legalReview.currentBundle.version}` : "尚无已确认适用口径"}</span></div>
               <div className={styles.formalCalculationFields}>
-                <label><span>债务单元标识</span><input required value={scenario.obligationId} onChange={(event) => setScenario((prior) => ({ ...prior, obligationId: event.target.value }))} placeholder="选择已批准付款分配使用的 obligation_id" /></label>
-                <label><span>计算起日</span><input required type="date" value={scenario.startDate} onChange={(event) => setScenario((prior) => ({ ...prior, startDate: event.target.value }))} /></label>
-                <label><span>计算止日</span><input required type="date" value={scenario.endDate} onChange={(event) => setScenario((prior) => ({ ...prior, endDate: event.target.value }))} /></label>
-                <label><span>冲抵顺序</span><select value={scenario.allocationPolicy} onChange={(event) => setScenario((prior) => ({ ...prior, allocationPolicy: event.target.value as typeof prior.allocationPolicy }))}><option value="INTEREST_THEN_PRINCIPAL">先息后本</option><option value="PRINCIPAL_THEN_INTEREST">先本后息</option></select></label>
+                <label><span>对应借款项目</span><input required value={scenario.obligationId} onChange={(event) => setScenario((prior) => ({ ...prior, obligationId: event.target.value }))} placeholder="填写已确认收付款对应的借款项目" /></label>
+                <label><span>测算起日</span><input required type="date" value={scenario.startDate} onChange={(event) => setScenario((prior) => ({ ...prior, startDate: event.target.value }))} /></label>
+                <label><span>测算止日</span><input required type="date" value={scenario.endDate} onChange={(event) => setScenario((prior) => ({ ...prior, endDate: event.target.value }))} /></label>
+                <label><span>还款抵扣顺序</span><select value={scenario.allocationPolicy} onChange={(event) => setScenario((prior) => ({ ...prior, allocationPolicy: event.target.value as typeof prior.allocationPolicy }))}><option value="INTEREST_THEN_PRINCIPAL">先息后本</option><option value="PRINCIPAL_THEN_INTEREST">先本后息</option></select></label>
               </div>
-              <label className={styles.formalCalculationCheck}><input checked={scenario.approved} onChange={(event) => setScenario((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该债务单元已有同案、已确认且已分类的人民币交易；计算区间受当前规则包连续覆盖，冲抵顺序已由律师批准。</span></label>
-              <div className={styles.formalCalculationActions}><button disabled={scenarioBusy || !legalReview.currentBundle} type="submit">{scenarioBusy ? "正在独立复算…" : "建立正式计算"}</button><small>任何交易、规则包、币种、同日顺序、重复组或独立复算不符合条件，服务端都会拒绝创建结果。</small></div>
+              <label className={styles.formalCalculationCheck}><input checked={scenario.approved} onChange={(event) => setScenario((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该借款项目已有本案已确认、已确定用途的人民币收付款；测算期间已由当前适用口径连续覆盖，抵扣顺序已由律师确认。</span></label>
+              <div className={styles.formalCalculationActions}><button disabled={scenarioBusy || !legalReview.currentBundle} type="submit">{scenarioBusy ? "正在核算并复核…" : "生成利息测算"}</button><small>收付款、适用口径、币种、同日先后或复核条件不符合时，系统不会生成可提交的测算结果。</small></div>
               {scenarioNotice && <p className={styles.formalCalculationNotice} role="status">{scenarioNotice}</p>}
             </form>
           )}
@@ -181,17 +182,17 @@ export function CalculationWorkbench() {
         </div>
 
         <aside className={styles.calculationInspector}>
-          <p className={styles.eyebrow}>控制边界</p>
-          <h3>法律选择由律师批准</h3>
+          <p className={styles.eyebrow}>办案提示</p>
+          <h3>利息口径须由律师确认</h3>
           <ul>
             <li>系统不自行认定借款、付款或利息的法律性质。</li>
-            <li>系统不自行选择利率上限、过渡规则或起止日期。</li>
-            <li>任何上游事实、证据或规则变化都会使正式结果失效。</li>
+            <li>系统不自行选择利率上限、过渡规则或测算起止日。</li>
+            <li>案件事实、证据或适用口径变化后，本次测算需重新核对。</li>
           </ul>
           <div className={styles.calculationTrace}>
-            <span>数据来源</span>
+            <span>案件资料来源</span>
             <code>{review?.sourceLabel ?? caseDataSourceConfig.label}</code>
-            <small>{review?.snapshotHash ? `快照 ${review.snapshotHash.slice(0, 16)}…` : "未取得可核验快照"}</small>
+            <small>{review?.snapshotHash ? `已保存核对记录 ${review.snapshotHash.slice(0, 16)}…` : "尚未取得可核对的案件资料"}</small>
           </div>
         </aside>
       </div>
@@ -204,14 +205,14 @@ function CalculationAssumptions({ review }: { review: CalculationReviewView }) {
     <section className={styles.assumptionBlock} aria-labelledby="calculation-assumptions">
       <div className={styles.sectionHeading}>
         <div>
-          <p className={styles.eyebrow}>已批准参数</p>
-          <h3 id="calculation-assumptions">计算前提</h3>
+          <p className={styles.eyebrow}>已确认资料</p>
+          <h3 id="calculation-assumptions">本次测算口径</h3>
         </div>
-        <span>{review.sourceKind === "synthetic-alpha" ? "合成数据" : `案件版本 ${review.matterVersion}`}</span>
+        <span>{review.sourceKind === "synthetic-alpha" ? "演示资料" : `案件版本 ${review.matterVersion}`}</span>
       </div>
       <div className={styles.assumptionGrid}>
         <dl>
-          <div><dt>计算区间</dt><dd>{day(review.startDate)} — {day(review.endDate)}</dd></div>
+          <div><dt>测算期间</dt><dd>{day(review.startDate)} — {day(review.endDate)}</dd></div>
           <div><dt>期间边界</dt><dd>[起算日，截止日)</dd></div>
         </dl>
         <dl>
@@ -219,8 +220,8 @@ function CalculationAssumptions({ review }: { review: CalculationReviewView }) {
           <div><dt>冲抵顺序</dt><dd>{allocationPolicy(review.allocationPolicy)}</dd></div>
         </dl>
         <dl>
-          <div><dt>债务单元</dt><dd>{review.obligationId}</dd></div>
-          <div><dt>计算引擎</dt><dd>{review.engineVersion}</dd></div>
+          <div><dt>借款项目</dt><dd>{review.obligationId}</dd></div>
+          <div><dt>核算版本</dt><dd>{review.engineVersion}</dd></div>
         </dl>
       </div>
     </section>
@@ -232,10 +233,10 @@ function RuleTrace({ review }: { review: CalculationReviewView }) {
     <section className={styles.ruleBlock} aria-labelledby="rule-segments">
       <div className={styles.sectionHeading}>
         <div>
-          <p className={styles.eyebrow}>规则与期间回链</p>
-          <h3 id="rule-segments">进入本次计算的规则期间</h3>
+          <p className={styles.eyebrow}>适用依据与期间</p>
+          <h3 id="rule-segments">本次测算采用的利率期间</h3>
         </div>
-        <span>{review.sourceKind === "synthetic-alpha" ? "尚非法律结论" : "已绑定法律规则包"}</span>
+        <span>{review.sourceKind === "synthetic-alpha" ? "不构成法律结论" : "已对应本案适用口径"}</span>
       </div>
       <div className={styles.ruleRows}>
         {review.lineItems.map((item) => (
@@ -253,14 +254,14 @@ function RuleTrace({ review }: { review: CalculationReviewView }) {
 
 function CalculationResult({ review }: { review: CalculationReviewView }) {
   return (
-    <section className={styles.calculationResult} aria-label="计算结果">
+    <section className={styles.calculationResult} aria-label="利息测算结果">
       <div className={styles.resultHeader}>
         <div>
-          <p className={styles.eyebrow}>{review.sourceKind === "synthetic-alpha" ? "本机合成计算结果" : "正式持久化计算结果"}</p>
-          <h3>期间明细与逐笔冲抵</h3>
+          <p className={styles.eyebrow}>{review.sourceKind === "synthetic-alpha" ? "演示测算结果" : "本案利息测算结果"}</p>
+          <h3>分段明细与逐笔还款抵扣</h3>
         </div>
         <span className={review.independentCheckMatch ? styles.checkPassed : styles.checkFailed}>
-          {review.independentCheckMatch ? "独立复算一致" : "独立复算未通过"}
+          {review.independentCheckMatch ? "复核结果一致" : "复核未通过"}
         </span>
       </div>
 
@@ -271,7 +272,7 @@ function CalculationResult({ review }: { review: CalculationReviewView }) {
         <div><span>未付利息</span><strong>{cny(review.remainingUnpaidInterest)}</strong></div>
       </div>
 
-      <div className={styles.calculationTable} role="table" aria-label="计算期间明细">
+      <div className={styles.calculationTable} role="table" aria-label="利息测算分段明细">
         <div className={`${styles.calculationTableRow} ${styles.calculationTableHead}`} role="row">
           <span>期间</span><span>期初本金</span><span>年利率</span><span>日数</span><span>本期利息</span><span>规则来源</span>
         </div>
@@ -289,11 +290,11 @@ function CalculationResult({ review }: { review: CalculationReviewView }) {
 
       <div className={styles.paymentResult}>
         <div>
-          <p className={styles.eyebrow}>逐笔还款</p>
-          <h4>每次冲抵后本金重新进入下一期间</h4>
+          <p className={styles.eyebrow}>逐笔还款抵扣</p>
+          <h4>每笔还款抵扣后，剩余本金进入下一期间</h4>
         </div>
         {review.paymentAllocations.length === 0 ? (
-          <p>本计算区间内没有进入正式计算的已批准还款。</p>
+          <p>本次测算期间内没有可纳入的已确认还款。</p>
         ) : review.paymentAllocations.map((allocation) => (
           <dl key={allocation.allocationSequence}>
             <div><dt>付款</dt><dd>{allocation.effectiveDate} · {cny(allocation.paymentAmount)}</dd></div>
@@ -306,7 +307,7 @@ function CalculationResult({ review }: { review: CalculationReviewView }) {
       </div>
 
       <p className={styles.resultHash}>
-        法律规则包 {review.legalBundleId}、案件输入与计算输出均已哈希绑定；币种固定显示为人民币 / CNY。
+        本次测算已与案件资料、适用口径和复核结果对应保存；币种固定显示为人民币 / CNY。
       </p>
     </section>
   );

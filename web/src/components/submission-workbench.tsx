@@ -13,7 +13,7 @@ import { ReviewableOfficeDrafts } from "@/components/reviewable-office-drafts";
 import styles from "./case-workbench.module.css";
 
 const requiredFlow = [
-  ["答辩文书", "DEFENCE_STATEMENT", "正文哈希须与当前最终文本审批一致"],
+  ["答辩文书", "DEFENCE_STATEMENT", "正文须与已确认的定稿一致"],
   ["证据目录", "EVIDENCE_INDEX", "仅列入本次实际提交的证据"],
   ["证据材料", "EVIDENCE_MATERIAL", "只含已核验相关页；红框版本单独命名"],
   ["利息测算表", "INTEREST_CALCULATION", "人民币 / CNY，逐期本金与冲抵可复算"],
@@ -34,14 +34,14 @@ export function SubmissionWorkbench() {
         if (active) setReview(result);
       })
       .catch((reason: unknown) => {
-        if (active) setError(reason instanceof Error ? reason.message : "提交材料快照读取失败");
+        if (active) setError(reason instanceof Error ? reason.message : "暂时无法读取提交材料清单");
       });
     loadDocumentConsistencyReview()
       .then((result) => {
         if (active) setConsistency(result);
       })
       .catch((reason: unknown) => {
-        if (active) setConsistencyError(reason instanceof Error ? reason.message : "文书一致性审查快照读取失败");
+        if (active) setConsistencyError(reason instanceof Error ? reason.message : "暂时无法读取文书核对记录");
       });
     return () => {
       active = false;
@@ -52,16 +52,17 @@ export function SubmissionWorkbench() {
     return (
       <section className={styles.submissionArea} aria-label="提交材料">
         <div className={styles.calculationBlocked} role="alert">
-          <p className={styles.eyebrow}>提交链已阻断</p>
-          <h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "持久化模式未启用" : "提交材料快照未连接"}</h3>
-          <p>{error}</p>
-          <small>系统没有生成空 ZIP，也没有回退到合成文件。</small>
+          <p className={styles.eyebrow}>暂不能整理提交材料</p>
+          <h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "案件资料库尚未启用" : "暂时无法读取提交材料"}</h3>
+          <p>请检查桌面工作台是否仍在运行、当前案件是否已打开，然后重新打开本页。</p>
+          <small>材料未就绪时，系统不会生成空文件包或以演示文件代替。</small>
+          <button className={styles.candidateAction} onClick={() => window.location.reload()} type="button">重新载入本页</button>
         </div>
       </section>
     );
   }
   if (!review) {
-    return <section className={styles.submissionArea}><div className={styles.calculationLoading}>正在核对提交文件与全部上游依赖…</div></section>;
+    return <section className={styles.submissionArea}><div className={styles.calculationLoading}>正在核对本次提交文件及其依据…</div></section>;
   }
 
   const approvedCourtProducts = review.workProducts.filter(
@@ -97,35 +98,35 @@ export function SubmissionWorkbench() {
     <section className={styles.submissionArea} aria-label="提交材料">
       <header className={styles.calculationHeading}>
         <div>
-          <p className={styles.eyebrow}>法院提交包</p>
-          <h2>只保留要提交的文件，内部审计信息不混入法院 ZIP</h2>
-          <p>每份文件、排列顺序、正式名称和依赖哈希都由律师批准；锁定后由本机确定性程序编译并逐文件复核。</p>
+          <p className={styles.eyebrow}>提交法院</p>
+          <h2>整理一套可直接提交法院的材料</h2>
+          <p>本页只保留本次需要提交的文件；每份材料、排列顺序和正式名称均由律师确认，生成前逐份核对。</p>
         </div>
         <div className={styles.calculationStatus}>
           <span>{review.sourceLabel}</span>
           <strong>{statusLabel(review.status)}</strong>
-          <small>{review.snapshotHash ? `快照 ${shortHash(review.snapshotHash)}` : "未形成正式快照"}</small>
+          <small>{review.snapshotHash ? `核对编号 ${shortHash(review.snapshotHash)}` : "尚未形成可提交清单"}</small>
         </div>
       </header>
 
       <div className={review.status === "blocked" ? styles.submissionBlockedNotice : styles.submissionReviewNotice}>
-        <strong>{review.status === "blocked" ? "不能生成正式文件" : `案件版本 ${review.matterVersion}`}</strong>
+        <strong>{review.status === "blocked" ? "暂不能生成提交材料" : `案件版本 ${review.matterVersion}`}</strong>
         <span>{review.statusReason}</span>
       </div>
 
       <div className={styles.submissionSummary}>
-        <Summary label="已批准法院文件" value={`${approvedCourtProducts.length} 份`} note="内部底稿不会进入" />
-        <Summary label="当前锁定版" value={currentBundle ? "1 份" : "无"} note="每案最多一个" />
-        <Summary label="已过期旧版" value={`${supersededCourtProducts.length} 份`} note="不会再进入提交包" />
+        <Summary label="已确认法院材料" value={`${approvedCourtProducts.length} 份`} note="内部工作底稿不会混入" />
+        <Summary label="当前提交版" value={currentBundle ? "1 份" : "无"} note="每案仅保留一个" />
+        <Summary label="不可提交旧版" value={`${supersededCourtProducts.length} 份`} note="不会再进入材料包" />
         <Summary label="币种" value={currentBundle?.currency ?? "CNY"} note="金额文件必须明确" />
-        <Summary label="已核验导出" value={review.currentExport ? "已形成" : "未形成"} note={review.currentExport ? `${review.currentExport.componentCount} 个文件` : "不得上传法院"} />
+        <Summary label="材料包" value={review.currentExport ? "已生成" : "未生成"} note={review.currentExport ? `${review.currentExport.componentCount} 个文件` : "暂不能上传法院"} />
       </div>
 
       <div className={styles.submissionGrid}>
         <section className={styles.submissionPanel} aria-labelledby="submission-files-title">
           <div className={styles.submissionPanelHeading}>
-            <div><p className={styles.eyebrow}>法院文件区</p><h3 id="submission-files-title">本次提交文件</h3></div>
-            <span>{review.currentComponents.length ? "来自当前锁定版" : "等待律师建立 QA 清单"}</span>
+            <div><p className={styles.eyebrow}>本次材料</p><h3 id="submission-files-title">提交法院的文件</h3></div>
+            <span>{review.currentComponents.length ? "来自当前提交版" : "等待核对提交清单"}</span>
           </div>
           {review.currentComponents.length ? (
             <div className={styles.submissionFileList}>
@@ -154,22 +155,22 @@ export function SubmissionWorkbench() {
         </section>
 
         <aside className={styles.submissionBoundary}>
-          <p className={styles.eyebrow}>文件边界</p>
-          <h3>法院 ZIP 与内部清单分开</h3>
+          <p className={styles.eyebrow}>材料边界</p>
+          <h3>法院材料与内部工作底稿分开</h3>
           <dl>
-            <div><dt>法院 ZIP</dt><dd>只有批准的 PDF</dd></div>
-            <div><dt>内部清单</dt><dd>哈希、版本、审批与依赖</dd></div>
+            <div><dt>法院材料包</dt><dd>只含已确认的 PDF</dd></div>
+            <div><dt>内部清单</dt><dd>材料来源、确认记录和核对依据</dd></div>
             <div><dt>原始案卷</dt><dd>永不改写、永不混入</dd></div>
-            <div><dt>文件名</dt><dd>不使用“最新/最终/V2”</dd></div>
+            <div><dt>文件名</dt><dd>不使用“最新 / 最终 / V2”</dd></div>
           </dl>
-          <p>委托手续、律所函和身份材料是否必需，应由具体法院要求与本案代理关系决定，并纳入同一 QA 清单。</p>
+          <p>委托手续、律所函和身份材料是否必需，应由具体法院要求与本案代理关系决定，并纳入同一提交前核对清单。</p>
         </aside>
       </div>
 
       {supersededCourtProducts.length > 0 && (
         <section className={styles.submissionPanel} aria-labelledby="superseded-document-title">
           <div className={styles.submissionPanelHeading}>
-            <div><p className={styles.eyebrow}>版本控制</p><h3 id="superseded-document-title">已过期的法院文书版本</h3></div>
+            <div><p className={styles.eyebrow}>旧版材料</p><h3 id="superseded-document-title">不可再提交的法院材料</h3></div>
             <span>仅供追溯，不可重新选入</span>
           </div>
           <div className={styles.submissionChecklist}>
@@ -178,7 +179,7 @@ export function SubmissionWorkbench() {
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <div>
                   <strong>{documentKindLabel(item.documentKind)}</strong>
-                  <small>{item.staleReason ?? "该版本已失效，不能进入法院提交包。"}</small>
+                  <small>{item.staleReason ?? "该材料已失效，不能进入本次提交材料包。"}</small>
                 </div>
                 <em>{shortHash(item.artifactSha256)}</em>
               </article>
@@ -193,36 +194,36 @@ export function SubmissionWorkbench() {
 
       <section className={styles.submissionPanel} aria-labelledby="submission-lineage-title">
         <div className={styles.submissionPanelHeading}>
-          <div><p className={styles.eyebrow}>锁定依据</p><h3 id="submission-lineage-title">四项不可缺少的上游依赖</h3></div>
-          <span>{currentBundle ? `输入 ${shortHash(currentBundle.inputHash)}` : "未锁定"}</span>
+          <div><p className={styles.eyebrow}>提交前核对</p><h3 id="submission-lineage-title">本次材料必须对应的四项依据</h3></div>
+          <span>{currentBundle ? `核对编号 ${shortHash(currentBundle.inputHash)}` : "尚未确认"}</span>
         </div>
         <div className={styles.submissionDependencyGrid}>
-          <Dependency label="证据 Manifest" hash={currentBundle?.evidenceManifestHash ?? null} />
-          <Dependency label="法律规则包" hash={currentBundle?.legalBundleHash ?? null} />
-          <Dependency label="利息计算输出" hash={currentBundle?.calculationOutputHash ?? null} />
-          <Dependency label="最终文本审批" hash={currentBundle?.finalTextHash ?? null} />
+          <Dependency label="证据材料范围" hash={currentBundle?.evidenceManifestHash ?? null} />
+          <Dependency label="利息适用口径" hash={currentBundle?.legalBundleHash ?? null} />
+          <Dependency label="利息测算结果" hash={currentBundle?.calculationOutputHash ?? null} />
+          <Dependency label="文书定稿确认" hash={currentBundle?.finalTextHash ?? null} />
         </div>
       </section>
 
       <section className={styles.submissionExportState} aria-label="导出核验状态">
         <div>
-          <p className={styles.eyebrow}>导出状态</p>
-          <h3>{review.currentExport ? "法院 ZIP 已完成逐文件核验" : "尚无可交付的法院 ZIP"}</h3>
-          <p>{review.currentExport ? `法院 ZIP ${formatBytes(review.currentExport.courtZipBytes)}；内部清单已作为独立加密对象保存。` : "只有当前有效锁定版才能由本机 Worker 编译；页面不会用临时文件或演示数据代替。"}</p>
+          <p className={styles.eyebrow}>材料包状态</p>
+          <h3>{review.currentExport ? "提交材料包已逐份核对" : "尚无可交付的提交材料包"}</h3>
+          <p>{review.currentExport ? `提交材料包 ${formatBytes(review.currentExport.courtZipBytes)}；内部核对清单已单独保存。` : "只有当前有效提交版才能生成材料包；页面不会用临时文件或演示数据代替。"}</p>
         </div>
         {review.currentExport ? (
           <div className={styles.submissionDownloadBlock}>
             <dl>
-              <div><dt>ZIP 哈希</dt><dd>{shortHash(review.currentExport.courtZipSha256)}</dd></div>
-              <div><dt>内部清单哈希</dt><dd>{shortHash(review.currentExport.internalManifestSha256)}</dd></div>
-              <div><dt>核验回执</dt><dd>{shortHash(review.currentExport.verificationHash)}</dd></div>
+              <div><dt>材料包核对编号</dt><dd>{shortHash(review.currentExport.courtZipSha256)}</dd></div>
+              <div><dt>内部清单编号</dt><dd>{shortHash(review.currentExport.internalManifestSha256)}</dd></div>
+              <div><dt>核对回执</dt><dd>{shortHash(review.currentExport.verificationHash)}</dd></div>
             </dl>
             <button disabled={downloading} onClick={downloadCourtZip} type="button">
-              {downloading ? "正在核验并下载…" : "下载法院提交材料.zip"}
+              {downloading ? "正在核对并下载…" : "下载法院提交材料.zip"}
             </button>
             {downloadError && <small role="alert">{downloadError}</small>}
           </div>
-        ) : <span className={styles.submissionGate}>等待：文件审批 → QA 清单 → 唯一锁定 → 本机编译</span>}
+        ) : <span className={styles.submissionGate}>等待：确认文件 → 提交前核对 → 确认唯一提交版 → 生成材料包</span>}
       </section>
     </section>
   );
@@ -242,22 +243,22 @@ function DocumentConsistencyPanel({
   return (
     <section className={styles.submissionPanel} aria-labelledby="document-consistency-title">
       <div className={styles.submissionPanelHeading}>
-        <div><p className={styles.eyebrow}>文书一致性</p><h3 id="document-consistency-title">提交前交叉核对</h3></div>
+        <div><p className={styles.eyebrow}>文书核对</p><h3 id="document-consistency-title">提交前逐项核对</h3></div>
         <span>{state}</span>
       </div>
       {error ? (
         <div className={styles.submissionBlockedNotice} role="alert">
-          <strong>审查快照未连接</strong><span>{error}</span>
+          <strong>暂时无法读取文书核对记录</strong><span>请稍后重新打开本页；已生成的材料不会被更改。</span>
         </div>
       ) : !review?.latest ? (
         <div className={styles.submissionReviewNotice}>
-          <strong>尚未形成当前审查</strong>
-          <span>提交 QA 会要求覆盖本次全部已批准 PDF 的当前无阻断审查；系统不会把旧报告当作有效结果。</span>
+          <strong>尚未完成本次核对</strong>
+          <span>提交前核对需要覆盖本次全部已确认 PDF，且不得存在阻断问题；系统不会把旧核对结果当作本次有效结果。</span>
         </div>
       ) : (
         <div className={styles.submissionChecklist}>
-          <article><span>01</span><div><strong>审查结果：{state}</strong><small>阻断 {review.latest.blockingCount} 项，提示 {review.latest.warningCount} 项；覆盖案件版本 {review.latest.reviewedMatterVersion}</small></div><em>{shortHash(review.latest.outputHash)}</em></article>
-          <article><span>02</span><div><strong>当前发现代码</strong><small>只展示安全代码与哈希，不在提交页重复展示当事人资料、文书正文或确认值。</small></div><em>{latestFindings.length ? latestFindings.map((item) => item.code).join(" · ") : "无"}</em></article>
+          <article><span>01</span><div><strong>核对结果：{state}</strong><small>阻断 {review.latest.blockingCount} 项，提示 {review.latest.warningCount} 项；对应案件版本 {review.latest.reviewedMatterVersion}</small></div><em>{shortHash(review.latest.outputHash)}</em></article>
+          <article><span>02</span><div><strong>当前核对提示</strong><small>为保护当事人信息，本页只显示提示编号，不重复展示文书正文或确认内容。</small></div><em>{latestFindings.length ? latestFindings.map((item) => item.code).join(" · ") : "无"}</em></article>
         </div>
       )}
     </section>

@@ -274,6 +274,79 @@ class PostgresExternalRequestStore:
             if authorization["expires_at"] <= current:
                 raise CaseLedgerPersistenceBlocked("native OCR preflight expired before page delivery")
 
+    def validate_case_plan_execution(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        expected_version: int,
+        request_id: str,
+        projection_hash: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Permit exactly one native DeepSeek planning input after lawyer preflight.
+
+        The request never authorises arbitrary case fields: it binds only the
+        canonical minimal planning projection, its hash, fixed DeepSeek service
+        identifier and a fixed public processing location label.
+        """
+
+        _validate_command_identity(
+            matter_id=matter_id,
+            actor=actor,
+            idempotency_key="native-case-plan-preflight-check",
+        )
+        _require_roles(actor, self._EXECUTE_ROLES)
+        _require_positive_version(expected_version)
+        _validate_uuid("request_id", request_id)
+        _validate_sha256("projection_hash", projection_hash)
+        current = _now(now)
+        with self._transaction(actor.firm_id) as connection:
+            _advisory_lock(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                command_name="VALIDATE_NATIVE_CASE_PLAN_PREFLIGHT",
+                idempotency_key=f"native-case-plan-preflight:{request_id}",
+            )
+            _authorize_and_lock_matter(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                allowed_roles=self._EXECUTE_ROLES,
+            )
+            authorization = connection.execute(
+                """
+                SELECT request_kind, provider_id, processor_region, selected_field_ids,
+                       service_id, call_cap, input_hash, expires_at
+                FROM external_request_authorizations
+                WHERE request_id = %s AND matter_id = %s AND firm_id = %s
+                FOR KEY SHARE
+                """,
+                (request_id, matter_id, actor.firm_id),
+            ).fetchone()
+            if authorization is None:
+                raise KeyError(request_id)
+            selected = authorization["selected_field_ids"]
+            if isinstance(selected, str):
+                try:
+                    selected = json.loads(selected)
+                except ValueError as error:
+                    raise CaseLedgerPersistenceBlocked("native case-plan fields are invalid") from error
+            if (
+                authorization["request_kind"] != "MODEL"
+                or authorization["provider_id"] != "deepseek"
+                or authorization["processor_region"] != "cn-beijing"
+                or authorization["service_id"] != "deepseek-v4-pro"
+                or authorization["call_cap"] != 1
+                or selected != ["case-plan:minimal-projection"]
+                or authorization["input_hash"] != projection_hash
+            ):
+                raise CaseLedgerPersistenceBlocked("native case plan does not match the lawyer-authorized preflight")
+            if authorization["expires_at"] <= current:
+                raise CaseLedgerPersistenceBlocked("native case-plan preflight expired before input delivery")
+
     def get_snapshot(self, *, matter_id: str, actor: Actor) -> PersistentExternalRequestSnapshot:
         _validate_read_identity(matter_id=matter_id, actor=actor)
         _require_roles(actor, self._READ_ROLES)

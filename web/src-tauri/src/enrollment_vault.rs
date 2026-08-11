@@ -3,6 +3,11 @@ use chrono::{DateTime, Utc};
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -16,6 +21,7 @@ const LOCAL_DISABLE_CONFIRMATION: &str = "DISABLE_LOCAL_ENROLLMENT";
 const INSTALLATION_SECRET_BYTES: usize = 32;
 const MAX_ENROLLMENT_BYTES: usize = 16_384;
 const PENDING_OPERATION_VERSION: u8 = 1;
+const STATUS_MARKER_VERSION: u8 = 1;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +30,49 @@ pub(crate) struct EnrollmentVaultStatus {
     pub(crate) message: String,
     pub(crate) installation_initialized: bool,
     pub(crate) enrollment_envelope_present: bool,
+}
+
+/// A non-secret, local reminder of the last explicitly observed enrollment
+/// state. It is deliberately not used to authorize a session or decide that a
+/// Keychain credential exists. Its sole purpose is to let app launch and the
+/// Settings page explain the next safe action without asking macOS Keychain.
+#[derive(Clone)]
+struct EnrollmentStatusCache {
+    installation_initialized: Option<bool>,
+    enrollment_envelope_present: Option<bool>,
+    pending_operation_recorded: bool,
+}
+
+impl Default for EnrollmentStatusCache {
+    fn default() -> Self {
+        Self {
+            installation_initialized: None,
+            enrollment_envelope_present: None,
+            pending_operation_recorded: false,
+        }
+    }
+}
+
+impl EnrollmentStatusCache {
+    fn to_marker(&self) -> EnrollmentStatusMarker {
+        EnrollmentStatusMarker {
+            version: STATUS_MARKER_VERSION,
+            installation_initialized: self.installation_initialized,
+            enrollment_envelope_present: self.enrollment_envelope_present,
+            pending_operation_recorded: self.pending_operation_recorded,
+        }
+    }
+}
+
+/// This marker never contains an installation secret, enrollment envelope,
+/// pending-operation identifier, signature, keychain account, or case data.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EnrollmentStatusMarker {
+    version: u8,
+    installation_initialized: Option<bool>,
+    enrollment_envelope_present: Option<bool>,
+    pending_operation_recorded: bool,
 }
 
 #[derive(Debug)]
@@ -69,6 +118,8 @@ impl CredentialStore for NativeKeyringStore {
 pub(crate) struct EnrollmentVault {
     store: Arc<dyn CredentialStore>,
     operation_lock: Mutex<()>,
+    status_cache: Mutex<EnrollmentStatusCache>,
+    status_marker_path: Option<PathBuf>,
 }
 
 pub(crate) struct EnrollmentVerificationContext {
@@ -89,28 +140,39 @@ pub(crate) struct PendingEnrollmentOperation {
 
 impl Default for EnrollmentVault {
     fn default() -> Self {
-        Self {
-            store: Arc::new(NativeKeyringStore),
-            operation_lock: Mutex::new(()),
-        }
+        Self::with_parts(Arc::new(NativeKeyringStore), None)
     }
 }
 
 impl EnrollmentVault {
-    #[cfg(test)]
-    fn with_store(store: Arc<dyn CredentialStore>) -> Self {
+    /// Opening Settings reads only this non-secret marker, never Keychain.
+    pub(crate) fn with_status_marker_path(path: PathBuf) -> Self {
+        Self::with_parts(Arc::new(NativeKeyringStore), Some(path))
+    }
+
+    fn with_parts(store: Arc<dyn CredentialStore>, status_marker_path: Option<PathBuf>) -> Self {
         Self {
             store,
             operation_lock: Mutex::new(()),
+            status_cache: Mutex::new(load_status_cache(status_marker_path.as_deref())),
+            status_marker_path,
         }
     }
 
+    #[cfg(test)]
+    fn with_store(store: Arc<dyn CredentialStore>) -> Self {
+        Self::with_parts(store, None)
+    }
+
+    /// Safe for app launch and Settings: this intentionally never opens or
+    /// reads a Keychain entry. The returned values are configuration records,
+    /// not proof that a credential currently exists.
     pub(crate) fn status(&self) -> EnrollmentVaultStatus {
-        let _guard = match self.operation_lock.lock() {
-            Ok(guard) => guard,
-            Err(_) => return blocked_status("本机安全存储状态锁定失败。"),
+        let cache = match self.status_cache.lock() {
+            Ok(cache) => cache,
+            Err(_) => return blocked_status("本机安全存储状态缓存锁定失败。"),
         };
-        self.status_locked()
+        cached_status(&cache)
     }
 
     pub(crate) fn initialize_installation(
@@ -133,7 +195,7 @@ impl EnrollmentVault {
             .lock()
             .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
         if self.read_installation_secret()?.is_some() {
-            return Ok(self.status_locked());
+            return Ok(self.status_after_authorized_operation_locked());
         }
 
         let mut secret = supplied_secret.unwrap_or([0_u8; INSTALLATION_SECRET_BYTES]);
@@ -151,7 +213,7 @@ impl EnrollmentVault {
         if readback.as_slice() != secret {
             return Err("Keychain 写入复核不一致，本机身份仍未启用。".to_string());
         }
-        Ok(self.status_locked())
+        Ok(self.status_after_authorized_operation_locked())
     }
 
     pub(crate) fn disable_local_enrollment(
@@ -171,7 +233,7 @@ impl EnrollmentVault {
         self.store
             .delete(ENROLLMENT_ACCOUNT)
             .map_err(|_| "无法删除本机登记凭证；远程撤销状态未改变。".to_string())?;
-        let mut status = self.status_locked();
+        let mut status = self.status_after_authorized_operation_locked();
         status.phase = "LOCAL_DISABLED_REMOTE_REVOCATION_UNCONFIRMED".to_string();
         status.message = "本机登记已清除；这不代表律所服务端已撤销。".to_string();
         Ok(status)
@@ -192,6 +254,11 @@ impl EnrollmentVault {
             .store
             .get(ENROLLMENT_ACCOUNT)
             .map_err(|_| "无法读取当前登记凭证；未开始导入。".to_string())?;
+        self.update_status_cache(|cache| {
+            cache.installation_initialized = Some(true);
+            cache.enrollment_envelope_present = Some(current.is_some());
+            cache.pending_operation_recorded = false;
+        });
         Ok(EnrollmentVerificationContext {
             installation_binding_sha256: format!("{:x}", Sha256::digest(secret.as_slice())),
             expected_current_sha256: current.as_deref().map(envelope_sha256),
@@ -253,6 +320,11 @@ impl EnrollmentVault {
             let _ = self.store.delete(PENDING_OPERATION_ACCOUNT);
             return Err("待决操作写入 Keychain 后复核失败；未提交请求。".to_string());
         }
+        self.update_status_cache(|cache| {
+            cache.installation_initialized = Some(true);
+            cache.enrollment_envelope_present = Some(current.is_some());
+            cache.pending_operation_recorded = true;
+        });
         Ok(pending)
     }
 
@@ -261,8 +333,16 @@ impl EnrollmentVault {
             .operation_lock
             .lock()
             .map_err(|_| "本机安全存储状态锁定失败。".to_string())?;
-        self.read_pending_operation()?
-            .ok_or_else(|| "当前没有待确认的远程登记操作。".to_string())
+        match self.read_pending_operation()? {
+            Some(pending) => {
+                self.update_status_cache(|cache| cache.pending_operation_recorded = true);
+                Ok(pending)
+            }
+            None => {
+                self.update_status_cache(|cache| cache.pending_operation_recorded = false);
+                Err("当前没有待确认的远程登记操作。".to_string())
+            }
+        }
     }
 
     pub(crate) fn clear_rejected_remote_operation(
@@ -282,6 +362,7 @@ impl EnrollmentVault {
             return Err("待决操作清除后复核失败；本机凭证未改变。".to_string());
         }
         let mut status = self.base_status_locked();
+        self.record_authorized_status(&status);
         status.phase = "REMOTE_OPERATION_REJECTED".to_string();
         status.message = "律所服务端已明确拒绝该操作；本机登记凭证未改变。".to_string();
         Ok(status)
@@ -344,7 +425,9 @@ impl EnrollmentVault {
             let _ = self.restore_pending_operation(&pending);
             return Err("登记凭证与待决标记无法共同提交；已尝试恢复原状态。".to_string());
         }
-        Ok(self.base_status_locked())
+        let status = self.base_status_locked();
+        self.record_authorized_status(&status);
+        Ok(status)
     }
 
     pub(crate) fn commit_remote_revocation_operation(
@@ -387,6 +470,7 @@ impl EnrollmentVault {
             return Err("远程撤销与待决标记无法共同提交；已尝试恢复本机凭证。".to_string());
         }
         let mut status = self.base_status_locked();
+        self.record_authorized_status(&status);
         status.phase = "REMOTE_REVOKED_CONFIRMED".to_string();
         status.message = "律所服务端已接受撤销，本机登记凭证也已清除。".to_string();
         Ok(status)
@@ -449,7 +533,34 @@ impl EnrollmentVault {
             }
             return Err("登记凭证写入后复核失败；已尝试恢复原状态。".to_string());
         }
-        Ok(self.status_locked())
+        Ok(self.status_after_authorized_operation_locked())
+    }
+
+    /// Only call after an explicit enrollment operation has already opened
+    /// Keychain. This refreshes the non-secret marker for later status reads.
+    fn status_after_authorized_operation_locked(&self) -> EnrollmentVaultStatus {
+        let status = self.status_locked();
+        self.record_authorized_status(&status);
+        status
+    }
+
+    fn record_authorized_status(&self, status: &EnrollmentVaultStatus) {
+        self.update_status_cache(|cache| {
+            cache.installation_initialized = Some(status.installation_initialized);
+            cache.enrollment_envelope_present = Some(status.enrollment_envelope_present);
+            cache.pending_operation_recorded = status.phase == "REMOTE_OPERATION_PENDING";
+        });
+    }
+
+    fn update_status_cache(&self, update: impl FnOnce(&mut EnrollmentStatusCache)) {
+        let marker = {
+            let Ok(mut cache) = self.status_cache.lock() else {
+                return;
+            };
+            update(&mut cache);
+            cache.to_marker()
+        };
+        persist_status_marker(self.status_marker_path.as_deref(), &marker);
     }
 
     fn status_locked(&self) -> EnrollmentVaultStatus {
@@ -603,6 +714,150 @@ impl EnrollmentVault {
     }
 }
 
+fn cached_status(cache: &EnrollmentStatusCache) -> EnrollmentVaultStatus {
+    if cache.pending_operation_recorded {
+        return EnrollmentVaultStatus {
+            phase: "REMOTE_OPERATION_PENDING".to_string(),
+            message: "已记录待确认的律所操作；本页未读取系统钥匙串。请点击“查询待确认的律所操作”重新核验，且不要重复提交。".to_string(),
+            installation_initialized: cache.installation_initialized.unwrap_or(false),
+            enrollment_envelope_present: cache.enrollment_envelope_present.unwrap_or(false),
+        };
+    }
+
+    match (
+        cache.installation_initialized,
+        cache.enrollment_envelope_present,
+    ) {
+        (None, _) => EnrollmentVaultStatus {
+            phase: "NOT_INITIALIZED".to_string(),
+            message: "本页未读取系统钥匙串，尚未取得本机初始化记录。若此前已配置，请通过下方明确操作重新核验。".to_string(),
+            installation_initialized: false,
+            enrollment_envelope_present: false,
+        },
+        (Some(false), Some(true)) => EnrollmentVaultStatus {
+            phase: "BROKEN_LOCAL_CREDENTIAL".to_string(),
+            message: "上次明确核验时发现登记记录与本机初始化记录不一致；本页未再次读取系统钥匙串。请在受管操作中重新核验。".to_string(),
+            installation_initialized: false,
+            enrollment_envelope_present: true,
+        },
+        (Some(true), Some(true)) => EnrollmentVaultStatus {
+            phase: "CREDENTIAL_PRESENT_UNVERIFIED".to_string(),
+            message: "已记录律所登记。本页未读取系统钥匙串；这不是本次已验证的登记凭证。进行登记、更新、撤销或进入受管工作区时才会重新核验。".to_string(),
+            installation_initialized: true,
+            enrollment_envelope_present: true,
+        },
+        (Some(true), Some(false) | None) => EnrollmentVaultStatus {
+            phase: "INSTALLATION_READY".to_string(),
+            message: "已记录本机初始化。本页未读取系统钥匙串；这只是初始化记录，不代表本次已验证的安全存储。继续登记时会重新核验。".to_string(),
+            installation_initialized: true,
+            enrollment_envelope_present: false,
+        },
+        (Some(false), Some(false) | None) => EnrollmentVaultStatus {
+            phase: "NOT_INITIALIZED".to_string(),
+            message: "已记录本机登记已停用；本页未读取系统钥匙串。需要重新启用时，请通过下方明确操作重新核验。".to_string(),
+            installation_initialized: false,
+            enrollment_envelope_present: false,
+        },
+    }
+}
+
+fn load_status_cache(path: Option<&Path>) -> EnrollmentStatusCache {
+    let Some(path) = path else {
+        return EnrollmentStatusCache::default();
+    };
+    let Some(raw) = read_private_marker(path) else {
+        return EnrollmentStatusCache::default();
+    };
+    let Ok(marker) = serde_json::from_slice::<EnrollmentStatusMarker>(&raw) else {
+        return EnrollmentStatusCache::default();
+    };
+    if marker.version != STATUS_MARKER_VERSION {
+        return EnrollmentStatusCache::default();
+    }
+    EnrollmentStatusCache {
+        installation_initialized: marker.installation_initialized,
+        enrollment_envelope_present: marker.enrollment_envelope_present,
+        pending_operation_recorded: marker.pending_operation_recorded,
+    }
+}
+
+fn persist_status_marker(path: Option<&Path>, marker: &EnrollmentStatusMarker) {
+    let Some(path) = path else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let Ok(encoded) = serde_json::to_vec(marker) else {
+        return;
+    };
+    if !prepare_private_marker_parent(parent) {
+        return;
+    }
+    if matches!(fs::symlink_metadata(path), Ok(metadata) if !metadata.file_type().is_file() || metadata.file_type().is_symlink())
+    {
+        return;
+    }
+    let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let Ok(mut file) = options.open(&temporary) else {
+        return;
+    };
+    if file.write_all(&encoded).is_err()
+        || file.sync_all().is_err()
+        || !matches!(fs::symlink_metadata(&temporary), Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        || fs::rename(&temporary, path).is_err()
+    {
+        let _ = fs::remove_file(&temporary);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+}
+
+fn read_private_marker(path: &Path) -> Option<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return None;
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return None;
+    }
+    fs::read(path).ok()
+}
+
+fn prepare_private_marker_parent(path: &Path) -> bool {
+    if fs::create_dir_all(path).is_err() {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        if fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).is_err() {
+            return false;
+        }
+        return fs::symlink_metadata(path)
+            .map(|current| current.permissions().mode() & 0o077 == 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 fn validate_pending_fields(
     operation_id: &str,
     operation_kind: &str,
@@ -684,15 +939,24 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[derive(Default)]
     struct MemoryStore {
         values: Mutex<HashMap<String, String>>,
+        reads: AtomicUsize,
+    }
+
+    impl MemoryStore {
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
     }
 
     impl CredentialStore for MemoryStore {
         fn get(&self, account: &str) -> Result<Option<String>, StoreFailure> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.values.lock().unwrap().get(account).cloned())
         }
 
@@ -745,6 +1009,29 @@ mod tests {
             .cloned()
             .unwrap();
         assert_eq!(STANDARD.decode(encoded_after).unwrap(), vec![7_u8; 32]);
+    }
+
+    #[test]
+    fn settings_status_never_reads_the_keychain_store() {
+        let store = Arc::new(MemoryStore::default());
+        {
+            let mut values = store.values.lock().unwrap();
+            values.insert(
+                INSTALLATION_ACCOUNT.to_string(),
+                STANDARD.encode([3_u8; 32]),
+            );
+            values.insert(
+                ENROLLMENT_ACCOUNT.to_string(),
+                r#"{"credential":{},"signature":"recorded"}"#.to_string(),
+            );
+        }
+        let vault = EnrollmentVault::with_store(store.clone());
+
+        let status = vault.status();
+
+        assert_eq!(store.reads(), 0, "opening Settings must not probe Keychain");
+        assert_eq!(status.phase, "NOT_INITIALIZED");
+        assert!(status.message.contains("未读取系统钥匙串"));
     }
 
     #[test]
@@ -1040,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_pending_marker_blocks_status_and_new_operations() {
+    fn malformed_pending_marker_is_not_probed_by_status_and_blocks_explicit_operations() {
         let store = Arc::new(MemoryStore::default());
         let vault = EnrollmentVault::with_store(store.clone());
         vault
@@ -1050,7 +1337,8 @@ mod tests {
             PENDING_OPERATION_ACCOUNT.to_string(),
             r#"{"version":1,"operation_id":"forged"}"#.to_string(),
         );
-        assert_eq!(vault.status().phase, "UNAVAILABLE");
+        assert_eq!(vault.status().phase, "INSTALLATION_READY");
+        assert!(vault.pending_remote_operation().is_err());
         assert!(vault.pending_remote_operation().is_err());
         assert!(
             vault

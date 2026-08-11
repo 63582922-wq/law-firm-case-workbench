@@ -80,28 +80,28 @@ export function LegalWorkbench() {
         if (active) setReview(result);
       })
       .catch((reason: unknown) => {
-        if (active) setError(reason instanceof Error ? reason.message : "法律依据审查快照读取失败");
+        if (active) setError(reason instanceof Error ? reason.message : "暂时无法读取本案适用依据");
       });
     loadOfficialSourceCaptureReview()
       .then((result) => {
         if (active) setCaptureReview(result);
       })
       .catch((reason: unknown) => {
-        if (active) setCaptureError(reason instanceof Error ? reason.message : "官方法源抓取快照读取失败");
+        if (active) setCaptureError(reason instanceof Error ? reason.message : "暂时无法读取官方原文核验记录");
       });
     loadCaseReview()
       .then((result) => {
         if (active) setCaseReview(result);
       })
       .catch((reason: unknown) => {
-        if (active) setBindingNotice(reason instanceof Error ? reason.message : "案件事实快照读取失败");
+        if (active) setBindingNotice(reason instanceof Error ? reason.message : "暂时无法读取已确认案件事实");
       });
     loadEvidenceReview()
       .then((result) => {
         if (active) setEvidenceReview(result);
       })
       .catch((reason: unknown) => {
-        if (active) setEventNotice(reason instanceof Error ? reason.message : "案件证据快照读取失败");
+        if (active) setEventNotice(reason instanceof Error ? reason.message : "暂时无法读取本案证据页");
       });
     return () => {
       active = false;
@@ -145,18 +145,19 @@ export function LegalWorkbench() {
 
   if (error) {
     return (
-      <section className={styles.legalArea} aria-label="法律规则">
+      <section className={styles.legalArea} aria-label="利息适用依据">
         <div className={styles.calculationBlocked} role="alert">
-          <p className={styles.eyebrow}>法律依据数据源已阻断</p>
-          <h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "持久化模式未启用" : "法律依据快照未连接"}</h3>
-          <p>{error}</p>
-          <small>系统没有回退到演示规则，也没有显示任何未经服务端批准的利率。</small>
+          <p className={styles.eyebrow}>暂不能核对适用依据</p>
+          <h3>{caseDataSourceConfig.kind === "persistent-disabled" ? "案件资料库尚未启用" : "暂时无法读取本案适用依据"}</h3>
+          <p>请检查桌面工作台是否仍在运行、当前案件是否已打开，然后重新打开本页。</p>
+          <small>本案依据未就绪时，系统不会以演示规则或未经核对的利率代替。</small>
+          <button className={styles.candidateAction} onClick={() => window.location.reload()} type="button">重新载入本页</button>
         </div>
       </section>
     );
   }
   if (!review) {
-    return <section className={styles.legalArea}><div className={styles.calculationLoading}>正在读取官方来源与案件规则包…</div></section>;
+    return <section className={styles.legalArea}><div className={styles.calculationLoading}>正在读取本案适用依据、关键日期和利率资料…</div></section>;
   }
 
   const readySources = review.sources.filter(
@@ -180,7 +181,7 @@ export function LegalWorkbench() {
   ) {
     if (!captureReview || captureReview.matterVersion === null) return;
     if (!publicSourceConfirmed) {
-      setCaptureNotice("请先确认本次只访问公开官方网站且不发送案件材料。");
+      setCaptureNotice("请先确认本次仅访问公开官方网站，且不发送案件材料。");
       return;
     }
     setCaptureBusy(`queue:${source.sourceId}`);
@@ -194,11 +195,11 @@ export function LegalWorkbench() {
       await refreshCaptureReview();
       setCaptureNotice(
         desktopRuntime?.officialSourceCaptureWorkerPhase === "ASSEMBLED"
-          ? `抓取任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。本机法源抓取服务已就绪，状态会自动刷新。`
-          : `抓取任务已进入受控队列；案件版本更新为 ${receipt.matterVersion}。当前机器的法源抓取服务尚未就绪，任务会明确保持等待。`,
+          ? `官方原文已加入本次核验；案件版本更新为 ${receipt.matterVersion}。本机保存服务已就绪，状态会自动刷新。`
+          : `官方原文已加入本次核验；案件版本更新为 ${receipt.matterVersion}。当前机器的保存服务尚未就绪，本次任务会保持等待。`,
       );
     } catch (reason: unknown) {
-      setCaptureNotice(reason instanceof Error ? reason.message : "官方法源抓取任务未建立");
+      setCaptureNotice(reason instanceof Error ? reason.message : "官方原文核验任务未建立");
     } finally {
       setCaptureBusy(null);
     }
@@ -221,9 +222,9 @@ export function LegalWorkbench() {
         parsedOutputHash: run.parsedOutputHash,
       });
       await refreshCaptureReview();
-      setCaptureNotice(`${decision === "REJECT" ? "驳回" : "待登记批准"}决定已写入审计链；案件版本更新为 ${receipt.matterVersion}。`);
+      setCaptureNotice(`${decision === "REJECT" ? "驳回" : "待登记"}结论已保存；案件版本更新为 ${receipt.matterVersion}。`);
     } catch (reason: unknown) {
-      setCaptureNotice(reason instanceof Error ? reason.message : "官方法源复核未记录");
+      setCaptureNotice(reason instanceof Error ? reason.message : "官方原文复核未保存");
     } finally {
       setCaptureBusy(null);
     }
@@ -248,9 +249,9 @@ export function LegalWorkbench() {
       ]);
       setCaptureReview(refreshedCapture);
       setReview(refreshedLegal);
-      setCaptureNotice(`正式法源快照已登记；案件版本更新为 ${receipt.matterVersion}。规则和利率仍须在后续独立审批中建立。`);
+      setCaptureNotice(`已保存为本案可用的官方原文；案件版本更新为 ${receipt.matterVersion}。适用口径和利率仍须在下一步由律师确认。`);
     } catch (reason: unknown) {
-      setCaptureNotice(reason instanceof Error ? reason.message : "正式法源快照未登记");
+      setCaptureNotice(reason instanceof Error ? reason.message : "官方原文未登记到本案");
     } finally {
       setCaptureBusy(null);
     }
@@ -259,12 +260,12 @@ export function LegalWorkbench() {
   async function approveLprRule() {
     if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
     if (!ruleApproved) {
-      setRuleNotice("请先确认：基准利率由已认证官方观察记录自动读取，不能手工填入或修改。");
+      setRuleNotice("请先确认：基准利率仅从已核验的官方记录读取，不能手工填入或修改。");
       return;
     }
     const priority = Number(lprRule.priority);
     if (!Number.isInteger(priority) || priority < 0 || priority > 1_000_000) {
-      setRuleNotice("规则优先级必须是 0 至 1000000 的整数。");
+      setRuleNotice("口径优先级必须是 0 至 1000000 的整数。");
       return;
     }
     setRuleBusy(true);
@@ -289,10 +290,10 @@ export function LegalWorkbench() {
       });
       const refreshed = await loadLegalReview();
       setReview(refreshed);
-      setRuleNotice(`LPR 规则已进入审批链；案件版本更新为 ${receipt.matterVersion}。基准值仍仅由官方观察记录派生。`);
+      setRuleNotice(`LPR 利息口径已确认；案件版本更新为 ${receipt.matterVersion}。基准值仍只来自官方记录。`);
       setRuleApproved(false);
     } catch (reason: unknown) {
-      setRuleNotice(reason instanceof Error ? reason.message : "LPR 规则未获批准");
+      setRuleNotice(reason instanceof Error ? reason.message : "LPR 利息口径未确认");
     } finally {
       setRuleBusy(false);
     }
@@ -301,7 +302,7 @@ export function LegalWorkbench() {
   async function bindLegalFact() {
     if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
     if (!factBinding.approved) {
-      setBindingNotice("请先确认：只有同案且已确认的事实可以成为法律规则锚点。");
+      setBindingNotice("请先确认：只有本案已确认的事实才可作为适用依据的前提。");
       return;
     }
     setBindingBusy(true);
@@ -316,9 +317,9 @@ export function LegalWorkbench() {
       setReview(refreshedLegal);
       setCaseReview(refreshedCase);
       setFactBinding((prior) => ({ ...prior, approved: false }));
-      setBindingNotice(`法律规则事实锚点已建立；案件版本更新为 ${receipt.matterVersion}。`);
+      setBindingNotice(`适用依据所需事实已关联；案件版本更新为 ${receipt.matterVersion}。`);
     } catch (reason: unknown) {
-      setBindingNotice(reason instanceof Error ? reason.message : "法律规则事实锚点未建立");
+      setBindingNotice(reason instanceof Error ? reason.message : "适用依据所需事实未关联");
     } finally {
       setBindingBusy(false);
     }
@@ -343,9 +344,9 @@ export function LegalWorkbench() {
       setReview(refreshedLegal);
       setEvidenceReview(refreshedEvidence);
       setLegalEvent((prior) => ({ ...prior, approved: false, evidenceIds: [] }));
-      setEventNotice(`案件法律事件已建立；案件版本更新为 ${receipt.matterVersion}。`);
+      setEventNotice(`关键日期及对应证据已确认；案件版本更新为 ${receipt.matterVersion}。`);
     } catch (reason: unknown) {
-      setEventNotice(reason instanceof Error ? reason.message : "案件法律事件未建立");
+      setEventNotice(reason instanceof Error ? reason.message : "关键日期及对应证据未确认");
     } finally {
       setEventBusy(false);
     }
@@ -358,7 +359,7 @@ export function LegalWorkbench() {
   async function approveRuleBundle() {
     if (!review || review.status !== "reviewable" || review.matterVersion === null) return;
     if (!bundleApproved) {
-      setBundleNotice("请先确认：规则期间连续、每段的规则与触发事件适配，并且适用锚点已经完成法律核对。");
+      setBundleNotice("请先确认：各适用期间连续无空档，每段依据与关键日期相符，适用说明已完成法律核对。");
       return;
     }
     setBundleBusy(true);
@@ -371,9 +372,9 @@ export function LegalWorkbench() {
       const refreshed = await loadLegalReview();
       setReview(refreshed);
       setBundleApproved(false);
-      setBundleNotice(`案件法律规则包已获批准；案件版本更新为 ${receipt.matterVersion}。旧规则包与依赖计算将按服务端规则失效。`);
+      setBundleNotice(`本案利息适用口径已确认；案件版本更新为 ${receipt.matterVersion}。资料变化后，原测算将不能继续作为本案依据。`);
     } catch (reason: unknown) {
-      setBundleNotice(reason instanceof Error ? reason.message : "案件法律规则包未获批准");
+      setBundleNotice(reason instanceof Error ? reason.message : "本案利息适用口径未确认");
     } finally {
       setBundleBusy(false);
     }
@@ -407,37 +408,37 @@ export function LegalWorkbench() {
   const approvedLegalEvents = review.legalEvents.filter((event) => event.status === "APPROVED");
 
   return (
-    <section className={styles.legalArea} aria-label="法律规则">
+    <section className={styles.legalArea} aria-label="利息适用依据">
       <header className={styles.calculationHeading}>
         <div>
-          <p className={styles.eyebrow}>法律依据与适用规则</p>
-          <h2>把法条、时间节点和利率公式锁成可追溯规则包</h2>
-          <p>来源必须来自登记的官方域名；规则参数由服务端计算；案件关键事实与触发日期必须经过律师批准。</p>
+          <p className={styles.eyebrow}>利息争点依据</p>
+          <h2>核对本案适用依据、关键日期和利率口径</h2>
+          <p>先核对官方原文和本案事实，再由律师确认适用期间与利率口径；系统不会自行作出法律结论。</p>
         </div>
         <div className={styles.calculationStatus}>
           <span>{review.sourceLabel}</span>
-          <strong>{review.status === "reviewable" ? `案件版本 ${review.matterVersion}` : "仅作来源发现"}</strong>
-          <small>{review.snapshotHash ? `快照 ${shortHash(review.snapshotHash)}` : "未形成正式快照"}</small>
+          <strong>{review.status === "reviewable" ? `案件版本 ${review.matterVersion}` : "待建立本案依据"}</strong>
+          <small>{review.snapshotHash ? `已保存核对记录 ${shortHash(review.snapshotHash)}` : "尚未形成本案依据"}</small>
         </div>
       </header>
 
       <div className={review.status === "discovery-only" ? styles.legalDiscoveryNotice : styles.legalReviewNotice}>
-        <strong>{review.status === "discovery-only" ? "未进入正式规则链" : "版本化只读审查"}</strong>
+        <strong>{review.status === "discovery-only" ? "尚未建立本案适用依据" : "当前依据仅供核对"}</strong>
         <span>{review.statusReason}</span>
       </div>
 
       <div className={styles.legalSummary}>
-        <SummaryCell label="官方来源" value={`${review.sources.length} 项`} note={`${readySources} 项已核验可用`} />
-        <SummaryCell label="规则版本" value={`${review.ruleVersions.length} 项`} note="利率不由浏览器输入" />
-        <SummaryCell label="关键事实锚点" value={`${approvedBindings} 项`} note="只绑定已确认事实" />
-        <SummaryCell label="当前规则包" value={review.currentBundle ? `v${review.currentBundle.version}` : "未建立"} note={review.bundleSegments.length ? `${review.bundleSegments.length} 个连续分段` : "不能启动正式计算"} />
+        <SummaryCell label="官方依据" value={`${review.sources.length} 项`} note={`${readySources} 项已核验可用`} />
+        <SummaryCell label="利息口径" value={`${review.ruleVersions.length} 项`} note="利率不在本页手工录入" />
+        <SummaryCell label="关键事实" value={`${approvedBindings} 项`} note="仅关联已确认事实" />
+        <SummaryCell label="本案适用期间" value={review.currentBundle ? `v${review.currentBundle.version}` : "未确认"} note={review.bundleSegments.length ? `${review.bundleSegments.length} 个连续期间` : "暂不能开始利息测算"} />
       </div>
 
       <div className={styles.legalGrid}>
         <section className={styles.legalPanel} aria-labelledby="official-sources-title">
           <div className={styles.legalPanelHeading}>
-            <div><p className={styles.eyebrow}>来源层</p><h3 id="official-sources-title">官方来源快照</h3></div>
-            <span>{readySources}/{review.sources.length} 可进入规则</span>
+            <div><p className={styles.eyebrow}>第一步</p><h3 id="official-sources-title">核对官方依据与利率资料</h3></div>
+            <span>{readySources}/{review.sources.length} 项可用于本案口径</span>
           </div>
           <div className={styles.legalSourceList}>
             {review.sources.map((source) => {
@@ -452,16 +453,16 @@ export function LegalWorkbench() {
                 </div>
                 <div className={styles.legalSourceState}>
                   <span className={source.verificationStatus === "VERIFIED" && source.licenseBasis && source.licenseReviewHash ? styles.verified : styles.pending}>
-                    {source.verificationStatus !== "VERIFIED" ? "待正式捕获" : source.licenseBasis && source.licenseReviewHash ? "来源与许可已核验" : "许可依据待补核"}
+                    {source.verificationStatus !== "VERIFIED" ? "待保存并核对" : source.licenseBasis && source.licenseReviewHash ? "原文与使用依据已核对" : "使用依据待补充"}
                   </span>
-                  <small>{source.contentSha256 ? shortHash(source.contentSha256) : "无内容哈希"}</small>
+                  <small>{source.contentSha256 ? `核对编号 ${shortHash(source.contentSha256)}` : "尚未保存原文"}</small>
                   {captureReview?.status === "persistent" && source.verificationStatus !== "VERIFIED" && (
                     <>
                       {candidates.length > 1 && (
                         <label className={styles.legalCaptureTarget}>
-                          <span>本次来源</span>
+                          <span>本次官方来源</span>
                           <select
-                            aria-label={`${source.publisher}的本次抓取来源`}
+                            aria-label={`${source.publisher}的本次原文来源`}
                             onChange={(event) => setCaptureTargets((prior) => ({ ...prior, [source.sourceId]: event.target.value }))}
                             value={targetUrl}
                           >
@@ -475,7 +476,7 @@ export function LegalWorkbench() {
                         onClick={() => queueCapture(source, targetUrl)}
                         type="button"
                       >
-                        {captureBusy === `queue:${source.sourceId}` ? "正在入队…" : "授权抓取官方原文"}
+                        {captureBusy === `queue:${source.sourceId}` ? "正在保存…" : "保存官方原文供复核"}
                       </button>
                     </>
                   )}
@@ -487,28 +488,28 @@ export function LegalWorkbench() {
         </section>
 
         <aside className={styles.legalGuardrail}>
-          <p className={styles.eyebrow}>强制门禁</p>
-          <h3>正式计算前必须同时满足</h3>
+          <p className={styles.eyebrow}>办案核对清单</p>
+          <h3>开始利息测算前，请完成以下核对</h3>
           <ol>
             <li>官方网页或 PDF 原始字节已加密保存并绑定 SHA-256。</li>
-            <li>具体条文位置、版本效力和使用许可经授权人员核验。</li>
-            <li>合同成立、起诉、受理、付款等日期有案件证据锚点。</li>
-            <li>规则所需事实键已绑定到“已确认”的案件事实。</li>
-            <li>所有连续期间均使用同一已批准规则包，独立复算一致。</li>
+            <li>具体条文位置、现行效力和本案使用依据已经核对。</li>
+            <li>合同成立、起诉、受理、付款等关键日期均有本案证据支持。</li>
+            <li>适用口径所需事实均已关联到本案已确认事实。</li>
+            <li>各连续期间的适用口径均已确认，测算复核一致。</li>
           </ol>
-          <p>任一上游事实、证据、规则或来源失效，当前计算及提交材料自动转为失效。</p>
+          <p>案件事实、证据、适用依据或来源发生变化后，本次测算和提交材料都需要重新核对。</p>
         </aside>
       </div>
 
       <section className={styles.legalPanel} aria-labelledby="official-case-catalog-title">
         <div className={styles.legalPanelHeading}>
-          <div><p className={styles.eyebrow}>案例研究层</p><h3 id="official-case-catalog-title">官方真实案例研究线索</h3></div>
-          <span>{officialCaseResearchCatalog.candidates.length} 项元数据 · 核验于 {officialCaseResearchCatalog.verifiedOn}</span>
+          <div><p className={styles.eyebrow}>类案参考</p><h3 id="official-case-catalog-title">可供律师研判的官方类案</h3></div>
+          <span>{officialCaseResearchCatalog.candidates.length} 项索引 · 核验于 {officialCaseResearchCatalog.verifiedOn}</span>
         </div>
         <div className={styles.officialCasePolicy}>
           <div>
-            <strong>只用于检索、类案比较和测试题设计</strong>
-            <p>当前目录只保存官方页面元数据。案例不会自动成为法源、裁判依据、案件事实或利息结论；律师阅读全文、核对时效与取得案内使用许可前，不能进入正式规则包。</p>
+            <strong>用于检索和类案比较，不替代本案法律判断</strong>
+            <p>这里仅保存官方页面索引。类案不会自动成为本案依据、案件事实或利息结论；律师须阅读全文、核对现行效力和本案使用条件后，方可作为研判参考。</p>
           </div>
           <nav aria-label="官方案例库规则">
             {officialCasePolicyLinks.map((link) => <a href={link.url} key={link.url} rel="noreferrer" target="_blank">{link.label}</a>)}
@@ -521,7 +522,7 @@ export function LegalWorkbench() {
               <div className={styles.officialCaseBody}>
                 <div className={styles.officialCaseTitleLine}>
                   <strong>{candidate.title}</strong>
-                  <span>需律师阅读全文</span>
+                  <span>需律师阅读全文并结合本案判断</span>
                 </div>
                 <div className={styles.officialCaseTags} aria-label="争点标签">
                   {candidate.issueTags.map((tag) => <span key={tag}>{tag}</span>)}
@@ -530,9 +531,9 @@ export function LegalWorkbench() {
                 <a href={candidate.officialUrl} rel="noreferrer" target="_blank">打开最高人民法院官方页面</a>
               </div>
               <div className={styles.officialCaseState}>
-                <strong>仅研究线索</strong>
+                <strong>供律师研判</strong>
                 <small>{candidate.acquisitionMode}</small>
-                <small>未进入规则包</small>
+                <small>未作为本案依据</small>
               </div>
             </article>
           ))}
@@ -541,21 +542,21 @@ export function LegalWorkbench() {
 
       <section className={styles.legalPanel} aria-labelledby="official-capture-title">
         <div className={styles.legalPanelHeading}>
-          <div><p className={styles.eyebrow}>抓取与复核层</p><h3 id="official-capture-title">官方法源抓取与律师复核</h3></div>
-          <span>{captureReview ? `${captureReview.sourceLabel} · ${desktopRuntime?.officialSourceCaptureWorkerPhase === "ASSEMBLED" ? "本机抓取服务已就绪" : "本机抓取服务未装配"}` : "正在读取独立抓取状态"}</span>
+          <div><p className={styles.eyebrow}>第二步</p><h3 id="official-capture-title">保存官方原文并完成律师复核</h3></div>
+          <span>{captureReview ? `${captureReview.sourceLabel} · ${desktopRuntime?.officialSourceCaptureWorkerPhase === "ASSEMBLED" ? "本机保存服务已就绪" : "本机保存服务未就绪"}` : "正在读取本次原文核验状态"}</span>
         </div>
         {captureError ? (
           <div className={styles.legalCaptureBlocked} role="alert">
-            <strong>抓取服务未连接</strong>
+            <strong>官方原文保存服务未连接</strong>
             <span>{captureError}</span>
-            <small>法律规则只读页仍可审查；页面没有把开发冒烟或发现链接替代为正式法源。</small>
+            <small>仍可查看已保存资料；系统不会把测试结果或网页链接当作本案已核对的官方原文。</small>
           </div>
         ) : !captureReview ? (
-          <div className={styles.legalEmpty}>正在读取抓取队列、内容哈希和复核记录…</div>
+          <div className={styles.legalEmpty}>正在读取本次官方原文、核对记录和律师复核状态…</div>
         ) : (
           <>
             <div className={captureReview.status === "probe-only" ? styles.legalCaptureProbe : styles.legalCapturePersistent}>
-              <strong>{captureReview.status === "probe-only" ? "仅为开发验证" : `案件版本 ${captureReview.matterVersion}`}</strong>
+              <strong>{captureReview.status === "probe-only" ? "演示资料，不可用于本案" : `案件版本 ${captureReview.matterVersion}`}</strong>
               <span>{captureReview.statusReason}</span>
               {captureReview.snapshotHash && <code>{shortHash(captureReview.snapshotHash)}</code>}
             </div>
@@ -567,7 +568,7 @@ export function LegalWorkbench() {
                   onChange={(event) => setPublicSourceConfirmed(event.target.checked)}
                   type="checkbox"
                 />
-                <span><strong>我确认本次只访问页面列明的公开官方网站</strong><small>请求不会携带案卷、当事人姓名、Cookie、API Key 或律所账号；授权 15 分钟内只尝试一次。</small></span>
+                <span><strong>我确认本次仅保存页面列明的公开官方网站</strong><small>请求不会携带案卷、当事人信息、浏览器登录信息、模型密钥或律所账号；本次授权仅尝试一次。</small></span>
               </label>
             )}
 
@@ -588,15 +589,15 @@ export function LegalWorkbench() {
                         <span className={captureStatusClass(run.status)}>{captureStatusLabel(run.status)}</span>
                       </div>
                       <div className={styles.legalCaptureMeta}>
-                        <a href={run.targetUrl} rel="noreferrer" target="_blank">先打开本次授权的官方原文</a>
-                        <span>尝试 {run.attemptCount} 次</span>
+                        <a href={run.targetUrl} rel="noreferrer" target="_blank">查看本次保存的官方原文</a>
+                        <span>保存尝试 {run.attemptCount} 次</span>
                         <span>{run.contentMediaType ?? "尚无响应媒体类型"}</span>
-                        <span>{run.contentBytes ? formatBytes(run.contentBytes) : "尚无归档字节"}</span>
+                        <span>{run.contentBytes ? formatBytes(run.contentBytes) : "尚未保存原文"}</span>
                       </div>
                       <div className={styles.legalCaptureHashes}>
-                        <code>内容 {run.contentSha256 ? shortHash(run.contentSha256) : "—"}</code>
-                        <code>解析 {run.parsedOutputHash ? shortHash(run.parsedOutputHash) : "—"}</code>
-                        <code>捕获回执 {run.captureVerificationHash ? shortHash(run.captureVerificationHash) : "—"}</code>
+                        <code>原文核对编号 {run.contentSha256 ? shortHash(run.contentSha256) : "—"}</code>
+                        <code>整理记录 {run.parsedOutputHash ? shortHash(run.parsedOutputHash) : "—"}</code>
+                        <code>保存回执 {run.captureVerificationHash ? shortHash(run.captureVerificationHash) : "—"}</code>
                       </div>
                       {run.parsedSummary && <ParsedSummary summary={run.parsedSummary} />}
                       {(run.failureCode || run.staleReason) && (
@@ -605,29 +606,29 @@ export function LegalWorkbench() {
                       {recordedReview ? (
                         <>
                           <div className={`${styles.legalCapturedReview} ${recordedReview.decision === "REJECT" ? styles.legalCapturedReviewRejected : ""}`}>
-                            <strong>{recordedReview.decision === "REJECT" ? "律师已驳回" : registeredSource ? "已登记为正式法源快照" : "律师已批准进入登记步骤"}</strong>
+                            <strong>{recordedReview.decision === "REJECT" ? "律师未采纳本次原文" : registeredSource ? "已保存为本案可用官方原文" : "律师已同意保存到本案"}</strong>
                             <span>{recordedReview.provisionLocator}</span>
-                            <code>{registeredSource?.contentSha256 ? `正式内容 ${shortHash(registeredSource.contentSha256)}` : `复核 ${shortHash(recordedReview.reviewHash)}`}</code>
+                            <code>{registeredSource?.contentSha256 ? `原文核对编号 ${shortHash(registeredSource.contentSha256)}` : `复核记录 ${shortHash(recordedReview.reviewHash)}`}</code>
                           </div>
                           {recordedReview.decision === "APPROVE_FOR_REGISTRATION" && !registeredSource && captureReview.status === "persistent" && (
                             <div className={styles.legalRegistrationActions}>
-                              <label htmlFor={`license-${run.runId}`}>公开访问与案内使用依据</label>
+                              <label htmlFor={`license-${run.runId}`}>本案保存和使用依据</label>
                               <textarea
                                 id={`license-${run.runId}`}
                                 onChange={(event) => setLicenseBases((prior) => ({ ...prior, [run.runId]: event.target.value }))}
-                                placeholder="记录官方网站公开访问、加密保存范围、律所内部研究/诉讼引用用途及禁止再分发等核验结论"
+                                placeholder="记录公开访问、保存范围、本案研判或诉讼引用用途及禁止再分发等核对结论"
                                 value={licenseBases[run.runId] ?? ""}
                               />
                               <button disabled={captureBusy !== null} onClick={() => registerCapture(run, recordedReview.reviewHash)} type="button">
-                                {captureBusy === `register:${run.runId}` ? "正在核验并登记…" : "登记为正式法源快照"}
+                                {captureBusy === `register:${run.runId}` ? "正在核对并保存…" : "保存为本案官方原文"}
                               </button>
-                              <small>系统会重新解密并核对原字节哈希；登记后仍不会自动建立规则、选取 LPR 或启动计算。</small>
+                              <small>系统会再次核对原文；保存后仍不会自动确定适用口径、选取 LPR 或开始利息测算。</small>
                             </div>
                           )}
                         </>
                       ) : run.status === "REVIEW_REQUIRED" && captureReview.status === "persistent" ? (
                         <div className={styles.legalReviewActions}>
-                          <label htmlFor={`locator-${run.runId}`}>官方原文定位</label>
+                          <label htmlFor={`locator-${run.runId}`}>本案使用的条文或数据位置</label>
                           <input
                             id={`locator-${run.runId}`}
                             onChange={(event) => setProvisionLocators((prior) => ({ ...prior, [run.runId]: event.target.value }))}
@@ -635,17 +636,17 @@ export function LegalWorkbench() {
                             value={provisionLocators[run.runId] ?? ""}
                           />
                           <div>
-                            <button disabled={captureBusy !== null} onClick={() => recordCaptureReview(run, "REJECT")} type="button">驳回本次结果</button>
-                            <button disabled={captureBusy !== null} onClick={() => recordCaptureReview(run, "APPROVE_FOR_REGISTRATION")} type="button">批准进入登记步骤</button>
+                            <button disabled={captureBusy !== null} onClick={() => recordCaptureReview(run, "REJECT")} type="button">不采纳本次原文</button>
+                            <button disabled={captureBusy !== null} onClick={() => recordCaptureReview(run, "APPROVE_FOR_REGISTRATION")} type="button">确认可保存到本案</button>
                           </div>
-                          <small>批准只记录律师复核结论，不会自动登记规则、选择适用利率或启动利息计算。</small>
+                          <small>确认只保存律师复核结论，不会自动确定适用口径、利率或启动利息测算。</small>
                         </div>
                       ) : null}
                     </article>
                   );
                 })}
               </div>
-            ) : <div className={styles.legalEmpty}>尚无抓取运行。先勾选公开网络授权，再从上方来源清单选择具体官方原文。</div>}
+            ) : <div className={styles.legalEmpty}>尚未保存官方原文。先确认公开网络访问范围，再从上方清单选择需要核对的具体原文。</div>}
 
             {captureNotice && <div className={styles.legalCaptureNotice} role="status">{captureNotice}</div>}
           </>
@@ -654,62 +655,62 @@ export function LegalWorkbench() {
 
       <section className={styles.legalPanel} aria-labelledby="rule-versions-title">
         <div className={styles.legalPanelHeading}>
-          <div><p className={styles.eyebrow}>规则层</p><h3 id="rule-versions-title">规则版本与案件事实锚点</h3></div>
-          <span>{review.status === "reviewable" ? "写入动作受案件版本与律师确认约束" : "发现模式不允许写入"}</span>
+          <div><p className={styles.eyebrow}>第三步</p><h3 id="rule-versions-title">确认利息适用口径与本案事实</h3></div>
+          <span>{review.status === "reviewable" ? "所有确认均需对应当前案件资料和律师判断" : "请先建立本案适用依据"}</span>
         </div>
         {review.status === "reviewable" && (
           <form className={styles.legalFactBindingForm} onSubmit={(event) => { event.preventDefault(); void bindLegalFact(); }}>
-            <div><strong>建立规则所需事实锚点</strong><small>先在“事实与争点”确认事实；此处只把规则键绑定到同案已确认事实，不生成事实或法律结论。</small></div>
-            <label><span>规则事实键</span><input required value={factBinding.factKey} onChange={(event) => setFactBinding((prior) => ({ ...prior, factKey: event.target.value }))} placeholder="例如 contract_before_2020_08_20" /></label>
+            <div><strong>关联适用依据所需事实</strong><small>先在“案件要点”确认事实；这里仅将适用条件关联到本案事实，不生成事实或法律结论。</small></div>
+            <label><span>适用条件</span><input required value={factBinding.factKey} onChange={(event) => setFactBinding((prior) => ({ ...prior, factKey: event.target.value }))} placeholder="例如：合同订立于 2020年8月20日前" /></label>
             <label><span>已确认案件事实</span><select required value={factBinding.factId} onChange={(event) => setFactBinding((prior) => ({ ...prior, factId: event.target.value }))}><option value="">选择同案已确认事实</option>{confirmedFacts.map((fact) => <option key={fact.factId} value={fact.factId}>{fact.text}</option>)}</select></label>
-            <label className={styles.legalFactBindingCheck}><input checked={factBinding.approved} onChange={(event) => setFactBinding((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该事实已被审阅，并且确实是本规则适用所需的同案事实。</span></label>
-            <button disabled={bindingBusy || !confirmedFacts.length} type="submit">{bindingBusy ? "正在绑定…" : "建立事实锚点"}</button>
+            <label className={styles.legalFactBindingCheck}><input checked={factBinding.approved} onChange={(event) => setFactBinding((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认该事实已审阅，且确实是本案适用此项依据所需的事实。</span></label>
+            <button disabled={bindingBusy || !confirmedFacts.length} type="submit">{bindingBusy ? "正在关联…" : "关联本案事实"}</button>
             {bindingNotice && <p role="status">{bindingNotice}</p>}
           </form>
         )}
         {review.status === "reviewable" && (
           <form className={styles.legalEventForm} onSubmit={(event) => { event.preventDefault(); void approveLegalEvent(); }}>
-            <div><strong>建立案件法律事件</strong><small>事件日期不从文件时间自动推定；必须选择已纳入本案的证据页。</small></div>
+            <div><strong>确认关键日期及对应证据</strong><small>日期不会从文件时间自动推定；必须选择已纳入本案的证据页。</small></div>
             <label><span>事件类型</span><select value={legalEvent.eventKind} onChange={(event) => setLegalEvent((prior) => ({ ...prior, eventKind: event.target.value as typeof prior.eventKind }))}>{["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"].map((item) => <option key={item} value={item}>{eventLabel(item)}</option>)}</select></label>
-            <label><span>法律事件日期</span><input required type="date" value={legalEvent.localDate} onChange={(event) => setLegalEvent((prior) => ({ ...prior, localDate: event.target.value }))} /></label>
+            <label><span>关键日期</span><input required type="date" value={legalEvent.localDate} onChange={(event) => setLegalEvent((prior) => ({ ...prior, localDate: event.target.value }))} /></label>
             <fieldset><legend>已纳入本案的证据页</legend>{includedEvidencePages.length ? includedEvidencePages.map((page) => <label key={page.pageId}><input checked={legalEvent.evidenceIds.includes(page.pageId)} onChange={(event) => setLegalEvent((prior) => ({ ...prior, evidenceIds: event.target.checked ? [...prior.evidenceIds, page.pageId] : prior.evidenceIds.filter((item) => item !== page.pageId) }))} type="checkbox" />{page.originalLabel} · 第 {page.pageNumber} 页</label>) : <small>当前页没有已纳入的证据页；请先在证据核验台完成页面取舍。</small>}</fieldset>
             <label className={styles.legalEventCheck}><input checked={legalEvent.approved} onChange={(event) => setLegalEvent((prior) => ({ ...prior, approved: event.target.checked }))} type="checkbox" /><span>我确认事件日期、类型与所选证据页的关联已经核对。</span></label>
-            <button disabled={eventBusy || !includedEvidencePages.length} type="submit">{eventBusy ? "正在建立…" : "批准法律事件"}</button>
+            <button disabled={eventBusy || !includedEvidencePages.length} type="submit">{eventBusy ? "正在确认…" : "确认关键日期"}</button>
             {eventNotice && <p role="status">{eventNotice}</p>}
           </form>
         )}
         {review.status === "reviewable" && (
           <form className={styles.lprRuleForm} onSubmit={(event) => { event.preventDefault(); void approveLprRule(); }}>
             <div className={styles.lprRuleFormHeading}>
-              <div><strong>建立 LPR 倍数规则</strong><small>仅用于已完成法源登记的案件；这不是利息结论，也不会启动计算。</small></div>
-              <span>基准利率：系统从官方记录读取</span>
+              <div><strong>确认 LPR 利息口径</strong><small>仅用于已完成官方原文核对的案件；这不是利息结论，也不会自动开始测算。</small></div>
+              <span>基准利率仅从官方记录读取</span>
             </div>
             <div className={styles.lprRuleFields}>
-              <label><span>规则标识</span><input required value={lprRule.ruleId} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleId: event.target.value }))} placeholder="例如 private-lending-lpr-cap" /></label>
-              <label><span>规则版本</span><input required value={lprRule.ruleVersion} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleVersion: event.target.value }))} placeholder="例如 PRIVATE-LENDING-LPR-2020-08" /></label>
-              <label><span>争点标识</span><input required value={lprRule.issueKey} onChange={(event) => setLprRule((prior) => ({ ...prior, issueKey: event.target.value }))} placeholder="例如 interest_cap_after_2020_08_20" /></label>
-              <label><span>法律公式依据</span><select required value={lprRule.sourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, sourceSnapshotId: event.target.value }))}><option value="">选择已核验法律/司法解释快照</option>{legalFormulaSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {source.provisionLocator}</option>)}</select></label>
-              <label><span>官方 LPR 数据快照</span><select required value={lprRule.parameterSourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterSourceSnapshotId: event.target.value }))}><option value="">选择已登记中国货币网快照</option>{lprParameterSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {shortHash(source.contentSha256 ?? "")}</option>)}</select></label>
-              <label><span>官方记录精确定位</span><input required value={lprRule.parameterEvidenceLocator} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterEvidenceLocator: event.target.value }))} placeholder="例如 records[0]；必须与该快照匹配" /></label>
+              <label><span>口径编号</span><input required value={lprRule.ruleId} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleId: event.target.value }))} placeholder="例如：民间借贷 LPR 上限" /></label>
+              <label><span>口径版本</span><input required value={lprRule.ruleVersion} onChange={(event) => setLprRule((prior) => ({ ...prior, ruleVersion: event.target.value }))} placeholder="例如：2020年8月起适用" /></label>
+              <label><span>对应争点</span><input required value={lprRule.issueKey} onChange={(event) => setLprRule((prior) => ({ ...prior, issueKey: event.target.value }))} placeholder="例如：2020年8月20日后利息上限" /></label>
+              <label><span>法律依据</span><select required value={lprRule.sourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, sourceSnapshotId: event.target.value }))}><option value="">选择已核对的法律或司法解释</option>{legalFormulaSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {source.provisionLocator}</option>)}</select></label>
+              <label><span>官方 LPR 资料</span><select required value={lprRule.parameterSourceSnapshotId} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterSourceSnapshotId: event.target.value }))}><option value="">选择已保存的中国货币网资料</option>{lprParameterSources.map((source) => <option key={source.snapshotId} value={source.snapshotId!}>{source.publisher} · {shortHash(source.contentSha256 ?? "")}</option>)}</select></label>
+              <label><span>官方记录位置</span><input required value={lprRule.parameterEvidenceLocator} onChange={(event) => setLprRule((prior) => ({ ...prior, parameterEvidenceLocator: event.target.value }))} placeholder="例如：对应期间的一年期 LPR 记录" /></label>
               <label><span>生效起日</span><input required type="date" value={lprRule.effectiveFrom} onChange={(event) => setLprRule((prior) => ({ ...prior, effectiveFrom: event.target.value }))} /></label>
               <label><span>生效止日（可空）</span><input type="date" value={lprRule.effectiveTo} onChange={(event) => setLprRule((prior) => ({ ...prior, effectiveTo: event.target.value }))} /></label>
-              <label><span>适用触发事件</span><select value={lprRule.triggerEventKind} onChange={(event) => setLprRule((prior) => ({ ...prior, triggerEventKind: event.target.value as typeof prior.triggerEventKind }))}>{["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"].map((item) => <option key={item} value={item}>{eventLabel(item)}</option>)}</select></label>
+              <label><span>适用起点</span><select value={lprRule.triggerEventKind} onChange={(event) => setLprRule((prior) => ({ ...prior, triggerEventKind: event.target.value as typeof prior.triggerEventKind }))}>{["CONTRACT_SIGNED", "DISBURSEMENT", "PAYMENT", "DEFAULT", "CLAIM_FILED", "CASE_ACCEPTED", "JUDGMENT"].map((item) => <option key={item} value={item}>{eventLabel(item)}</option>)}</select></label>
               <label><span>LPR 倍数</span><input required inputMode="decimal" value={lprRule.rateMultiplier} onChange={(event) => setLprRule((prior) => ({ ...prior, rateMultiplier: event.target.value }))} /><small>只输入倍数；没有基准利率输入框。</small></label>
-              <label><span>冲突集合（可空）</span><input value={lprRule.conflictSet} onChange={(event) => setLprRule((prior) => ({ ...prior, conflictSet: event.target.value }))} placeholder="例如 private-lending-interest-cap" /></label>
-              <label><span>优先级</span><input required inputMode="numeric" value={lprRule.priority} onChange={(event) => setLprRule((prior) => ({ ...prior, priority: event.target.value }))} /></label>
+              <label><span>不并用口径组（可空）</span><input value={lprRule.conflictSet} onChange={(event) => setLprRule((prior) => ({ ...prior, conflictSet: event.target.value }))} placeholder="例如：民间借贷利息上限" /></label>
+              <label><span>适用顺序</span><input required inputMode="numeric" value={lprRule.priority} onChange={(event) => setLprRule((prior) => ({ ...prior, priority: event.target.value }))} /></label>
             </div>
             <fieldset className={styles.lprFactKeys}>
-              <legend>规则所需事实锚点</legend>
-              {availableFactKeys.length ? availableFactKeys.map((factKey) => <label key={factKey}><input type="checkbox" checked={lprRule.requiredFactKeys.includes(factKey)} onChange={(event) => setLprRule((prior) => ({ ...prior, requiredFactKeys: event.target.checked ? [...prior.requiredFactKeys, factKey] : prior.requiredFactKeys.filter((item) => item !== factKey) }))} />{factKey}</label>) : <small>没有已批准事实锚点，不能建立正式规则。</small>}
+              <legend>本项口径需要的已确认事实</legend>
+              {availableFactKeys.length ? availableFactKeys.map((factKey) => <label key={factKey}><input type="checkbox" checked={lprRule.requiredFactKeys.includes(factKey)} onChange={(event) => setLprRule((prior) => ({ ...prior, requiredFactKeys: event.target.checked ? [...prior.requiredFactKeys, factKey] : prior.requiredFactKeys.filter((item) => item !== factKey) }))} />{factKey}</label>) : <small>尚未关联适用所需事实，不能确认本项口径。</small>}
             </fieldset>
-            <label className={styles.lprApprovalCheck}><input checked={ruleApproved} onChange={(event) => setRuleApproved(event.target.checked)} type="checkbox" /><span>我确认：本次只批准规则结构、法律依据快照、官方 LPR 快照、定位与倍数；系统将从认证的官方观察记录读取一年期 LPR，且不接受人工利率。</span></label>
-            <div className={styles.lprRuleActions}><button disabled={ruleBusy || !legalFormulaSources.length || !lprParameterSources.length || !availableFactKeys.length} type="submit">{ruleBusy ? "正在提交规则审批…" : "批准 LPR 规则"}</button><small>任一快照、许可、定位、事实锚点或案件版本不匹配，服务端会拒绝写入。</small></div>
+            <label className={styles.lprApprovalCheck}><input checked={ruleApproved} onChange={(event) => setRuleApproved(event.target.checked)} type="checkbox" /><span>我确认：本次仅确认利息口径、法律依据、官方 LPR 资料、记录位置和倍数；系统从已核验官方记录读取一年期 LPR，不接受人工利率。</span></label>
+            <div className={styles.lprRuleActions}><button disabled={ruleBusy || !legalFormulaSources.length || !lprParameterSources.length || !availableFactKeys.length} type="submit">{ruleBusy ? "正在确认口径…" : "确认 LPR 利息口径"}</button><small>官方原文、使用依据、记录位置、关联事实或案件资料不一致时，系统不会保存本项口径。</small></div>
             {ruleNotice && <p className={styles.lprRuleNotice} role="status">{ruleNotice}</p>}
           </form>
         )}
         {review.ruleVersions.length ? (
-          <div className={styles.legalRuleTable} role="table" aria-label="法律规则版本">
-            <div className={`${styles.legalRuleRow} ${styles.legalRuleHead}`} role="row"><span>争点 / 版本</span><span>触发事件</span><span>公式</span><span>服务端年利率</span><span>所需事实</span></div>
+          <div className={styles.legalRuleTable} role="table" aria-label="利息适用口径">
+            <div className={`${styles.legalRuleRow} ${styles.legalRuleHead}`} role="row"><span>争点 / 口径</span><span>适用起点</span><span>计算方式</span><span>年利率</span><span>所需事实</span></div>
             {review.ruleVersions.map((rule) => (
               <div className={styles.legalRuleRow} role="row" key={rule.ruleVersionId}>
                 <span><strong>{rule.issueKey}</strong><small>{rule.ruleVersion}</small></span>
@@ -720,36 +721,36 @@ export function LegalWorkbench() {
               </div>
             ))}
           </div>
-        ) : <div className={styles.legalEmpty}>当前没有可批准的规则版本。来源发现记录不会被当作规则使用。</div>}
+        ) : <div className={styles.legalEmpty}>当前没有可确认的利息口径。仅发现到的网页或类案不会被当作本案依据。</div>}
 
         <div className={styles.legalAnchors}>
-          <div><strong>已批准法律事件</strong><span>{review.legalEvents.length} 项</span><small>{review.legalEvents.map((item) => `${eventLabel(item.eventKind)} ${item.localDate}`).join("；") || "尚未建立"}</small></div>
-          <div><strong>已绑定关键事实</strong><span>{approvedBindings} 项</span><small>{review.factBindings.filter((item) => item.status === "APPROVED").map((item) => item.factKey).join("；") || "尚未建立"}</small></div>
+          <div><strong>已确认关键日期</strong><span>{review.legalEvents.length} 项</span><small>{review.legalEvents.map((item) => `${eventLabel(item.eventKind)} ${item.localDate}`).join("；") || "尚未建立"}</small></div>
+          <div><strong>已关联关键事实</strong><span>{approvedBindings} 项</span><small>{review.factBindings.filter((item) => item.status === "APPROVED").map((item) => item.factKey).join("；") || "尚未建立"}</small></div>
         </div>
       </section>
 
       <section className={styles.legalPanel} aria-labelledby="legal-bundle-title">
         <div className={styles.legalPanelHeading}>
-          <div><p className={styles.eyebrow}>计算入口</p><h3 id="legal-bundle-title">当前案件法律规则包</h3></div>
-          <span>{review.currentBundle ? `哈希 ${shortHash(review.currentBundle.bundleHash)}` : "未批准"}</span>
+          <div><p className={styles.eyebrow}>第四步</p><h3 id="legal-bundle-title">确认本案利息适用期间</h3></div>
+          <span>{review.currentBundle ? `核对编号 ${shortHash(review.currentBundle.bundleHash)}` : "尚未确认"}</span>
         </div>
         {review.status === "reviewable" && (
           <form className={styles.legalBundleForm} onSubmit={(event) => { event.preventDefault(); void approveRuleBundle(); }}>
-            <div className={styles.legalBundleFormHeading}><div><strong>批准连续案件规则包</strong><small>每一段选择已批准规则及其匹配的法律事件；系统会再次校验规则生效期、事实锚点、来源许可和连续性。</small></div><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="button" onClick={() => setBundleSegments((prior) => [...prior, newBundleSegment()])}>添加规则期间</button></div>
+            <div className={styles.legalBundleFormHeading}><div><strong>确认连续适用期间</strong><small>每一期间选择已确认口径及其对应的关键日期；系统会再次核对口径效力、关联事实、原文使用依据和期间连续性。</small></div><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="button" onClick={() => setBundleSegments((prior) => [...prior, newBundleSegment()])}>添加适用期间</button></div>
             <div className={styles.legalBundleSegments}>
               {bundleSegments.map((segment, index) => (
                 <article key={segment.segmentId}>
                   <span>{String(index + 1).padStart(2, "0")}</span>
-                  <label><span>规则版本</span><select required value={segment.ruleVersionId} onChange={(event) => { const rule = approvedRuleVersions.find((item) => item.ruleVersionId === event.target.value); updateBundleSegment(segment.segmentId, { ruleVersionId: event.target.value, issueKey: rule?.issueKey ?? "" }); }}><option value="">选择已批准规则</option>{approvedRuleVersions.map((rule) => <option key={rule.ruleVersionId} value={rule.ruleVersionId}>{rule.issueKey} · {rule.ruleVersion}</option>)}</select></label>
-                  <label><span>触发法律事件</span><select required value={segment.triggerEventId} onChange={(event) => updateBundleSegment(segment.segmentId, { triggerEventId: event.target.value })}><option value="">选择已批准事件</option>{approvedLegalEvents.map((legalEvent) => <option key={legalEvent.legalEventId} value={legalEvent.legalEventId}>{eventLabel(legalEvent.eventKind)} · {legalEvent.localDate}</option>)}</select></label>
+                  <label><span>利息口径</span><select required value={segment.ruleVersionId} onChange={(event) => { const rule = approvedRuleVersions.find((item) => item.ruleVersionId === event.target.value); updateBundleSegment(segment.segmentId, { ruleVersionId: event.target.value, issueKey: rule?.issueKey ?? "" }); }}><option value="">选择已确认口径</option>{approvedRuleVersions.map((rule) => <option key={rule.ruleVersionId} value={rule.ruleVersionId}>{rule.issueKey} · {rule.ruleVersion}</option>)}</select></label>
+                  <label><span>对应关键日期</span><select required value={segment.triggerEventId} onChange={(event) => updateBundleSegment(segment.segmentId, { triggerEventId: event.target.value })}><option value="">选择已确认日期</option>{approvedLegalEvents.map((legalEvent) => <option key={legalEvent.legalEventId} value={legalEvent.legalEventId}>{eventLabel(legalEvent.eventKind)} · {legalEvent.localDate}</option>)}</select></label>
                   <label><span>开始 / 结束</span><div><input required type="date" value={segment.startDate} onChange={(event) => updateBundleSegment(segment.segmentId, { startDate: event.target.value })} /><input required type="date" value={segment.endDate} onChange={(event) => updateBundleSegment(segment.segmentId, { endDate: event.target.value })} /></div></label>
-                  <label><span>适用锚点</span><input required value={segment.applicabilityAnchor} onChange={(event) => updateBundleSegment(segment.segmentId, { applicabilityAnchor: event.target.value })} placeholder="例如 起诉时司法保护标准" /></label>
-                  <button aria-label={`移除第 ${index + 1} 个规则期间`} disabled={bundleBusy || bundleSegments.length === 1} type="button" onClick={() => setBundleSegments((prior) => prior.filter((item) => item.segmentId !== segment.segmentId))}>移除</button>
+                  <label><span>适用说明</span><input required value={segment.applicabilityAnchor} onChange={(event) => updateBundleSegment(segment.segmentId, { applicabilityAnchor: event.target.value })} placeholder="例如：起诉时的司法保护标准" /></label>
+                  <button aria-label={`移除第 ${index + 1} 个适用期间`} disabled={bundleBusy || bundleSegments.length === 1} type="button" onClick={() => setBundleSegments((prior) => prior.filter((item) => item.segmentId !== segment.segmentId))}>移除</button>
                 </article>
               ))}
             </div>
-            <label className={styles.legalBundleCheck}><input checked={bundleApproved} onChange={(event) => setBundleApproved(event.target.checked)} type="checkbox" /><span>我确认每一期间连续无空档、触发事件与规则匹配，且已审查对应法律依据、事实锚点和官方利率参数来源。</span></label>
-            <div className={styles.legalBundleActions}><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="submit">{bundleBusy ? "正在批准规则包…" : "批准案件规则包"}</button><small>提交后旧批准规则包与依赖计算自动转为失效，不能继续作为当前提交依据。</small></div>
+            <label className={styles.legalBundleCheck}><input checked={bundleApproved} onChange={(event) => setBundleApproved(event.target.checked)} type="checkbox" /><span>我确认每一期间连续无空档、关键日期与利息口径相符，且已核对相应法律依据、本案事实和官方利率资料。</span></label>
+            <div className={styles.legalBundleActions}><button disabled={bundleBusy || !approvedRuleVersions.length || !approvedLegalEvents.length} type="submit">{bundleBusy ? "正在确认适用期间…" : "确认本案适用期间"}</button><small>确认后，如案件资料或利息口径发生变化，原测算不能继续作为当前提交依据。</small></div>
             {bundleNotice && <p className={styles.legalBundleNotice} role="status">{bundleNotice}</p>}
           </form>
         )}
@@ -763,7 +764,7 @@ export function LegalWorkbench() {
               </article>
             ))}
           </div>
-        ) : <div className={styles.legalEmpty}>尚无经律师批准的连续规则分段，正式利息计算保持阻断。</div>}
+        ) : <div className={styles.legalEmpty}>尚无经律师确认的连续适用期间，暂不能开始正式利息测算。</div>}
       </section>
     </section>
   );
@@ -851,13 +852,13 @@ function officialCaptureTargets(sourceId: string, defaultUrl: string) {
 
 function captureStatusLabel(status: string) {
   const labels: Record<string, string> = {
-    QUEUED: "等待本机抓取",
-    RUNNING: "正在抓取",
+    QUEUED: "等待保存原文",
+    RUNNING: "正在保存原文",
     REVIEW_REQUIRED: "待律师复核",
-    FAILED: "抓取失败",
+    FAILED: "原文保存失败",
     STALE: "已失效",
-    PROBE_CAPTURE_AND_PARSE_OK: "开发冒烟通过",
-    PROBE_FAILED: "开发冒烟未通过",
+    PROBE_CAPTURE_AND_PARSE_OK: "演示验证已完成",
+    PROBE_FAILED: "演示验证未完成",
   };
   return labels[status] ?? status;
 }
@@ -897,7 +898,7 @@ function summaryLabel(value: string) {
 function displaySummaryValue(value: unknown): string {
   if (value === null || value === undefined) return "—";
   if (Array.isArray(value)) return value.map((item) => String(item)).join("、").slice(0, 240);
-  if (typeof value === "object") return "结构化解析记录（展开功能待接入）";
+  if (typeof value === "object") return "已整理的原文记录（详情待提供）";
   return String(value).slice(0, 240);
 }
 

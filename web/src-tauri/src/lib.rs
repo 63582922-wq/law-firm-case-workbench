@@ -1,6 +1,6 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 const LOCAL_API_PROTOCOL: &str = "lawcase-local-api-v1";
 const MAX_ENROLLMENT_PACKAGE_BYTES: u64 = 16_384;
 const MAX_LOCAL_API_RESPONSE_BYTES: u64 = 65_536;
+const MAX_CASE_PLAN_STATE_COUNT: u64 = 1_000_000;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +39,8 @@ struct DesktopRuntimeStatus {
     persistence_phase: String,
     evidence_intake_worker_phase: String,
     official_source_capture_worker_phase: String,
+    workspace_mode: String,
+    local_workspace_phase: String,
 }
 
 struct LocalApiState {
@@ -54,6 +57,8 @@ struct LocalApiState {
     persistence_phase: String,
     evidence_intake_worker_phase: String,
     official_source_capture_worker_phase: String,
+    workspace_mode: String,
+    local_workspace_phase: String,
     api_port: Option<u16>,
     parent_api_token: Option<Zeroizing<String>>,
     child: Option<CommandChild>,
@@ -75,6 +80,8 @@ impl Default for LocalApiState {
             persistence_phase: "UNKNOWN".to_string(),
             evidence_intake_worker_phase: "UNKNOWN".to_string(),
             official_source_capture_worker_phase: "UNKNOWN".to_string(),
+            workspace_mode: "UNAVAILABLE".to_string(),
+            local_workspace_phase: "UNKNOWN".to_string(),
             api_port: None,
             parent_api_token: None,
             child: None,
@@ -101,6 +108,125 @@ struct LocalApiReady {
     agent_draft_executor: String,
     evidence_intake_worker: String,
     official_source_capture_worker: String,
+    workspace_mode: String,
+    local_workspace: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalCaseFolderSelection {
+    selection_id: String,
+    display_name: String,
+    root_fingerprint: String,
+    selected_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalCaseMaterialRoot {
+    display_name: String,
+    root_fingerprint: String,
+    linked_at: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalCaseInventory {
+    scan_id: String,
+    root_fingerprint: String,
+    manifest_hash: String,
+    scanned_at: String,
+    total_files: u64,
+    total_bytes: u64,
+    skipped_symlinks: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalCaseSummary {
+    case_id: String,
+    title: String,
+    stage: String,
+    matter_version: u64,
+    material_root: LocalCaseMaterialRoot,
+    inventory: Option<LocalCaseInventory>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLocalFolderSelectionResponse {
+    selection_id: String,
+    display_name: String,
+    root_fingerprint: String,
+    selected_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLocalMaterialRootResponse {
+    display_name: String,
+    root_fingerprint: String,
+    linked_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLocalInventoryResponse {
+    scan_id: String,
+    root_fingerprint: String,
+    manifest_hash: String,
+    scanned_at: String,
+    total_files: u64,
+    total_bytes: u64,
+    skipped_symlinks: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLocalCaseResponse {
+    case_id: String,
+    title: String,
+    stage: String,
+    matter_version: u64,
+    material_root: NativeLocalMaterialRootResponse,
+    inventory: Option<NativeLocalInventoryResponse>,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeLocalCaseListResponse {
+    cases: Vec<NativeLocalCaseResponse>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CreateLocalCaseInput {
+    title: String,
+    selection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct OpenLocalCaseInput {
+    case_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReconnectLocalCaseFolderInput {
+    case_id: String,
+    selection_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InventoryLocalCaseFolderInput {
+    case_id: String,
+    selection_id: String,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +324,86 @@ struct AuthorizedQwenOcrResult {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AuthorizedDeepSeekPlanInput {
+    matter_id: String,
+    external_request_id: String,
+    expected_version: u64,
+    task_kind: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizedDeepSeekPlanResult {
+    run_id: String,
+    matter_version: u64,
+    proposal_count: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeCasePlanInputEnvelope {
+    matter_version: u64,
+    projection: String,
+    projection_hash: String,
+    policy_manifest_hash: String,
+    allowed_skill_tools: Vec<NativeSkillTool>,
+}
+
+/// The native boundary independently recognises the only safe model input
+/// shape.  It is intentionally facts-free: adding a name, amount, date,
+/// source snippet, file path, or arbitrary field makes decoding fail before
+/// any model request can be assembled.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePlanMinimalProjection {
+    projection_version: String,
+    matter: CasePlanMatterState,
+    review_counts: CasePlanReviewCounts,
+    claim_states: Vec<CasePlanClaimState>,
+    issue_states: Vec<CasePlanIssueState>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePlanMatterState {
+    stage: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePlanReviewCounts {
+    facts: u64,
+    candidate_facts: u64,
+    transactions: u64,
+    claims: u64,
+    issues: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePlanClaimState {
+    status: String,
+    has_response: bool,
+    response_position: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CasePlanIssueState {
+    status: String,
+    claim_count: u64,
+    fact_count: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSkillTool {
+    skill_id: String,
+    tool_id: String,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NativeCaseReceipt {
     matter_version: u64,
@@ -218,6 +424,8 @@ fn snapshot_runtime(runtime: &LocalApiRuntime) -> DesktopRuntimeStatus {
         persistence_phase: state.persistence_phase.clone(),
         evidence_intake_worker_phase: state.evidence_intake_worker_phase.clone(),
         official_source_capture_worker_phase: state.official_source_capture_worker_phase.clone(),
+        workspace_mode: state.workspace_mode.clone(),
+        local_workspace_phase: state.local_workspace_phase.clone(),
     }
 }
 
@@ -237,6 +445,8 @@ fn mark_runtime_blocked(runtime: &LocalApiRuntime, message: &str) {
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
         state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
+        state.workspace_mode = "UNAVAILABLE".to_string();
+        state.local_workspace_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()
@@ -260,13 +470,21 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         || ready.challenge_sha256 != expected_digest
         || !matches!(
             ready.identity.as_str(),
-            "NOT_ENROLLED" | "BLOCKED" | "ENROLLED"
+            "NOT_ENROLLED" | "BLOCKED" | "ENROLLED" | "LOCAL"
         )
         || !matches!(
             ready.enrollment_trust.as_str(),
             "NOT_CONFIGURED" | "BLOCKED" | "READY"
         )
-        || !matches!(ready.persistence.as_str(), "NOT_CONFIGURED" | "CONFIGURED")
+        || !matches!(
+            ready.persistence.as_str(),
+            "NOT_CONFIGURED" | "CONFIGURED" | "LOCAL_CONFIGURED"
+        )
+        || !matches!(
+            ready.workspace_mode.as_str(),
+            "SYNTHETIC_ALPHA" | "FIRM_MANAGED" | "LOCAL_STANDALONE"
+        )
+        || !matches!(ready.local_workspace.as_str(), "NOT_CONFIGURED" | "READY")
         || !matches!(
             ready.agent_draft_executor.as_str(),
             "NOT_CONFIGURED" | "ASSEMBLED"
@@ -281,6 +499,26 @@ fn verify_ready_payload(payload: &[u8], challenge: &str) -> Result<LocalApiReady
         )
     {
         return Err("本机服务未通过父进程绑定核验。".to_string());
+    }
+    let local_standalone = ready.workspace_mode == "LOCAL_STANDALONE";
+    if local_standalone {
+        if ready.identity != "LOCAL"
+            || ready.persistence != "LOCAL_CONFIGURED"
+            || ready.local_workspace != "READY"
+            || ready.enrollment_trust != "NOT_CONFIGURED"
+            || ready.agent_draft_executor != "NOT_CONFIGURED"
+            || ready.evidence_intake_worker != "NOT_CONFIGURED"
+            || ready.official_source_capture_worker != "NOT_CONFIGURED"
+        {
+            return Err("本机基础案卷就绪状态不一致。".to_string());
+        }
+    } else if ready.identity == "LOCAL"
+        || ready.persistence == "LOCAL_CONFIGURED"
+        || ready.local_workspace != "NOT_CONFIGURED"
+        || (ready.workspace_mode == "FIRM_MANAGED" && ready.persistence != "CONFIGURED")
+        || (ready.workspace_mode == "SYNTHETIC_ALPHA" && ready.persistence != "NOT_CONFIGURED")
+    {
+        return Err("本机服务运行模式状态不一致。".to_string());
     }
     Ok(ready)
 }
@@ -323,12 +561,16 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                 CommandEvent::Stdout(line) if !ready_received => {
                     match verify_ready_payload(&line, &challenge) {
                         Ok(ready) => {
-                            let should_exchange_session = ready.identity == "ENROLLED";
+                            let should_exchange_session =
+                                matches!(ready.identity.as_str(), "ENROLLED" | "LOCAL");
                             let mut state =
                                 runtime.inner.lock().expect("local API state lock poisoned");
                             state.phase = "READY".to_string();
-                            state.message =
-                                "本机受控服务已就绪；真实案件数据仍保持禁用。".to_string();
+                            state.message = if ready.workspace_mode == "LOCAL_STANDALONE" {
+                                "本机基础案卷已就绪；可新建案件并选择资料文件夹。".to_string()
+                            } else {
+                                "本机受控服务已就绪；真实案件数据仍保持禁用。".to_string()
+                            };
                             state.api_base = Some(format!("http://127.0.0.1:{}", ready.port));
                             state.process_id = Some(process_id);
                             state.identity_phase = ready.identity;
@@ -342,6 +584,8 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                             state.evidence_intake_worker_phase = ready.evidence_intake_worker;
                             state.official_source_capture_worker_phase =
                                 ready.official_source_capture_worker;
+                            state.workspace_mode = ready.workspace_mode;
+                            state.local_workspace_phase = ready.local_workspace;
                             state.api_port = Some(ready.port);
                             drop(state);
                             if should_exchange_session {
@@ -402,6 +646,8 @@ fn start_local_api(app: &AppHandle, runtime: LocalApiRuntime) -> Result<(), Stri
                     state.persistence_phase = "UNAVAILABLE".to_string();
                     state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
                     state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
+                    state.workspace_mode = "UNAVAILABLE".to_string();
+                    state.local_workspace_phase = "UNAVAILABLE".to_string();
                     state.api_port = None;
                     state.parent_api_token = None;
                     state.child = None;
@@ -430,6 +676,8 @@ fn stop_local_api(runtime: &LocalApiRuntime) {
         state.persistence_phase = "UNAVAILABLE".to_string();
         state.evidence_intake_worker_phase = "UNAVAILABLE".to_string();
         state.official_source_capture_worker_phase = "UNAVAILABLE".to_string();
+        state.workspace_mode = "UNAVAILABLE".to_string();
+        state.local_workspace_phase = "UNAVAILABLE".to_string();
         state.api_port = None;
         state.parent_api_token = None;
         state.child.take()
@@ -460,9 +708,12 @@ fn snapshot_desktop_session_grant(
         .map_err(|_| "本机会话状态锁定失败。".to_string())?;
     if state.phase != "READY"
         || state.session_phase != "READY"
-        || state.persistence_phase != "CONFIGURED"
+        || !matches!(
+            state.persistence_phase.as_str(),
+            "CONFIGURED" | "LOCAL_CONFIGURED"
+        )
     {
-        return Err("专用案件数据库和本机会话尚未同时就绪。".to_string());
+        return Err("本机案件工作区和本机会话尚未同时就绪。".to_string());
     }
     let expires_at = state
         .session_expires_at
@@ -547,6 +798,7 @@ async fn execute_authorized_qwen_ocr(
     vault: State<'_, ModelProviderVault>,
 ) -> Result<AuthorizedQwenOcrResult, String> {
     validate_native_ocr_input(&input)?;
+    require_firm_managed_model_runtime(&runtime)?;
     let credentials = vault.load_qwen_ocr_credentials()?;
     let (port, parent_token) = parent_api_channel(&runtime)?;
     let grant = snapshot_desktop_session_grant(&runtime)?;
@@ -712,6 +964,204 @@ async fn execute_authorized_qwen_ocr(
     Ok(AuthorizedQwenOcrResult {
         candidate_id: staged.object_id,
         matter_version: completed.matter_version,
+    })
+}
+
+/// Create a bounded Skill plan after a lawyer has approved exactly one
+/// DeepSeek request.  This command never accepts a free-form prompt, source
+/// material, file path, a tool URL, or a capability outside the server's
+/// current registry.  It only writes a reviewable plan; deterministic tools
+/// remain separately approved and executed later.
+#[tauri::command]
+async fn execute_authorized_deepseek_case_plan(
+    input: AuthorizedDeepSeekPlanInput,
+    runtime: State<'_, LocalApiRuntime>,
+    vault: State<'_, ModelProviderVault>,
+) -> Result<AuthorizedDeepSeekPlanResult, String> {
+    let task_label = fixed_case_plan_task(&input)?;
+    require_firm_managed_model_runtime(&runtime)?;
+    let (port, parent_token) = parent_api_channel(&runtime)?;
+    let grant = snapshot_desktop_session_grant(&runtime)?;
+    let local_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "无法建立本机受控案件计划通道。".to_string())?;
+    let envelope = native_model_json_get::<NativeCasePlanInputEnvelope>(
+        &local_client,
+        port,
+        parent_token.as_str(),
+        &format!(
+            "/v1/native-model/matters/{}/agent-plan-input?desktop_session_id={}&external_request_id={}&expected_version={}",
+            input.matter_id, grant.session_id, input.external_request_id, input.expected_version
+        ),
+        "本机未批准当前案件的外部计划执行；未向模型服务发送任何内容。",
+    )
+    .await?;
+    validate_native_case_plan_envelope(&envelope, input.expected_version)?;
+    // Read the Keychain entry only after the server has verified the exact
+    // lawyer-authorised preflight and supplied the bounded input envelope.
+    let credentials = vault.load_deepseek_planner_credentials()?;
+    let allowed_pairs: Vec<(&str, &str)> = envelope
+        .allowed_skill_tools
+        .iter()
+        .map(|item| (item.skill_id.as_str(), item.tool_id.as_str()))
+        .collect();
+    let prepared = deepseek_planner::prepare_case_plan_request(
+        &credentials,
+        task_label,
+        &envelope.projection,
+        &allowed_pairs,
+    )?;
+    let submission_reference = format!(
+        "native-deepseek-case-plan:{}:{}",
+        input.external_request_id, prepared.request_hash
+    );
+    let started = native_model_json_post(
+        &local_client,
+        port,
+        parent_token.as_str(),
+        &format!(
+            "/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}",
+            input.matter_id, input.external_request_id, grant.session_id
+        ),
+        serde_json::json!({
+            "expected_version": input.expected_version,
+            "status": "SUBMISSION_STARTED",
+            "provider_request_ref_hash": sha256_hex(submission_reference.as_bytes()),
+        }),
+        "无法记录案件计划外发开始；未向模型服务发送任何内容。",
+    )
+    .await?;
+    let model_client = match reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": "DEEPSEEK_CLIENT_SETUP_FAILED"}),
+                "",
+            ).await;
+            return Err("无法建立案件计划模型连接；系统已记录结果，未自动重试。".to_string());
+        }
+    };
+    let model_response = model_client
+        .post(prepared.endpoint)
+        .header(AUTHORIZATION, prepared.authorization.as_str())
+        .header(CONTENT_TYPE, "application/json")
+        .body(prepared.body)
+        .send()
+        .await;
+    let model_response = match model_response {
+        Ok(response) => response,
+        Err(_) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "UNKNOWN_SUBMISSION", "error_code": "DEEPSEEK_TRANSPORT_UNKNOWN"}),
+                "",
+            ).await;
+            return Err(
+                "案件计划请求已发起但未收到可确认回执；系统已标记为待核对，绝不会自动重试。"
+                    .to_string(),
+            );
+        }
+    };
+    if !model_response.status().is_success() {
+        let code = format!("DEEPSEEK_HTTP_{}", model_response.status().as_u16());
+        let _ = native_model_json_post(
+            &local_client, port, parent_token.as_str(),
+            &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+            serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": code}),
+            "",
+        ).await;
+        return Err(
+            "案件计划模型明确拒绝或未完成本次请求；系统已记录结果，未自动重试。".to_string(),
+        );
+    }
+    let response_body = match model_response.bytes().await {
+        Ok(value) if value.len() <= 64 * 1024 => value,
+        _ => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "UNKNOWN_SUBMISSION", "error_code": "DEEPSEEK_RESPONSE_UNKNOWN"}),
+                "",
+            ).await;
+            return Err(
+                "案件计划模型响应读取中断或超出上限；系统已标记为待核对，绝不会自动重试。"
+                    .to_string(),
+            );
+        }
+    };
+    let proposals = match deepseek_planner::parse_case_plan_response(response_body.as_ref()) {
+        Ok(value) if proposals_are_allowlisted(&value, &envelope.allowed_skill_tools) => value,
+        _ => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "FAILED", "error_code": "DEEPSEEK_INVALID_PLAN"}),
+                "",
+            ).await;
+            return Err(
+                "案件计划模型未返回受控 Skill 计划；系统已记录结果，未自动执行任何工具。"
+                    .to_string(),
+            );
+        }
+    };
+    let plan_body = serde_json::json!({
+        "expected_version": started.matter_version,
+        "agent_id": "deepseek-case-planner",
+        "agent_version": "1.0.0",
+        "policy_manifest_hash": envelope.policy_manifest_hash,
+        "input_hash": envelope.projection_hash,
+        "proposals": proposals.iter().enumerate().map(|(index, proposal)| serde_json::json!({
+            "sequence": index + 1,
+            "skill_id": proposal.skill_id,
+            "tool_id": proposal.tool_id,
+            "input_hash": envelope.projection_hash,
+            "rationale_hash": sha256_hex(proposal.rationale.as_bytes()),
+        })).collect::<Vec<_>>(),
+    });
+    let planned = match desktop_session_case_plan_post(
+        &local_client,
+        &grant,
+        &input.matter_id,
+        plan_body,
+        "无法将已返回的案件计划写入受控台账。",
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(message) => {
+            let _ = native_model_json_post(
+                &local_client, port, parent_token.as_str(),
+                &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+                serde_json::json!({"expected_version": started.matter_version, "status": "UNKNOWN_SUBMISSION", "error_code": "CASE_PLAN_LEDGER_UNKNOWN"}),
+                "",
+            ).await;
+            return Err(format!(
+                "{message} 请先在 Agent 执行审计中核对，系统不会自动重试。"
+            ));
+        }
+    };
+    let output_hash = sha256_hex(response_body.as_ref());
+    let completed = native_model_json_post(
+        &local_client, port, parent_token.as_str(),
+        &format!("/v1/native-model/matters/{}/external-requests/{}/attempts?desktop_session_id={}", input.matter_id, input.external_request_id, grant.session_id),
+        serde_json::json!({"expected_version": planned.matter_version, "status": "SUCCEEDED", "output_hash": output_hash}),
+        "案件计划已入账，但无法完成外发审计记账；请在外部调用账本中核对后再处理。",
+    ).await?;
+    Ok(AuthorizedDeepSeekPlanResult {
+        run_id: planned.object_id,
+        matter_version: completed.matter_version,
+        proposal_count: proposals.len(),
     })
 }
 
@@ -1202,6 +1652,194 @@ fn parent_api_channel(runtime: &LocalApiRuntime) -> Result<(u16, Zeroizing<Strin
     Ok((port, Zeroizing::new(token.to_string())))
 }
 
+fn local_standalone_parent_channel(
+    runtime: &LocalApiRuntime,
+) -> Result<(u16, Zeroizing<String>), String> {
+    let state = runtime
+        .inner
+        .lock()
+        .map_err(|_| "本机基础案卷状态锁定失败。".to_string())?;
+    if state.phase != "READY"
+        || state.workspace_mode != "LOCAL_STANDALONE"
+        || state.local_workspace_phase != "READY"
+    {
+        return Err("本机基础案卷尚未就绪；没有读取或保存任何案件资料。".to_string());
+    }
+    let port = state
+        .api_port
+        .ok_or_else(|| "本机基础案卷服务不可用。".to_string())?;
+    let token = state
+        .parent_api_token
+        .as_ref()
+        .ok_or_else(|| "本机基础案卷父进程通道未绑定。".to_string())?;
+    Ok((port, Zeroizing::new(token.to_string())))
+}
+
+fn require_firm_managed_model_runtime(runtime: &LocalApiRuntime) -> Result<(), String> {
+    let state = runtime
+        .inner
+        .lock()
+        .map_err(|_| "本机模型运行状态锁定失败。".to_string())?;
+    if state.phase == "READY" && state.workspace_mode == "FIRM_MANAGED" {
+        return Ok(());
+    }
+    Err("本机基础案卷模式不发送材料或最小快照到外部模型；请在律所受管案件工作区完成预授权后再使用该能力。".to_string())
+}
+
+async fn native_local_json_request<T: DeserializeOwned>(
+    runtime: &LocalApiRuntime,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+    failure: &str,
+) -> Result<T, String> {
+    if !native_local_path_is_allowlisted(path) {
+        return Err("本机基础案卷通道无效。".to_string());
+    }
+    let (port, parent_token) = local_standalone_parent_channel(runtime)?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| failure.to_string())?;
+    let mut request = client
+        .request(method, format!("http://127.0.0.1:{port}{path}"))
+        .header(AUTHORIZATION, format!("Bearer {}", parent_token.as_str()))
+        .header(CONTENT_TYPE, "application/json");
+    if let Some(body) = body {
+        let encoded =
+            serde_json::to_vec(&body).map_err(|_| "本机基础案卷请求内容无效。".to_string())?;
+        if encoded.len() > 8 * 1024 {
+            return Err("本机基础案卷请求超过受控上限。".to_string());
+        }
+        request = request.body(encoded);
+    }
+    let response = request.send().await.map_err(|_| failure.to_string())?;
+    if !response.status().is_success() {
+        return Err(failure.to_string());
+    }
+    let bytes = response.bytes().await.map_err(|_| failure.to_string())?;
+    if bytes.is_empty() || bytes.len() > MAX_LOCAL_API_RESPONSE_BYTES as usize {
+        return Err("本机基础案卷回执超出受控上限。".to_string());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| failure.to_string())
+}
+
+fn native_local_path_is_allowlisted(path: &str) -> bool {
+    if matches!(
+        path,
+        "/v1/native-local/folder-selections" | "/v1/native-local/cases"
+    ) {
+        return true;
+    }
+    let Some(case_id) = path
+        .strip_prefix("/v1/native-local/cases/")
+        .and_then(|value| value.split('/').next())
+    else {
+        return false;
+    };
+    if Uuid::parse_str(case_id).is_err() {
+        return false;
+    }
+    matches!(
+        path,
+        value if value == format!("/v1/native-local/cases/{case_id}")
+            || value == format!("/v1/native-local/cases/{case_id}/material-root")
+            || value == format!("/v1/native-local/cases/{case_id}/folder-inventory")
+    )
+}
+
+fn map_native_local_selection(
+    response: NativeLocalFolderSelectionResponse,
+) -> Result<LocalCaseFolderSelection, String> {
+    if Uuid::parse_str(&response.selection_id).is_err()
+        || response.display_name.is_empty()
+        || response.display_name.len() > 240
+        || !valid_lower_sha256(&response.root_fingerprint)
+        || !valid_local_timestamp(&response.selected_at)
+    {
+        return Err("本机文件夹选择回执无效；未创建案件。".to_string());
+    }
+    Ok(LocalCaseFolderSelection {
+        selection_id: response.selection_id,
+        display_name: response.display_name,
+        root_fingerprint: response.root_fingerprint,
+        selected_at: response.selected_at,
+    })
+}
+
+fn map_native_local_case(response: NativeLocalCaseResponse) -> Result<LocalCaseSummary, String> {
+    if Uuid::parse_str(&response.case_id).is_err()
+        || !(2..=160).contains(&response.title.chars().count())
+        || response
+            .title
+            .chars()
+            .any(|character| character.is_control())
+        || !matches!(
+            response.stage.as_str(),
+            "MATERIALS_PENDING" | "MATERIALS_INVENTORIED"
+        )
+        || response.matter_version == 0
+        || response.material_root.display_name.is_empty()
+        || response.material_root.display_name.len() > 240
+        || !valid_lower_sha256(&response.material_root.root_fingerprint)
+        || !valid_local_timestamp(&response.material_root.linked_at)
+        || !valid_local_timestamp(&response.created_at)
+        || !valid_local_timestamp(&response.updated_at)
+    {
+        return Err("本机基础案卷回执字段无效。".to_string());
+    }
+    let inventory = match response.inventory {
+        Some(value) => {
+            if Uuid::parse_str(&value.scan_id).is_err()
+                || !valid_lower_sha256(&value.root_fingerprint)
+                || !valid_lower_sha256(&value.manifest_hash)
+                || !valid_local_timestamp(&value.scanned_at)
+                || value.root_fingerprint != response.material_root.root_fingerprint
+            {
+                return Err("本机资料盘点回执字段无效。".to_string());
+            }
+            Some(LocalCaseInventory {
+                scan_id: value.scan_id,
+                root_fingerprint: value.root_fingerprint,
+                manifest_hash: value.manifest_hash,
+                scanned_at: value.scanned_at,
+                total_files: value.total_files,
+                total_bytes: value.total_bytes,
+                skipped_symlinks: value.skipped_symlinks,
+            })
+        }
+        None => None,
+    };
+    Ok(LocalCaseSummary {
+        case_id: response.case_id,
+        title: response.title,
+        stage: response.stage,
+        matter_version: response.matter_version,
+        material_root: LocalCaseMaterialRoot {
+            display_name: response.material_root.display_name,
+            root_fingerprint: response.material_root.root_fingerprint,
+            linked_at: response.material_root.linked_at,
+        },
+        inventory,
+        created_at: response.created_at,
+        updated_at: response.updated_at,
+    })
+}
+
+fn valid_local_timestamp(value: &str) -> bool {
+    value.ends_with('Z')
+        && DateTime::parse_from_rfc3339(value)
+            .map(|parsed| {
+                let current = Utc::now();
+                let timestamp = parsed.with_timezone(&Utc);
+                timestamp <= current + ChronoDuration::minutes(2)
+                    && timestamp >= current - ChronoDuration::days(3660)
+            })
+            .unwrap_or(false)
+}
+
 fn exchange_desktop_session_with_sidecar(
     port: u16,
     parent_api_token: &str,
@@ -1324,6 +1962,233 @@ fn validate_native_ocr_input(input: &AuthorizedQwenOcrInput) -> Result<(), Strin
         return Err("OCR 授权版本无效；未发送任何案卷内容。".to_string());
     }
     Ok(())
+}
+
+/// Translate the small product-level task picker into a fixed planning
+/// instruction.  In particular, the browser is never allowed to smuggle a
+/// free-form prompt, case text, an URL, or an instruction to execute tools
+/// through this native boundary.
+fn fixed_case_plan_task(input: &AuthorizedDeepSeekPlanInput) -> Result<&'static str, String> {
+    for (label, value) in [
+        ("案件", input.matter_id.as_str()),
+        ("外部计划授权", input.external_request_id.as_str()),
+    ] {
+        if Uuid::parse_str(value).is_err() {
+            return Err(format!("{label}标识无效；未发送任何案卷内容。"));
+        }
+    }
+    if input.expected_version == 0 {
+        return Err("案件计划授权版本无效；未发送任何案卷内容。".to_string());
+    }
+    match input.task_kind.as_str() {
+        "case_intake" => Ok("梳理本案材料接收与核验的工作顺序，并提出下一步受控工作步骤。"),
+        "evidence_review" => Ok("梳理本案证据复核的工作顺序，并提出下一步受控工作步骤。"),
+        "legal_research" => Ok("梳理本案官方法源核验的工作顺序，并提出下一步受控工作步骤。"),
+        "interest_review" => Ok("梳理本案还款与利息复核的工作顺序，并提出下一步受控工作步骤。"),
+        "document_review" => Ok("梳理本案应诉材料与文书复核的工作顺序，并提出下一步受控工作步骤。"),
+        _ => Err("案件计划任务类型无效；未发送任何案卷内容。".to_string()),
+    }
+}
+
+/// Validate the server-produced envelope before the model transport sees it.
+/// The hash check protects the bound lawyer preflight from a corrupted or
+/// substituted loopback response; the allowlist check ensures the response
+/// cannot enlarge the native model's capability surface.
+fn validate_native_case_plan_envelope(
+    envelope: &NativeCasePlanInputEnvelope,
+    expected_version: u64,
+) -> Result<(), String> {
+    if expected_version == 0 || envelope.matter_version != expected_version {
+        return Err("案件计划快照版本已变化；未向模型服务发送任何内容。".to_string());
+    }
+    if envelope.projection.is_empty() || envelope.projection.len() > 24 * 1024 {
+        return Err("案件计划最小快照为空或超出授权上限；未向模型服务发送任何内容。".to_string());
+    }
+    let projection: CasePlanMinimalProjection = serde_json::from_str(&envelope.projection)
+        .map_err(|_| "案件计划最小快照格式无效；未向模型服务发送任何内容。".to_string())?;
+    if projection.projection_version != "case-plan-minimal-v1"
+        || !valid_capability_id(&projection.matter.stage)
+        || projection.claim_states.len() > 1_000
+        || projection.issue_states.len() > 1_000
+        || [
+            projection.review_counts.facts,
+            projection.review_counts.candidate_facts,
+            projection.review_counts.transactions,
+            projection.review_counts.claims,
+            projection.review_counts.issues,
+        ]
+        .iter()
+        .any(|count| *count > MAX_CASE_PLAN_STATE_COUNT)
+        || projection.review_counts.claims != projection.claim_states.len() as u64
+        || projection.review_counts.issues != projection.issue_states.len() as u64
+        || projection.claim_states.iter().any(|item| {
+            !valid_capability_id(&item.status)
+                || item
+                    .response_position
+                    .as_deref()
+                    .is_some_and(|value| !valid_capability_id(value))
+                || (item.has_response != item.response_position.is_some())
+        })
+        || projection.issue_states.iter().any(|item| {
+            !valid_capability_id(&item.status)
+                || item.claim_count > projection.review_counts.claims
+                || item.fact_count > projection.review_counts.facts
+        })
+    {
+        return Err("案件计划最小快照不属于受控格式；未向模型服务发送任何内容。".to_string());
+    }
+    if !valid_lower_sha256(&envelope.projection_hash)
+        || sha256_hex(envelope.projection.as_bytes()) != envelope.projection_hash
+    {
+        return Err("案件计划最小快照完整性校验不一致；未向模型服务发送任何内容。".to_string());
+    }
+    if !valid_lower_sha256(&envelope.policy_manifest_hash) {
+        return Err("案件 Skill 策略校验无效；未向模型服务发送任何内容。".to_string());
+    }
+    if envelope.allowed_skill_tools.is_empty() || envelope.allowed_skill_tools.len() > 32 {
+        return Err("案件可用 Skill 清单无效；未向模型服务发送任何内容。".to_string());
+    }
+    let mut pairs = std::collections::BTreeSet::new();
+    for item in &envelope.allowed_skill_tools {
+        if !valid_capability_id(&item.skill_id) || !valid_capability_id(&item.tool_id) {
+            return Err("案件可用 Skill 清单字段无效；未向模型服务发送任何内容。".to_string());
+        }
+        if !pairs.insert((item.skill_id.as_str(), item.tool_id.as_str())) {
+            return Err("案件可用 Skill 清单存在重复项；未向模型服务发送任何内容。".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn proposals_are_allowlisted(
+    proposals: &[deepseek_planner::DeepSeekPlanProposal],
+    allowed_skill_tools: &[NativeSkillTool],
+) -> bool {
+    if proposals.is_empty() || proposals.len() > 12 {
+        return false;
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    proposals.iter().all(|proposal| {
+        let allowed = allowed_skill_tools
+            .iter()
+            .any(|item| item.skill_id == proposal.skill_id && item.tool_id == proposal.tool_id);
+        allowed && seen.insert((proposal.skill_id.as_str(), proposal.tool_id.as_str()))
+    })
+}
+
+fn valid_capability_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=120).contains(&bytes.len())
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn valid_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn native_model_json_get<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    port: u16,
+    parent_api_token: &str,
+    path: &str,
+    failure: &str,
+) -> Result<T, String> {
+    if port == 0
+        || !valid_parent_api_token(parent_api_token)
+        || !path.starts_with("/v1/native-model/")
+        || path.len() > 1024
+    {
+        return Err("本机案件计划通道无效。".to_string());
+    }
+    let response = client
+        .get(format!("http://127.0.0.1:{port}{path}"))
+        .header(AUTHORIZATION, format!("Bearer {parent_api_token}"))
+        .header("Origin", "tauri://localhost")
+        .send()
+        .await
+        .map_err(|_| failure.to_string())?;
+    if !response.status().is_success() {
+        return Err(failure.to_string());
+    }
+    let bytes = response.bytes().await.map_err(|_| failure.to_string())?;
+    if bytes.is_empty() || bytes.len() > 48 * 1024 {
+        return Err("本机案件计划快照回执超出受控上限；未向模型服务发送任何内容。".to_string());
+    }
+    serde_json::from_slice(&bytes).map_err(|_| failure.to_string())
+}
+
+/// Persist only the model plan hashes through the ordinary desktop session
+/// API.  This is deliberately not a general authenticated HTTP bridge.
+async fn desktop_session_case_plan_post(
+    client: &reqwest::Client,
+    grant: &DesktopSessionGrant,
+    matter_id: &str,
+    body: serde_json::Value,
+    failure: &str,
+) -> Result<NativeCaseReceipt, String> {
+    if Uuid::parse_str(matter_id).is_err()
+        || !valid_loopback_api_base(&grant.api_base)
+        || !valid_desktop_access_token(&grant.access_token)
+        || Uuid::parse_str(&grant.session_id).is_err()
+        || serde_json::to_vec(&body).map_or(true, |encoded| encoded.len() > 32 * 1024)
+    {
+        return Err("本机案件计划台账通道无效。".to_string());
+    }
+    let response = client
+        .post(format!(
+            "{}/v1/matters/{matter_id}/agent-executions",
+            grant.api_base
+        ))
+        .header(AUTHORIZATION, format!("Bearer {}", grant.access_token))
+        .header("Origin", "tauri://localhost")
+        .header(
+            "Idempotency-Key",
+            format!("native-case-plan-{}", Uuid::new_v4()),
+        )
+        .header(CONTENT_TYPE, "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|_| failure.to_string())?;
+    if !response.status().is_success() {
+        return Err(failure.to_string());
+    }
+    let bytes = response.bytes().await.map_err(|_| failure.to_string())?;
+    if bytes.is_empty() || bytes.len() > 16_384 {
+        return Err("本机案件计划台账回执超出受控上限。".to_string());
+    }
+    let receipt: NativeCaseReceipt =
+        serde_json::from_slice(&bytes).map_err(|_| failure.to_string())?;
+    if receipt.matter_version == 0 || Uuid::parse_str(&receipt.object_id).is_err() {
+        return Err("本机案件计划台账回执字段无效。".to_string());
+    }
+    Ok(receipt)
+}
+
+fn valid_parent_api_token(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_loopback_api_base(value: &str) -> bool {
+    value
+        .strip_prefix("http://127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| port != 0)
+}
+
+fn valid_desktop_access_token(value: &str) -> bool {
+    (32..=160).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn sha256_hex(value: &[u8]) -> String {
@@ -1473,6 +2338,155 @@ async fn select_case_folder(
     Ok(Some(SelectedCaseFolder { selected_root }))
 }
 
+/// Select a local case-material folder for the standalone workspace.  The
+/// absolute path is delivered directly to the supervised sidecar under the
+/// native parent token and is replaced with an opaque, short-lived selection
+/// ID before the WebView receives a response.
+#[tauri::command]
+async fn select_local_case_folder(
+    app: AppHandle,
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<Option<LocalCaseFolderSelection>, String> {
+    let selected = app
+        .dialog()
+        .file()
+        .set_title("选择本案资料文件夹")
+        .set_can_create_directories(false)
+        .blocking_pick_folder();
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected_path = selected
+        .into_path()
+        .map_err(|_| "所选位置不是可读取的本机文件夹。".to_string())?;
+    let selected_root = selected_path
+        .canonicalize()
+        .map_err(|_| "无法核验所选文件夹的真实位置。".to_string())?;
+    if !selected_root.is_dir() {
+        return Err("所选位置不是文件夹。".to_string());
+    }
+    let home_root = app
+        .path()
+        .home_dir()
+        .map_err(|_| "无法确认本机用户目录边界。".to_string())?
+        .canonicalize()
+        .map_err(|_| "无法核验本机用户目录边界。".to_string())?;
+    validate_selected_root(&selected_root, &home_root)?;
+    let selected_root = selected_root
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "所选文件夹名称包含当前版本无法安全处理的字符。".to_string())?;
+    let response: NativeLocalFolderSelectionResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::POST,
+        "/v1/native-local/folder-selections",
+        Some(serde_json::json!({"selected_root": selected_root})),
+        "本机资料文件夹未完成选择；没有读取任何文件。",
+    )
+    .await?;
+    map_native_local_selection(response).map(Some)
+}
+
+#[tauri::command]
+async fn create_local_case(
+    input: CreateLocalCaseInput,
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<LocalCaseSummary, String> {
+    if Uuid::parse_str(&input.selection_id).is_err() {
+        return Err("本机资料文件夹选择标识无效；未创建案件。".to_string());
+    }
+    let response: NativeLocalCaseResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::POST,
+        "/v1/native-local/cases",
+        Some(serde_json::json!({
+            "title": input.title,
+            "selection_id": input.selection_id,
+        })),
+        "本机案件未创建；请核对选择状态后重试。",
+    )
+    .await?;
+    map_native_local_case(response)
+}
+
+#[tauri::command]
+async fn list_local_cases(
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<Vec<LocalCaseSummary>, String> {
+    let response: NativeLocalCaseListResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::GET,
+        "/v1/native-local/cases",
+        None,
+        "本机案件列表暂时不可读取。",
+    )
+    .await?;
+    response
+        .cases
+        .into_iter()
+        .map(map_native_local_case)
+        .collect()
+}
+
+#[tauri::command]
+async fn open_local_case(
+    input: OpenLocalCaseInput,
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<LocalCaseSummary, String> {
+    let case_id = Uuid::parse_str(&input.case_id).map_err(|_| "本机案件标识无效。".to_string())?;
+    let response: NativeLocalCaseResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::GET,
+        &format!("/v1/native-local/cases/{case_id}"),
+        None,
+        "本机案件不存在或暂时不可打开。",
+    )
+    .await?;
+    map_native_local_case(response)
+}
+
+#[tauri::command]
+async fn reconnect_local_case_folder(
+    input: ReconnectLocalCaseFolderInput,
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<LocalCaseSummary, String> {
+    let case_id = Uuid::parse_str(&input.case_id)
+        .map_err(|_| "本机案件标识无效；未关联文件夹。".to_string())?;
+    if Uuid::parse_str(&input.selection_id).is_err() {
+        return Err("本机资料文件夹选择标识无效；未关联文件夹。".to_string());
+    }
+    let response: NativeLocalCaseResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::POST,
+        &format!("/v1/native-local/cases/{case_id}/material-root"),
+        Some(serde_json::json!({"selection_id": input.selection_id})),
+        "本机资料文件夹未关联；没有读取任何文件。",
+    )
+    .await?;
+    map_native_local_case(response)
+}
+
+#[tauri::command]
+async fn inventory_local_case_folder(
+    input: InventoryLocalCaseFolderInput,
+    runtime: State<'_, LocalApiRuntime>,
+) -> Result<LocalCaseSummary, String> {
+    let case_id = Uuid::parse_str(&input.case_id)
+        .map_err(|_| "本机案件标识无效；未开始资料盘点。".to_string())?;
+    if Uuid::parse_str(&input.selection_id).is_err() {
+        return Err("本机资料文件夹选择标识无效；未开始资料盘点。".to_string());
+    }
+    let response: NativeLocalCaseResponse = native_local_json_request(
+        &runtime,
+        reqwest::Method::POST,
+        &format!("/v1/native-local/cases/{case_id}/folder-inventory"),
+        Some(serde_json::json!({"selection_id": input.selection_id})),
+        "本机资料盘点未完成；没有生成任何事实、利息或提交结论。",
+    )
+    .await?;
+    map_native_local_case(response)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -1481,8 +2495,33 @@ pub fn run() {
         .setup(|app| {
             let runtime = LocalApiRuntime::default();
             app.manage(runtime.clone());
-            app.manage(EnrollmentVault::default());
-            app.manage(ModelProviderVault::default());
+            // This marker is non-secret. Loading it during launch prevents
+            // Settings from probing macOS Keychain merely to draw its status.
+            let enrollment_vault = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|directory| {
+                    EnrollmentVault::with_status_marker_path(
+                        directory.join("enrollment-status-v1.json"),
+                    )
+                })
+                .unwrap_or_default();
+            app.manage(enrollment_vault);
+            // Opening the desktop application must not ask macOS Keychain for
+            // model credentials.  This marker contains only non-secret
+            // configuration state and is read without touching Keychain.
+            let model_provider_vault = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|directory| {
+                    ModelProviderVault::with_status_marker_path(
+                        directory.join("model-provider-status-v1.json"),
+                    )
+                })
+                .unwrap_or_default();
+            app.manage(model_provider_vault);
             if let Err(message) = start_local_api(app.handle(), runtime.clone()) {
                 mark_runtime_blocked(&runtime, &message);
             }
@@ -1496,6 +2535,7 @@ pub fn run() {
             configure_desktop_model_provider_key,
             configure_desktop_qwen_connection,
             execute_authorized_qwen_ocr,
+            execute_authorized_deepseek_case_plan,
             remove_desktop_model_provider_key,
             initialize_desktop_installation,
             import_signed_enrollment_package,
@@ -1504,7 +2544,13 @@ pub fn run() {
             revoke_desktop_enrollment,
             resolve_pending_desktop_enrollment,
             disable_local_enrollment,
-            select_case_folder
+            select_case_folder,
+            select_local_case_folder,
+            create_local_case,
+            list_local_cases,
+            open_local_case,
+            reconnect_local_case_folder,
+            inventory_local_case_folder
         ])
         .build(tauri::generate_context!())
         .expect("桌面应用启动失败");
@@ -1518,12 +2564,14 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnrollmentActivationResponse, EnrollmentOperationStatusResponse, EnrollmentRenewalResponse,
-        EnrollmentRevocationResponse, LOCAL_API_PROTOCOL, LocalApiRuntime,
+        AuthorizedDeepSeekPlanInput, EnrollmentActivationResponse,
+        EnrollmentOperationStatusResponse, EnrollmentRenewalResponse, EnrollmentRevocationResponse,
+        LOCAL_API_PROTOCOL, LocalApiRuntime, NativeCasePlanInputEnvelope, NativeSkillTool,
         enrollment_verification_channel, exchange_desktop_session_with_sidecar,
-        parent_lifecycle_request, parse_enrollment_verification_response,
-        snapshot_desktop_session_grant, validate_matter_id, validate_selected_root,
-        verify_ready_payload,
+        fixed_case_plan_task, parent_lifecycle_request, parse_enrollment_verification_response,
+        proposals_are_allowlisted, require_firm_managed_model_runtime, sha256_hex,
+        snapshot_desktop_session_grant, validate_matter_id, validate_native_case_plan_envelope,
+        validate_selected_root, verify_ready_payload,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use sha2::{Digest, Sha256};
@@ -1567,17 +2615,88 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_plan_accepts_only_fixed_tasks_and_a_hash_bound_server_envelope() {
+        let matter_id = "6b37b52e-7749-4ef1-a817-f4b37c74ab59".to_string();
+        let request_id = "7b37b52e-7749-4ef1-a817-f4b37c74ab59".to_string();
+        let task = AuthorizedDeepSeekPlanInput {
+            matter_id: matter_id.clone(),
+            external_request_id: request_id,
+            expected_version: 4,
+            task_kind: "interest_review".to_string(),
+        };
+        assert!(fixed_case_plan_task(&task).unwrap().contains("利息"));
+        let projection = r#"{
+            "projection_version":"case-plan-minimal-v1",
+            "matter":{"stage":"FACT_REVIEW"},
+            "review_counts":{"facts":1,"candidate_facts":0,"transactions":0,"claims":0,"issues":0},
+            "claim_states":[],
+            "issue_states":[]
+        }"#
+        .to_string();
+        let envelope = NativeCasePlanInputEnvelope {
+            matter_version: 4,
+            projection_hash: sha256_hex(projection.as_bytes()),
+            projection,
+            policy_manifest_hash: "a".repeat(64),
+            allowed_skill_tools: vec![NativeSkillTool {
+                skill_id: "office_reading".to_string(),
+                tool_id: "parse_office_document".to_string(),
+            }],
+        };
+        assert!(validate_native_case_plan_envelope(&envelope, 4).is_ok());
+        assert!(proposals_are_allowlisted(
+            &[crate::deepseek_planner::DeepSeekPlanProposal {
+                skill_id: "office_reading".to_string(),
+                tool_id: "parse_office_document".to_string(),
+                rationale: "先读取受控材料。".to_string(),
+            }],
+            &envelope.allowed_skill_tools,
+        ));
+
+        let invalid_task = AuthorizedDeepSeekPlanInput {
+            task_kind: "把全部案卷发给任意网站".to_string(),
+            ..task
+        };
+        assert!(fixed_case_plan_task(&invalid_task).is_err());
+        let tampered = NativeCasePlanInputEnvelope {
+            projection_hash: "b".repeat(64),
+            ..envelope
+        };
+        assert!(validate_native_case_plan_envelope(&tampered, 4).is_err());
+    }
+
+    #[test]
     fn verifies_sidecar_pid_protocol_port_and_parent_challenge() {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let payload = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"NOT_CONFIGURED\",\"persistence\":\"NOT_CONFIGURED\",\"workspace_mode\":\"SYNTHETIC_ALPHA\",\"local_workspace\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         assert!(verify_ready_payload(payload.as_bytes(), &challenge).is_ok());
         let enrolled =
             payload.replace("\"identity\":\"NOT_ENROLLED\"", "\"identity\":\"ENROLLED\"");
         assert!(verify_ready_payload(enrolled.as_bytes(), &challenge).is_ok());
+        let inconsistent_local = payload.replace(
+            "\"identity\":\"NOT_ENROLLED\"",
+            "\"identity\":\"LOCAL\"",
+        );
+        assert!(verify_ready_payload(inconsistent_local.as_bytes(), &challenge).is_err());
+        let local = payload
+            .replace("\"identity\":\"NOT_ENROLLED\"", "\"identity\":\"LOCAL\"")
+            .replace(
+                "\"persistence\":\"NOT_CONFIGURED\"",
+                "\"persistence\":\"LOCAL_CONFIGURED\"",
+            )
+            .replace(
+                "\"workspace_mode\":\"SYNTHETIC_ALPHA\"",
+                "\"workspace_mode\":\"LOCAL_STANDALONE\"",
+            )
+            .replace(
+                "\"local_workspace\":\"NOT_CONFIGURED\"",
+                "\"local_workspace\":\"READY\"",
+            );
+        assert!(verify_ready_payload(local.as_bytes(), &challenge).is_ok());
         assert!(verify_ready_payload(payload.as_bytes(), "b").is_err());
     }
 
@@ -1586,7 +2705,7 @@ mod tests {
         let challenge = "a".repeat(64);
         let digest = format!("{:x}", Sha256::digest(challenge.as_bytes()));
         let extra = format!(
-            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
+            "{{\"protocol\":\"{}\",\"status\":\"READY\",\"port\":43127,\"pid\":77,\"challenge_sha256\":\"{}\",\"identity\":\"NOT_ENROLLED\",\"enrollment_trust\":\"READY\",\"persistence\":\"NOT_CONFIGURED\",\"workspace_mode\":\"SYNTHETIC_ALPHA\",\"local_workspace\":\"NOT_CONFIGURED\",\"agent_draft_executor\":\"NOT_CONFIGURED\",\"evidence_intake_worker\":\"NOT_CONFIGURED\",\"official_source_capture_worker\":\"NOT_CONFIGURED\",\"role\":\"ADMIN\"}}",
             LOCAL_API_PROTOCOL, digest
         );
         let invalid = extra.replace(",\"role\":\"ADMIN\"", "").replace(
@@ -1641,6 +2760,28 @@ mod tests {
         let status = serde_json::to_string(&super::snapshot_runtime(&runtime)).unwrap();
         assert!(!status.contains(&"s".repeat(64)));
         assert!(!status.contains("sessionId"));
+    }
+
+    #[test]
+    fn external_models_are_blocked_in_local_standalone_and_synthetic_workspaces() {
+        let runtime = LocalApiRuntime::default();
+        {
+            let mut state = runtime.inner.lock().unwrap();
+            state.phase = "READY".to_string();
+            state.workspace_mode = "LOCAL_STANDALONE".to_string();
+        }
+        let local_error = require_firm_managed_model_runtime(&runtime).unwrap_err();
+        assert!(local_error.contains("不发送材料"));
+
+        {
+            runtime.inner.lock().unwrap().workspace_mode = "SYNTHETIC_ALPHA".to_string();
+        }
+        assert!(require_firm_managed_model_runtime(&runtime).is_err());
+
+        {
+            runtime.inner.lock().unwrap().workspace_mode = "FIRM_MANAGED".to_string();
+        }
+        assert!(require_firm_managed_model_runtime(&runtime).is_ok());
     }
 
     #[test]
@@ -1897,6 +3038,7 @@ mod tests {
         assert!(serde_json::from_value::<EnrollmentOperationStatusResponse>(missing).is_err());
     }
 }
+mod deepseek_planner;
 mod enrollment_vault;
 mod model_provider_vault;
 mod native_activation_prompt;

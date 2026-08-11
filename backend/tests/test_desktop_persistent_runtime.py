@@ -85,6 +85,40 @@ class DesktopPersistentRuntimeTests(unittest.TestCase):
                     key_provider=SyntheticKeyProvider(),
                 )
 
+    def test_commercial_runtime_keeps_the_existing_identity_keychain_and_private_root_gates(self) -> None:
+        with TemporaryDirectory(prefix="desktop-commercial-runtime-") as temporary:
+            root = Path(temporary) / "managed"
+            root.mkdir(mode=0o700)
+            environment = {
+                "CASE_WORKBENCH_RUNTIME_MODE": "commercial-production",
+                "CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION": "YES",
+                "CASE_WORKBENCH_POSTGRES_DSN": "postgresql://worker:synthetic-secret@127.0.0.1/lawcase_production",
+                "CASE_WORKBENCH_MANAGED_ARTIFACT_ROOT": str(root),
+            }
+            runtime = build_desktop_persistent_runtime(
+                identity=enrolled_identity(),
+                environ=environment,
+                key_provider=SyntheticKeyProvider(),
+            )
+            self.assertEqual(runtime.services.persistence_label, "commercial-production")
+            health = TestClient(
+                create_desktop_sidecar_app(
+                    persistent_dependencies=runtime.dependencies,
+                )
+            ).get("/healthz")
+            self.assertEqual(health.status_code, 200)
+            self.assertEqual(health.json()["mode"], "commercial-production")
+            self.assertEqual(health.json()["desktop_session"], "configured")
+
+            missing_confirmation = dict(environment)
+            missing_confirmation.pop("CASE_WORKBENCH_ENABLE_COMMERCIAL_PRODUCTION")
+            with self.assertRaises(DesktopPersistentRuntimeBlocked):
+                build_desktop_persistent_runtime(
+                    identity=enrolled_identity(),
+                    environ=missing_confirmation,
+                    key_provider=SyntheticKeyProvider(),
+                )
+
     def test_preview_runtime_rejects_missing_or_insecure_artifact_root(self) -> None:
         environment = {
             "CASE_WORKBENCH_RUNTIME_MODE": "postgres-internal-preview",
