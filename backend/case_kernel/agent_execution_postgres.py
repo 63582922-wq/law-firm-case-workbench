@@ -94,6 +94,8 @@ class PostgresAgentExecutionStore:
         _require_text(agent_id, "agent_id")
         _require_text(agent_version, "agent_version")
         _validate_sha256("policy_manifest_hash", policy_manifest_hash)
+        if policy_manifest_hash != agent_execution_policy_hash(self._registry):
+            raise CaseLedgerPersistenceBlocked("Agent policy manifest does not match the active server registry")
         _validate_sha256("input_hash", input_hash)
         validated = self._validate_proposals(proposals)
         self._require_lawyer_for_draft_proposals(actor, validated)
@@ -373,6 +375,23 @@ class PostgresAgentExecutionStore:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (firm_id,))
             yield connection
+
+
+def agent_execution_policy_hash(registry: CaseSkillRegistry) -> str:
+    """Bind a planned run to the exact active server-side Skill policy.
+
+    The browser may display the capability manifest, but it must not be able
+    to invent a compatible-looking policy hash.  Keeping the compact registry
+    projection here also makes the planned record stable across UI wording or
+    layout changes.
+    """
+
+    return _payload_hash({
+        "registry": [
+            (skill.skill_id, skill.version, skill.maturity.value, skill.approval_gate.value)
+            for skill in registry.list_skills()
+        ]
+    })
 
 
 def _json_scopes(skill) -> str:

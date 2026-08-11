@@ -101,4 +101,9 @@ class PostgresAgentDraftCandidateStore:
 
 
 def _policy_hash(registry: CaseSkillRegistry) -> str:
-    return _payload_hash({"registry": [(s.skill_id, s.version, s.maturity.value) for s in registry.list_skills()]})
+    return _payload_hash({
+        "registry": [
+            (skill.skill_id, skill.version, skill.maturity.value, skill.approval_gate.value)
+            for skill in registry.list_skills()
+        ]
+    })

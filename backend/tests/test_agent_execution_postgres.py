@@ -5,7 +5,11 @@ from unittest import TestCase
 from unittest.mock import patch
 from uuid import uuid4
 
-from case_kernel.agent_execution_postgres import AgentToolProposal, PostgresAgentExecutionStore
+from case_kernel.agent_execution_postgres import (
+    AgentToolProposal,
+    PostgresAgentExecutionStore,
+    agent_execution_policy_hash,
+)
 from case_kernel.case_ledger_postgres import CaseLedgerPersistenceBlocked
 from case_kernel.models import Actor, Role
 from case_kernel.skill_registry import default_case_skill_registry
@@ -83,7 +87,7 @@ class AgentExecutionPostgresTests(TestCase):
         receipt = self._run(connection, lambda: self.store.plan_agent_run(
             matter_id=self.matter_id, actor=self.lawyer, expected_version=4,
             idempotency_key="agent-plan-001", agent_id="case-manager", agent_version="1.0.0",
-            policy_manifest_hash="a" * 64, input_hash="b" * 64,
+            policy_manifest_hash=agent_execution_policy_hash(default_case_skill_registry()), input_hash="b" * 64,
             proposals=(AgentToolProposal(1, "office_reading", "parse_office_document", "c" * 64, "d" * 64),),
         ))
         self.assertEqual(receipt.matter_version, 5)
@@ -94,8 +98,15 @@ class AgentExecutionPostgresTests(TestCase):
             self.store.plan_agent_run(
                 matter_id=self.matter_id, actor=self.lawyer, expected_version=4,
                 idempotency_key="agent-plan-002", agent_id="case-manager", agent_version="1.0.0",
-                policy_manifest_hash="a" * 64, input_hash="b" * 64,
+                policy_manifest_hash=agent_execution_policy_hash(default_case_skill_registry()), input_hash="b" * 64,
                 proposals=(AgentToolProposal(1, "document_drafting", "create_reviewable_docx_draft", "c" * 64, "d" * 64),),
+            )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "policy manifest"):
+            self.store.plan_agent_run(
+                matter_id=self.matter_id, actor=self.lawyer, expected_version=4,
+                idempotency_key="agent-plan-forged-policy", agent_id="case-manager", agent_version="1.0.0",
+                policy_manifest_hash="a" * 64, input_hash="b" * 64,
+                proposals=(AgentToolProposal(1, "office_reading", "parse_office_document", "c" * 64, "d" * 64),),
             )
 
     def test_only_system_worker_records_hashed_execution_outcome(self) -> None:
@@ -124,7 +135,7 @@ class AgentExecutionPostgresTests(TestCase):
             enabled.plan_agent_run(
                 matter_id=self.matter_id, actor=self.assistant, expected_version=4,
                 idempotency_key="agent-plan-draft-001", agent_id="case-manager", agent_version="1.0.0",
-                policy_manifest_hash="a" * 64, input_hash="b" * 64,
+                policy_manifest_hash=agent_execution_policy_hash(default_case_skill_registry(reviewable_office_drafts_enabled=True)), input_hash="b" * 64,
                 proposals=(AgentToolProposal(1, "document_drafting", "create_reviewable_docx_draft", "c" * 64, "d" * 64),),
             )
 

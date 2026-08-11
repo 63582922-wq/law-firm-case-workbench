@@ -44,6 +44,8 @@ from case_kernel.store import InMemoryMatterStore
 from case_kernel.local_access_grants import LocalFolderGrantRegistry
 from case_kernel.original_page_access import OriginalPageAccessBroker, OriginalPageLocator
 from case_kernel.agent_execution_postgres import PersistentAgentExecutionSnapshot
+from case_kernel.agent_execution_postgres import agent_execution_policy_hash
+from case_kernel.skill_registry import default_case_skill_registry
 from case_kernel.document_consistency_postgres import PersistentDocumentConsistencySnapshot
 from case_kernel.external_request_postgres import PersistentExternalRequestSnapshot
 from case_kernel.reviewable_draft_access import (
@@ -2189,7 +2191,7 @@ class PersistentApiTests(unittest.TestCase):
             headers={"Idempotency-Key": "agent-plan-api-001"},
             json={
                 "expected_version": 12, "agent_id": "case-manager", "agent_version": "1.0.0",
-                "policy_manifest_hash": "a" * 64, "input_hash": "b" * 64,
+                "policy_manifest_hash": agent_execution_policy_hash(default_case_skill_registry()), "input_hash": "b" * 64,
                 "proposals": [{"sequence": 1, "skill_id": "office_reading", "tool_id": "parse_office_document", "input_hash": "c" * 64, "rationale_hash": "d" * 64}],
             },
         )
@@ -2198,6 +2200,7 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(name, "plan_agent_run")
         self.assertEqual(call["actor"], self.identity.actor)
         self.assertEqual(call["proposals"][0].tool_id, "parse_office_document")
+
 
     def test_agent_execution_routes_fail_closed_without_agent_store(self) -> None:
         client = TestClient(
