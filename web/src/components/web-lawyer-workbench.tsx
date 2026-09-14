@@ -22,6 +22,7 @@ import {
   createWebMaterialUploadSlot,
   createWebMaterialArchiveSlot,
   isPdfCandidate,
+  isImageMaterialCandidate,
   isCommonMaterialCandidate,
   isLegacyCommonMaterialCandidate,
   isZipCandidate,
@@ -897,9 +898,9 @@ function MaterialIntake({
     const selected = Array.from(files);
     const withheldCommonCount = selected.filter((file) => isCommonMaterialCandidate(file) && !canUploadCommon).length;
     const nextItems = selected.flatMap((file): UploadItem[] => {
-      const pdf = isPdfCandidate(file);
+      const pdf = isPdfCandidate(file) || isImageMaterialCandidate(file);
       const zip = isZipCandidate(file);
-      const common = isCommonMaterialCandidate(file);
+      const common = !pdf && isCommonMaterialCandidate(file);
       if (common && !canUploadCommon) return [];
       const kind: UploadItemKind = pdf ? "PDF" : zip ? "ZIP" : "COMMON";
       const maximum = kind === "ZIP" ? WEB_MAX_ARCHIVE_BYTES : kind === "COMMON" ? WEB_MAX_COMMON_MATERIAL_BYTES : WEB_MAX_PDF_BYTES;
@@ -987,7 +988,7 @@ function MaterialIntake({
           setItems((current) => updateUploadItem(current, queuedItem.id, { serverId: slot.uploadId }));
           setItems((current) => updateUploadItem(current, queuedItem.id, {
             state: "UPLOADING",
-            message: "正在接收 PDF 并进行安全检查…",
+            message: "正在接收材料并进行安全检查…",
           }));
           const receipt = await uploadWebMaterialPdf(caseItem.caseId, slot.uploadId, file);
           receivedInThisRun += 1;
@@ -1143,7 +1144,7 @@ function MaterialIntake({
         }}
         onDrop={handleDrop}
       >
-        <input accept="application/pdf,.pdf" aria-label="选择 PDF 文件" disabled={!canUpload} hidden multiple onChange={handleFileChange} ref={inputRef} type="file" />
+        <input accept="application/pdf,.pdf,.jpg,.jpeg,.png" aria-label="选择 PDF 或图片文件" disabled={!canUpload} hidden multiple onChange={handleFileChange} ref={inputRef} type="file" />
         <input accept=".docx,.xlsx,.pptx,.rtf,.txt,.csv,.html,.htm,.eml,.jpg,.jpeg,.png" aria-label="选择常见案件材料" disabled={!canUploadCommon} hidden multiple onChange={handleFileChange} ref={commonInputRef} type="file" />
         <input accept="application/zip,.zip" aria-label="选择 ZIP 材料包" disabled={!canUpload} hidden multiple onChange={handleFileChange} ref={archiveInputRef} type="file" />
         <input

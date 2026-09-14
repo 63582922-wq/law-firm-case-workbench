@@ -11,6 +11,7 @@ import unittest
 
 from case_kernel.lawyer_practical_mode import (
     build_practical_prompt,
+    extract_source_amounts,
     normalize_and_gate,
     render_practical_report,
     GateDecision,
@@ -121,6 +122,33 @@ class FakeTransport:
                       retention="不保存", payload_sha256="0" * 64, status="ok",
                       cost_cny="0.010000")
         return self._analysis
+
+
+class SourceAmountWhitelistTests(unittest.TestCase):
+    """材料原文数字是事实引用，必须保留；模型自算数字必须剔除。"""
+
+    def test_source_amounts_are_preserved_but_model_computed_are_scrubbed(self) -> None:
+        source = extract_source_amounts(["原告主张借款本金150,000元，约定月利率1.5%。"])
+        self.assertIn("150000", source)
+        self.assertIn("1.5%", source)
+
+        raw = {"case_posture": {
+            "summary": "原告主张150,000元本金，月利率1.5%；我方测算年化18%，剩余本金82,681.86元。",
+        }}
+        analysis, gate = normalize_and_gate(
+            raw, engine_amounts={"合计本金": "300,000.00"}, source_amounts=source)
+        summary = analysis["case_posture"]["summary"]
+        self.assertIn("150,000元", summary)      # 事实引用保留
+        self.assertIn("月利率1.5%", summary)      # 约定利率是原文事实
+        self.assertNotIn("18%", summary)         # 模型自算剔除
+        self.assertNotIn("82,681.86", summary)   # 模型自算剔除
+        self.assertTrue(any("模型自算数字已剔除" in item for item in gate.repairs))
+
+    def test_engine_numbers_are_preserved(self) -> None:
+        raw = {"case_posture": {"summary": "系统计算合计本金300,000.00元。"}}
+        analysis, _ = normalize_and_gate(
+            raw, engine_amounts={"合计本金": "300000.00"}, source_amounts=set())
+        self.assertIn("300,000.00", analysis["case_posture"]["summary"])
 
 
 if __name__ == "__main__":

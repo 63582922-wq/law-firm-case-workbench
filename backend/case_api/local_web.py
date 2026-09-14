@@ -28,10 +28,13 @@ import zipfile
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
 
 MAX_PDF_BYTES = 256 * 1024 * 1024
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
+IMAGE_MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png"}
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_ENTRIES = 10_000
 MAX_ARCHIVE_EXPANDED_BYTES = 1_073_741_824
@@ -294,6 +297,8 @@ class LocalWebStore:
             raise LocalWebBlocked("本地模式只接收 PDF 文件。")
         if kind == "ZIP" and not name.lower().endswith(".zip"):
             raise LocalWebBlocked("本地模式只接收 ZIP 材料包。")
+        if kind == "IMAGE" and Path(name).suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            raise LocalWebBlocked("图片材料须为 JPG 或 PNG。")
         key = _idempotency(key)
         payload = _digest(json.dumps([case_id, name, expected_version, kind], ensure_ascii=False))
         with self._lock, self._connect() as db:
@@ -304,7 +309,12 @@ class LocalWebStore:
                 return {"upload_id": str(prior["object_id"]), "expires_at": _iso(_now() + timedelta(hours=1))}
             material_id = str(uuid4())
             now = _iso(_now())
-            db.execute("INSERT INTO materials(material_id,case_id,display_name,byte_size,media_type,state,created_at) VALUES(?,?,?,?,?,?,?)", (material_id, case_id, name[:240], 0, "application/pdf" if kind == "PDF" else "application/zip", "RECEIVING", now))
+            media_type = (
+                "application/pdf" if kind == "PDF"
+                else "application/zip" if kind == "ZIP"
+                else ("image/jpeg" if Path(name).suffix.lower() in {".jpg", ".jpeg"} else "image/png")
+            )
+            db.execute("INSERT INTO materials(material_id,case_id,display_name,byte_size,media_type,state,created_at) VALUES(?,?,?,?,?,?,?)", (material_id, case_id, name[:240], 0, media_type, "RECEIVING", now))
             db.execute("INSERT INTO commands(command_name,idempotency_key,payload_hash,object_id) VALUES(?,?,?,?)", (f"CREATE_UPLOAD_{kind}", key, payload, material_id))
         return {"upload_id": material_id, "expires_at": _iso(_now() + timedelta(hours=1))}
 
@@ -349,6 +359,60 @@ class LocalWebStore:
                 db.execute("UPDATE materials SET sha256=?, byte_size=?, page_count=?, state='COMPLETED', storage_name=?, completed_at=? WHERE material_id=?", (content_hash, size, page_count, storage_name, _iso(_now()), material_id))
                 for number in range(1, page_count + 1):
                     db.execute("INSERT INTO pages(page_id,material_id,page_number) VALUES(?,?,?)", (str(uuid4()), material_id, number))
+                db.execute("UPDATE cases SET version=version+1, updated_at=? WHERE case_id=?", (_iso(_now()), case_id))
+                return self._receipt(db, case_id, material_id)
+        finally:
+            staging.unlink(missing_ok=True)
+
+    async def accept_image(self, case_id: str, material_id: str,
+                           chunks: AsyncIterable[bytes]) -> dict[str, object]:
+        """接收照片/截图材料（银行流水截图、借条照片等）。"""
+        material = self._material(case_id, material_id)
+        if str(material["media_type"]) not in IMAGE_MEDIA_TYPES:
+            raise LocalWebBlocked("材料接收类型不匹配。")
+        suffix = IMAGE_MEDIA_TYPES[str(material["media_type"])]
+        staging = self.materials / f".{material_id}.upload"
+        digest = sha256()
+        size = 0
+        try:
+            with staging.open("wb") as output:
+                async for chunk in chunks:
+                    if not isinstance(chunk, bytes):
+                        raise LocalWebBlocked("材料数据格式无效。")
+                    size += len(chunk)
+                    if size > MAX_IMAGE_BYTES:
+                        raise LocalWebBlocked("图片超过本机模式的 64 MiB 限制。")
+                    digest.update(chunk)
+                    output.write(chunk)
+            if size == 0:
+                raise LocalWebBlocked("不能接收空文件。")
+            try:
+                with Image.open(staging) as probe:
+                    probe.verify()
+                with Image.open(staging) as probe:
+                    width, height = probe.size
+            except Exception:
+                raise LocalWebBlocked("图片无法解析；请提供有效的 JPG 或 PNG。") from None
+            if width < 1 or height < 1 or width > 20_000 or height > 20_000:
+                raise LocalWebBlocked("图片尺寸不符合本机模式限制。")
+            content_hash = digest.hexdigest()
+            storage_name = f"{content_hash}{suffix}"
+            stored = self.materials / storage_name
+            if stored.exists() and stored.is_symlink():
+                raise LocalWebBlocked("本机材料对象不能是符号链接。")
+            if not stored.exists():
+                staging.replace(stored)
+                os.chmod(stored, 0o600)
+            else:
+                staging.unlink(missing_ok=True)
+            with self._lock, self._connect() as db:
+                row = db.execute("SELECT state FROM materials WHERE material_id=? AND case_id=?", (material_id, case_id)).fetchone()
+                if row is None:
+                    raise LocalWebNotFound("材料接收位不存在。")
+                if str(row["state"]) == "COMPLETED":
+                    return self._receipt(db, case_id, material_id)
+                db.execute("UPDATE materials SET sha256=?, byte_size=?, page_count=1, state='COMPLETED', storage_name=?, completed_at=? WHERE material_id=?", (content_hash, size, storage_name, _iso(_now()), material_id))
+                db.execute("INSERT INTO pages(page_id,material_id,page_number) VALUES(?,?,1)", (str(uuid4()), material_id))
                 db.execute("UPDATE cases SET version=version+1, updated_at=? WHERE case_id=?", (_iso(_now()), case_id))
                 return self._receipt(db, case_id, material_id)
         finally:
@@ -479,10 +543,17 @@ class LocalWebStore:
         storage = self.materials / str(material["storage_name"])
         if not storage.is_file() or storage.is_symlink():
             raise LocalWebBlocked("本机材料原件不可用。")
+        from io import BytesIO
+
+        if str(material["media_type"]) in IMAGE_MEDIA_TYPES:
+            # 图片材料：渲染为单页 PDF 供预览（原件不被改写）。
+            output = BytesIO()
+            with Image.open(storage) as image:
+                image.convert("RGB").save(output, format="PDF", resolution=150)
+            return output.getvalue()
         reader = PdfReader(storage, strict=True)
         writer = PdfWriter()
         writer.add_page(reader.pages[int(row["page_number"]) - 1])
-        from io import BytesIO
         output = BytesIO()
         writer.write(output)
         return output.getvalue()
@@ -513,7 +584,11 @@ class LocalWebStore:
             "calls": int(row["agent_calls"]),
             "error": str(row["agent_error"]),
             "engine_numbers": json.loads(str(row["agent_engine_json"]) or "{}"),
-            "report_available": bool(row["agent_report_path"]) and Path(str(row["agent_report_path"])).is_file(),
+            "report_available": (
+                bool(row["agent_report_path"])
+                and Path(str(row["agent_report_path"])).is_file()
+                and not agent_stale
+            ),
         }
         if stale:
             return {"status": "STALE", "analysis": None, "agent": agent}
@@ -567,14 +642,38 @@ class LocalWebStore:
             )
 
     def agent_report_path(self, case_id: str) -> Path | None:
+        """返回可用报告路径；材料变化后结果失效，不得继续读取或导出。"""
+        case = self._case(case_id)
         with self._connect() as db:
             row = db.execute(
-                "SELECT agent_report_path FROM analysis_runs WHERE case_id=?", (case_id,)
+                """SELECT agent_report_path, agent_status, agent_source_version
+                   FROM analysis_runs WHERE case_id=?""",
+                (case_id,),
             ).fetchone()
         if row is None or not str(row["agent_report_path"]):
             return None
+        if str(row["agent_status"]) not in ("COMPLETED", "MODEL_NOT_CONFIGURED"):
+            return None
+        if int(row["agent_source_version"]) != int(case["version"]):
+            return None  # 上游材料已变化 → 下游结果失效
         path = Path(str(row["agent_report_path"]))
         return path if path.is_file() else None
+
+    def agent_report_stale(self, case_id: str) -> bool:
+        """材料变化后旧报告是否已被判定失效（用于给出明确提示）。"""
+        case = self._case(case_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT agent_source_version, agent_status FROM analysis_runs WHERE case_id=?",
+                (case_id,),
+            ).fetchone()
+        if row is None:
+            return False
+        return (
+            bool(int(row["agent_source_version"]))
+            and int(row["agent_source_version"]) != int(case["version"])
+            and str(row["agent_status"]) in ("COMPLETED", "STALE")
+        )
 
     def start_agent_analysis(
         self,
@@ -608,6 +707,7 @@ class LocalWebStore:
             case_id, run_dir, materials_dir, case_number, role, stage_name, budget_cny, env_file
         )
 
+        disabled = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT", "").strip() == "1"
         with self._lock, self._connect() as db:
             db.execute(
                 """INSERT INTO analysis_runs(case_id,source_version,status,result_json,result_hash,generated_at)
@@ -620,6 +720,11 @@ class LocalWebStore:
                 (case_id, int(case["version"]), "AGENT_RUNNING", "{}", _digest("agent:running"),
                  _iso(_now()), int(case["version"])),
             )
+            if disabled:
+                db.execute(
+                    "UPDATE analysis_runs SET agent_status='DISABLED', agent_stage='' WHERE case_id=?",
+                    (case_id,),
+                )
 
         def progress(stage: str, percent: int) -> None:
             self._set_agent_state(case_id, agent_stage=stage, agent_progress=max(0, min(100, percent)))
@@ -654,12 +759,16 @@ class LocalWebStore:
                     agent_engine_json=json.dumps(result.engine_numbers, ensure_ascii=False),
                 )
             except Exception as error:  # noqa: BLE001 - 后台线程边界
-                self._set_agent_state(
-                    case_id, agent_status="FAILED", agent_progress=0,
-                    agent_error=f"{type(error).__name__}: {error}",
-                )
+                # 记录失败状态本身也必须容错：工作区可能已被移除或数据库不可写。
+                try:
+                    self._set_agent_state(
+                        case_id, agent_status="FAILED", agent_progress=0,
+                        agent_error=f"{type(error).__name__}: {error}",
+                    )
+                except Exception:  # noqa: BLE001 - 后台线程不得抛出未捕获异常
+                    pass
 
-        if os.environ.get("CASE_WORKBENCH_DISABLE_AGENT", "").strip() == "1":
+        if disabled:
             return {"status": "DISABLED", "message": "后台 Agent 已在当前环境禁用。"}
         Thread(target=worker, name=f"case-analysis-{case_id[:8]}", daemon=True).start()
         return {"status": "RUNNING", "message": "分析已开始，可在案件页查看进度。"}
@@ -718,7 +827,7 @@ class LocalWebStore:
     def run_analysis(self, case_id: str) -> dict[str, object]:
         case = self._case(case_id)
         with self._connect() as db:
-            materials = db.execute("SELECT material_id, display_name, storage_name, page_count, sha256 FROM materials WHERE case_id=? AND state='COMPLETED' AND media_type='application/pdf' ORDER BY created_at", (case_id,)).fetchall()
+            materials = db.execute("SELECT material_id, display_name, storage_name, page_count, sha256, media_type FROM materials WHERE case_id=? AND state='COMPLETED' AND media_type IN ('application/pdf','image/jpeg','image/png') ORDER BY created_at", (case_id,)).fetchall()
             page_rows = db.execute(
                 """SELECT p.page_id, p.material_id, p.page_number
                    FROM pages p
@@ -740,6 +849,30 @@ class LocalWebStore:
             storage = self.materials / str(material["storage_name"])
             file_text_pages = 0
             file_candidates = 0
+            if str(material["media_type"]) in IMAGE_MEDIA_TYPES:
+                # 图片材料：无文本层，进入需 OCR 队列（候选仍登记来源页）。
+                scanned_pages += 1
+                evidence_page_id = page_ids.get((str(material["material_id"]), 1))
+                if evidence_page_id is None:
+                    raise LocalWebBlocked("材料页面台账不完整，不能建立可追溯候选。")
+                candidates.append({
+                    "candidate_id": _digest(f"{material['sha256']}:image:1")[:24],
+                    "evidence_page_id": evidence_page_id,
+                    "kind": "OCR_REQUIRED",
+                    "status": "CANDIDATE",
+                    "source_file": str(material["display_name"]),
+                    "source_sha256": str(material["sha256"]),
+                    "page_number": 1,
+                    "signals": [],
+                    "dates": [],
+                    "amounts": [],
+                    "snippet": "本页为图片材料（截图/照片），需要视觉 OCR 复核。",
+                    "human_action": "请律师在页面预览中核对；候选不会自动进入正式案件事实或交易台账。",
+                })
+                files.append({"material_id": str(material["material_id"]),
+                              "display_name": str(material["display_name"]), "page_count": 1,
+                              "text_layer_pages": 0, "candidate_page_count": 1})
+                continue
             try:
                 reader = PdfReader(storage, strict=True)
                 for page_number, page in enumerate(reader.pages, start=1):
@@ -969,17 +1102,35 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
     @app.post("/api/local/v1/cases/{case_id}/material-uploads", status_code=201)
     async def create_upload(case_id: UUID, body: UploadCreate, request: Request, x_lawcase_csrf: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
         ensure_write(request, x_lawcase_csrf)
-        if body.content_type != "application/pdf" or not str(body.client_filename).lower().endswith(".pdf"):
-            raise LocalWebBlocked("本地 Web 模式当前只接收 PDF；ZIP 接收将在本地材料包版本中开放。")
-        upload = store.create_upload(str(case_id), body.client_filename, body.expected_version, idempotency_key or "", "PDF")
+        normalized_type = body.content_type.split(";", 1)[0].strip().lower()
+        suffix = Path(str(body.client_filename)).suffix.lower()
+        if normalized_type == "application/pdf" and suffix == ".pdf":
+            kind = "PDF"
+        elif normalized_type in IMAGE_MEDIA_TYPES and suffix in {".jpg", ".jpeg", ".png"}:
+            kind = "IMAGE"
+        else:
+            raise LocalWebBlocked("本机模式接收 PDF、JPG 或 PNG 材料。")
+        upload = store.create_upload(str(case_id), body.client_filename,
+                                     body.expected_version, idempotency_key or "", kind)
         return {"upload": upload}
 
     @app.put("/api/local/v1/cases/{case_id}/material-uploads/{upload_id}/content")
     async def accept_upload(case_id: UUID, upload_id: UUID, request: Request, x_lawcase_csrf: str | None = Header(default=None)):
         ensure_write(request, x_lawcase_csrf)
-        if request.headers.get("content-type", "").split(";", 1)[0].lower() != "application/pdf":
-            raise LocalWebBlocked("本地 Web 模式只接收 application/pdf。")
-        return {"receipt": await store.accept_pdf(str(case_id), str(upload_id), request.stream())}
+        material = store._material(str(case_id), str(upload_id))
+        media_type = str(material["media_type"])
+        request_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+        if media_type == "application/pdf":
+            if request_type != "application/pdf":
+                raise LocalWebBlocked("本机模式只接收 application/pdf。")
+            receipt = await store.accept_pdf(str(case_id), str(upload_id), request.stream())
+        elif media_type in IMAGE_MEDIA_TYPES:
+            if request_type not in IMAGE_MEDIA_TYPES:
+                raise LocalWebBlocked("本机模式只接收 image/jpeg 或 image/png。")
+            receipt = await store.accept_image(str(case_id), str(upload_id), request.stream())
+        else:
+            raise LocalWebBlocked("材料接收类型不匹配。")
+        return {"receipt": receipt}
 
     @app.post("/api/local/v1/cases/{case_id}/material-archives", status_code=201)
     async def create_archive(case_id: UUID, body: UploadCreate, request: Request, x_lawcase_csrf: str | None = Header(default=None), idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
@@ -1111,6 +1262,8 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
         ensure_session(request, response)
         path = store.agent_report_path(str(case_id))
         if path is None:
+            if store.agent_report_stale(str(case_id)):
+                raise LocalWebBlocked("材料已变化，原分析结果已失效；请重新运行分析后再查看报告。")
             raise LocalWebNotFound("尚无分析报告，请先运行分析。")
         return Response(content=path.read_text(encoding="utf-8"),
                         media_type="text/markdown; charset=utf-8")
@@ -1121,6 +1274,8 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
         ensure_session(request, response)
         path = store.agent_report_path(str(case_id))
         if path is None:
+            if store.agent_report_stale(str(case_id)):
+                raise LocalWebBlocked("材料已变化，原分析结果已失效；请重新运行分析后再导出。")
             raise LocalWebNotFound("尚无分析报告，无法导出。")
         text = path.read_text(encoding="utf-8")
         if format == "md":

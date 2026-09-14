@@ -64,6 +64,22 @@ def _price_cny(prompt_tokens: int, completion_tokens: int) -> Decimal:
     ) / Decimal(1_000_000)
 
 
+def _image_path(root, name, overrides, page_number: int | None = None) -> Path:
+    """解析 OCR 图片来源：渲染页走覆盖表，其余按材料目录相对路径。"""
+    if overrides:
+        if isinstance(name, tuple):
+            key = name
+        else:
+            key = (name, page_number)
+        override = overrides.get(key)
+        if override is not None:
+            candidate = Path(override)
+            return candidate if candidate.is_absolute() else Path(root) / candidate
+        if not isinstance(name, str):
+            name = str(name)
+    return Path(root) / str(name)
+
+
 def _visual_tokens(width: int, height: int) -> int:
     return (width * height) // (32 * 32) + 2
 
@@ -124,12 +140,13 @@ class QwenShadowTransport:
         ledger: RequestLedger,
         expected_schema: str,
         strict_schema: bool = True,
+        image_paths: dict | None = None,
     ) -> dict:
         user_content: list[dict] = [{"type": "text", "text": instruction}]
         redacted_content: list[dict] = [{"type": "text", "text": instruction}]
         visual_tokens = 0
         for relative_name, page_number in images:
-            path = self.materials_root / relative_name
+            path = _image_path(self.materials_root, relative_name, image_paths, page_number)
             payload, mime, width, height = _image_pixels_payload(path)
             data_url = f"data:{mime};base64,{b64encode(payload).decode('ascii')}"
             label = f"IMAGE file={relative_name} page={page_number}"
@@ -383,14 +400,20 @@ class QwenShadowTransport:
         pages: list[PageText],
         authorized: set[str],
         ledger: RequestLedger,
+        path_overrides: dict | None = None,
     ) -> list[PageText]:
-        """公开的 OCR 入口（实用模式复用，含缓存与 S1b 扫描）。"""
-        return self._ocr_batches(pages, authorized, ledger)
+        """公开的 OCR 入口（含缓存与 S1b 扫描）。
+
+        ``path_overrides``：键 ``(file_name, page_number)`` → 实际图片路径，
+        用于扫描版 PDF 的渲染页（来源仍指向原 PDF 的页，保证引用可解析）。
+        """
+        return self._ocr_batches(pages, authorized, ledger, path_overrides)
 
     # ------------------------------------------------------------ phases
 
     def _ocr_batches(self, pages: list[PageText], authorized: set[str],
-                     ledger: RequestLedger) -> list[PageText]:
+                     ledger: RequestLedger,
+                     path_overrides: dict | None = None) -> list[PageText]:
         """OCR image pages in visual-token-bounded batches; S1b-scan results.
         Results are cached beside the materials directory so a later failure
         never re-pays for completed OCR (cache is outside Git and the repo)."""
@@ -400,27 +423,37 @@ class QwenShadowTransport:
             if set(cached.get("authorized", [])) == set(authorized):
                 return [PageText(str(item["file_name"]), "", int(item["page_number"]),
                                  str(item["text"])) for item in cached.get("pages", [])]
-        image_pages = [page for page in pages if not page.file_name.lower().endswith(".pdf")]
+        image_pages = [
+            page for page in pages
+            if not page.file_name.lower().endswith(".pdf")
+            or (path_overrides and (page.file_name, page.page_number) in path_overrides)
+        ]
         updated: list[PageText] = []
         batch: list[PageText] = []
         batch_tokens = 0
         for page in image_pages:
-            if page.file_name not in authorized:
+            key = (page.file_name, page.page_number)
+            is_plain_image = not page.file_name.lower().endswith(".pdf")
+            has_override = bool(path_overrides and key in path_overrides)
+            if key not in authorized and page.file_name not in authorized:
                 continue  # S5: unauthorized page is never sent
-            path = self.materials_root / page.file_name
+            if not is_plain_image and not has_override:
+                continue  # PDF 文本层页不发送像素；仅渲染后的扫描页可发送
+            path = _image_path(self.materials_root, page.file_name, path_overrides,
+                               page.page_number)
             with Image.open(str(path)) as image:
                 tokens = _visual_tokens(image.width, image.height)
             if batch and batch_tokens + tokens > 7_000:
-                updated.extend(self._ocr_batch(batch, ledger))
+                updated.extend(self._ocr_batch(batch, ledger, path_overrides))
                 batch, batch_tokens = [], 0
             batch.append(page)
             batch_tokens += tokens
         if batch:
-            updated.extend(self._ocr_batch(batch, ledger))
+            updated.extend(self._ocr_batch(batch, ledger, path_overrides))
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(
-                json.dumps({"authorized": sorted(authorized),
+                json.dumps({"authorized": sorted(authorized, key=str),
                             "pages": [{"file_name": page.file_name,
                                        "page_number": page.page_number,
                                        "text": page.text} for page in updated]},
@@ -429,7 +462,8 @@ class QwenShadowTransport:
             )
         return updated
 
-    def _ocr_batch(self, batch: list[PageText], ledger: RequestLedger) -> list[PageText]:
+    def _ocr_batch(self, batch: list[PageText], ledger: RequestLedger,
+                   path_overrides: dict | None = None) -> list[PageText]:
         labels = "".join(
             f"IMAGE file={page.file_name} page={page.page_number}\n" for page in batch
         )
@@ -451,6 +485,7 @@ class QwenShadowTransport:
         result = self._call(
             instruction=instruction,
             images=[(page.file_name, page.page_number) for page in batch],
+            image_paths=path_overrides,
             max_output_tokens=8192,
             purpose="ocr",
             ledger=ledger,

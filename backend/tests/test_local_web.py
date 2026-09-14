@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -23,12 +24,18 @@ def _pdf(text: str = "local web test") -> bytes:
 
 class LocalWebTest(unittest.TestCase):
     def setUp(self) -> None:
+        self._agent_env = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT")
+        os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = "1"
         self.directory = TemporaryDirectory()
         self.client = TestClient(create_local_web_app(LocalWebStore(Path(self.directory.name))))
         self.client.get("/api/local/v1/session")
         self.csrf = self.client.cookies["lawcase_local_csrf"]
 
     def tearDown(self) -> None:
+        if self._agent_env is None:
+            os.environ.pop("CASE_WORKBENCH_DISABLE_AGENT", None)
+        else:
+            os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = self._agent_env
         self.directory.cleanup()
 
     def _headers(self, key: str) -> dict[str, str]:
@@ -132,3 +139,80 @@ class LocalWebTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class LocalWebImageMaterialTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._agent_env = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT")
+        os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = "1"
+        self.directory = TemporaryDirectory()
+        self.client = TestClient(create_local_web_app(LocalWebStore(Path(self.directory.name))))
+        self.client.get("/api/local/v1/session")
+        self.csrf = self.client.cookies["lawcase_local_csrf"]
+
+    def tearDown(self) -> None:
+        if self._agent_env is None:
+            os.environ.pop("CASE_WORKBENCH_DISABLE_AGENT", None)
+        else:
+            os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = self._agent_env
+        self.directory.cleanup()
+
+    def _headers(self, key: str) -> dict[str, str]:
+        return {"X-Lawcase-CSRF": self.csrf, "Content-Type": "application/json",
+                "Idempotency-Key": key}
+
+    def _image_bytes(self) -> bytes:
+        from io import BytesIO as _BytesIO
+        from PIL import Image as _Image
+
+        buffer = _BytesIO()
+        _Image.new("RGB", (800, 1200), "white").save(buffer, format="JPEG")
+        return buffer.getvalue()
+
+    def test_image_material_upload_preview_and_ocr_queue(self) -> None:
+        case = self.client.post("/api/local/v1/cases", json={"title": "图片材料案"},
+                                headers=self._headers("img-case-1")).json()["case"]
+        data = self._image_bytes()
+        slot = self.client.post(
+            f"/api/local/v1/cases/{case['case_id']}/material-uploads",
+            json={"client_filename": "银行流水截图.jpg", "content_length": len(data),
+                  "content_type": "image/jpeg", "expected_version": 1},
+            headers=self._headers("img-upload-1"),
+        )
+        self.assertEqual(slot.status_code, 201, slot.text)
+        upload_id = slot.json()["upload"]["upload_id"]
+        receipt = self.client.put(
+            f"/api/local/v1/cases/{case['case_id']}/material-uploads/{upload_id}/content",
+            content=data,
+            headers={"X-Lawcase-CSRF": self.csrf, "Content-Type": "image/jpeg"},
+        )
+        self.assertEqual(receipt.status_code, 200, receipt.text)
+        self.assertEqual(receipt.json()["receipt"]["page_count"], 1)
+
+        pages = self.client.get(
+            f"/api/local/v1/cases/{case['case_id']}/evidence-pages").json()
+        self.assertEqual(pages["total_count"], 1)
+        page_id = pages["items"][0]["evidence_page_id"]
+        preview = self.client.get(
+            f"/api/local/v1/cases/{case['case_id']}/evidence-pages/{page_id}/preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertTrue(preview.content.startswith(b"%PDF"))
+
+        analysis = self.client.post(f"/api/local/v1/cases/{case['case_id']}/analysis",
+                                    json={}, headers=self._headers("img-analysis-1")).json()
+        candidates = analysis["analysis"]["candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["kind"], "OCR_REQUIRED")
+        self.assertEqual(analysis["analysis"]["summary"]["scanned_pages"], 1)
+
+    def test_non_image_content_type_is_rejected(self) -> None:
+        case = self.client.post("/api/local/v1/cases", json={"title": "类型校验案"},
+                                headers=self._headers("img-case-2")).json()["case"]
+        response = self.client.post(
+            f"/api/local/v1/cases/{case['case_id']}/material-uploads",
+            json={"client_filename": "材料.txt", "content_length": 10,
+                  "content_type": "text/plain", "expected_version": 1},
+            headers=self._headers("img-upload-2"),
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("PDF", response.text)
+

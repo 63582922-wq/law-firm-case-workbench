@@ -28,9 +28,13 @@ MAX_OUTPUT_CHARS = 24_000
 
 # 硬红线：命中即拒绝（不可降级）
 HARD_REDLINES = (
-    "我已批准", "已终审", "已锁定", "已提交法院", "代表律师作出决定",
+    # 仅拦截"模型/系统自称已完成法律行为"，第三方语境（如"原告已提交法院"）不得误伤
+    "我已批准", "本人已批准", "我批准了", "我已终审", "我已锁定", "已由我锁定",
+    "我已提交法院", "本系统已批准", "已代表律师作出决定", "已代表律师决定",
     "忽略以上规则", "忽略之前的指令", "ignore previous instructions",
 )
+# 敏感但可能是合法描述（第三方或一般叙述）→ 标记待律师确认，不阻断
+REVIEW_ONLY_PHRASES = ("已提交法院", "已锁定", "已批准", "已终审")
 # 需要律师确认的不确定标记
 UNCERTAIN_MARKERS = ("无法确定", "不确定", "可能存在", "存疑", "待核实", "需要确认")
 
@@ -51,6 +55,62 @@ class PracticalResult:
     review_queue: list[dict]
 
 
+_NUMBER_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _normalize_value(value, *, percent: bool = False) -> str:
+    """把数值规范化为可比较形式：去尾零，整数不带小数点（150000.00 → 150000）。"""
+    from decimal import Decimal as _Decimal
+
+    if percent:
+        return f"{_Decimal(value).normalize()}%"
+    return format(_Decimal(value).normalize(), "f")
+
+
+def canonical_number(token: str) -> str:
+    """规范化数字 token：统一千分位、"元/万元"、百分比与小数尾零。
+
+    例：``150,000.00元`` → ``150000``；``15万元`` → ``150000``；``1.50%`` → ``1.5%``。
+    """
+    text = str(token).strip()
+    percent = text.endswith("%")
+    raw = re.sub(r"[¥￥,\s]", "", text)
+    wan = "万" in raw
+    digits = re.sub(r"[^0-9.]", "", raw)
+    if not digits:
+        return text
+    from decimal import Decimal as _Decimal, InvalidOperation
+
+    try:
+        value = _Decimal(digits)
+    except InvalidOperation:
+        return text
+    if wan:
+        value = value * 10000
+    return _normalize_value(value, percent=percent)
+
+
+def extract_source_amounts(texts) -> set[str]:
+    """从材料原文提取数字白名单（事实引用允许保留，模型自算的才剔除）。
+
+    收录所有数值（含无千分位整数、小数、千分位、"万元"与百分比），
+    使模型引用材料事实时不会被误剔除；材料中不存在的数值仍会被剔除。
+    """
+    allowed: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        content = str(text)
+        for match in _NUMBER_TOKEN_RE.finditer(content):
+            tail = content[match.end():match.end() + 2]
+            percent = tail.startswith("%")
+            token = match.group(0) + ("%" if percent else "")
+            if tail.startswith("万"):
+                token = match.group(0) + "万元"
+            allowed.add(canonical_number(token))
+    return allowed
+
+
 def _percent_literals(text: str) -> list[str]:
     return re.findall(r"\d+(?:\.\d+)?\s*%", text)
 
@@ -64,11 +124,14 @@ def normalize_and_gate(
     *,
     engine_amounts: Mapping[str, str],
     case_config: Mapping | None = None,
+    source_amounts: set[str] | None = None,
 ) -> tuple[dict, GateDecision]:
     """三档门禁：硬红线拒绝 / 格式自动修复 / 内容标记待确认。
 
-    - 模型输出的正式数字（金额、百分比）不采信：提取后替换为 `[见计算表]`，
+    - 模型输出的**自算**数字（金额、百分比）不采信：替换为 `[见计算表]`，
       由引擎数字注入；原始值记入 repairs 供审计。
+    - **材料原文中出现过的数字**（事实引用，如起诉状主张的金额）保留，
+      否则报告会因过度剔除而不可读；白名单由 ``source_amounts`` 提供。
     - 结构缺失自动补齐默认值，不因格式问题丢失整份分析。
     """
     gate = GateDecision(level="PASS")
@@ -130,22 +193,31 @@ def normalize_and_gate(
             gate.repairs.append(f"补齐缺失字段 {key}")
 
     # ---- 正式数字不采信：提取并替换（内容类，标记但不阻断）
+    allowed = {canonical_number(item) for item in (source_amounts or set())}
+    allowed |= {canonical_number(item) for item in engine_amounts.values()}
+
     def scrub(value):
         if isinstance(value, str):
-            percents = _percent_literals(value)
-            monies = _money_literals(value)
-            if percents or monies:
+            removed: list[str] = []
+
+            def keep_or_scrub(match: re.Match) -> str:
+                token = match.group(0)
+                if canonical_number(token) in allowed:
+                    return token
+                removed.append(token)
+                return "[见计算表]"
+
+            cleaned = re.sub(r"\d+(?:\.\d+)?\s*%", keep_or_scrub, value)
+            cleaned = re.sub(
+                r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2}",
+                keep_or_scrub, cleaned,
+            )
+            if removed:
                 gate.repairs.append(
-                    "模型输出的正式数字已剔除并改由计算表引用："
-                    + ", ".join(percents + monies)[:120]
+                    "模型自算数字已剔除并改由计算表引用："
+                    + ", ".join(removed)[:120]
                 )
-                cleaned = re.sub(r"\d+(?:\.\d+)?\s*%", "[见计算表]", value)
-                cleaned = re.sub(
-                    r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2}",
-                    "[见计算表]", cleaned,
-                )
-                return cleaned
-            return value
+            return cleaned
         if isinstance(value, dict):
             return {k: scrub(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -164,6 +236,9 @@ def normalize_and_gate(
         if isinstance(note, str) and note.strip():
             gate.review_items.append(note.strip()[:200])
 
+    for phrase in REVIEW_ONLY_PHRASES:
+        if phrase in json.dumps(analysis, ensure_ascii=False):
+            gate.review_items.append(f"报告出现「{phrase}」表述，请确认未被我方误用为已完成状态")
     if gate.review_items and gate.level == "PASS":
         gate.level = "MARK_FOR_REVIEW"
     return analysis, gate

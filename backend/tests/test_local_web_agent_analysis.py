@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from reportlab.pdfgen import canvas
 
 from case_api.local_web import LocalWebStore, create_local_web_app
+from case_kernel.lawyer_practical_mode import normalize_and_gate
 
 
 def _pdf(text: str = "借款与还款约定 月利率 1.5%") -> bytes:
@@ -127,7 +128,8 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
                                encoding="utf-8")
         self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
                          headers=self._headers("agent-run-5"))
-        self.store._set_agent_state(self.case_id, agent_report_path=str(report_path))
+        self.store._set_agent_state(self.case_id, agent_status="COMPLETED",
+                                    agent_report_path=str(report_path))
 
         md = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis/export?format=md")
         self.assertEqual(md.status_code, 200)
@@ -183,3 +185,85 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StaleAnalysisTests(unittest.TestCase):
+    """材料变化后，旧分析结果不得继续读取或导出（上游变化必须使下游失效）。"""
+
+    def setUp(self) -> None:
+        self.directory = TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.store = LocalWebStore(self.root)
+        self.client = TestClient(create_local_web_app(self.store))
+        self.client.get("/api/local/v1/session")
+        self.csrf = self.client.cookies["lawcase_local_csrf"]
+        self._env = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT")
+        os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = "1"
+
+    def tearDown(self) -> None:
+        if self._env is None:
+            os.environ.pop("CASE_WORKBENCH_DISABLE_AGENT", None)
+        else:
+            os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = self._env
+        self.directory.cleanup()
+
+    def _headers(self, key: str) -> dict[str, str]:
+        return {"X-Lawcase-CSRF": self.csrf, "Content-Type": "application/json",
+                "Idempotency-Key": key}
+
+    def test_stale_report_is_not_readable_or_exportable(self) -> None:
+        case = self.client.post("/api/local/v1/cases", json={"title": "失效案"},
+                                headers=self._headers("stale-case-1")).json()["case"]
+        case_id = str(case["case_id"])
+        data = _pdf()
+        slot = self.client.post(
+            f"/api/local/v1/cases/{case_id}/material-uploads",
+            json={"client_filename": "起诉状.pdf", "content_length": len(data),
+                  "content_type": "application/pdf", "expected_version": 1},
+            headers=self._headers("stale-up-1")).json()["upload"]
+        self.client.put(f"/api/local/v1/cases/{case_id}/material-uploads/{slot['upload_id']}/content",
+                        content=data, headers={"X-Lawcase-CSRF": self.csrf,
+                                               "Content-Type": "application/pdf"})
+        self.client.post(f"/api/local/v1/cases/{case_id}/analysis", json={},
+                         headers=self._headers("stale-run-1"))
+        run_dir = self.store._analysis_dir(case_id)
+        report = run_dir / "决策包.md"
+        report.write_text("# 旧报告\n", encoding="utf-8")
+        self.store._set_agent_state(case_id, agent_status="COMPLETED",
+                                    agent_report_path=str(report))
+
+        # 材料变化 → 下游失效
+        slot2 = self.client.post(
+            f"/api/local/v1/cases/{case_id}/material-uploads",
+            json={"client_filename": "补充材料.pdf", "content_length": len(data),
+                  "content_type": "application/pdf", "expected_version": 2},
+            headers=self._headers("stale-up-2")).json()["upload"]
+        self.client.put(f"/api/local/v1/cases/{case_id}/material-uploads/{slot2['upload_id']}/content",
+                        content=data, headers={"X-Lawcase-CSRF": self.csrf,
+                                               "Content-Type": "application/pdf"})
+
+        state = self.client.get(f"/api/local/v1/cases/{case_id}/analysis").json()
+        self.assertEqual(state["agent"]["status"], "STALE")
+        self.assertFalse(state["agent"]["report_available"])
+        self.assertEqual(self.client.get(f"/api/local/v1/cases/{case_id}/analysis/report").status_code, 422)
+        self.assertEqual(
+            self.client.get(f"/api/local/v1/cases/{case_id}/analysis/export?format=md").status_code, 422)
+        self.assertIn("已失效",
+                      self.client.get(f"/api/local/v1/cases/{case_id}/analysis/export?format=md").text)
+
+
+class RedlineScopeTests(unittest.TestCase):
+    """硬红线只拦"我方自称已完成"，不得误伤第三方语境。"""
+
+    def test_third_party_submission_wording_does_not_block(self) -> None:
+        raw = {"case_posture": {"summary": "原告已提交法院的证据材料存在矛盾。"}}
+        analysis, gate = normalize_and_gate(raw, engine_amounts={})
+        self.assertNotEqual(gate.level, "HARD_BLOCKED")
+        self.assertIn("原告已提交法院", analysis["case_posture"]["summary"])
+        self.assertTrue(any("已提交法院" in item for item in gate.review_items))
+
+    def test_first_person_claim_still_blocks(self) -> None:
+        for phrase in ("我已批准该方案", "我已提交法院", "本人已批准"):
+            _, gate = normalize_and_gate({"case_posture": {"summary": phrase}},
+                                         engine_amounts={})
+            self.assertEqual(gate.level, "HARD_BLOCKED", phrase)
+

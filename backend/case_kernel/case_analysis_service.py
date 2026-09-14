@@ -24,8 +24,14 @@ from case_kernel.lawyer_practical_mode import (
     GateDecision,
     PracticalResult,
     build_practical_prompt,
+    extract_source_amounts,
     normalize_and_gate,
     render_practical_report,
+)
+from case_kernel.pdf_render import (
+    MAX_RENDERED_PAGES_DEFAULT,
+    render_pdf_pages,
+    renderer_unavailable_reason,
 )
 from case_kernel.shadow_engine import (
     ShadowDebt,
@@ -213,9 +219,30 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
             budget_cny=request.budget_cny,
             run_root=out_root,
         )
+        _emit(request, "识别扫描件（OCR）", 20)
+        # 扫描版 PDF：先把页面渲染成图片，才能进入视觉 OCR。
+        rendered_pages: list = []
+        path_overrides: dict = {}
+        render_note = ""
+        scanned_pdf_pages = [
+            page for page in pages
+            if page.file_name.lower().endswith(".pdf") and not page.text.strip()
+        ]
+        if scanned_pdf_pages:
+            rendered_pages, render_note, path_overrides = _render_scanned_pages(
+                request, pages, out_root
+            )
+
         authorized = set(preflight.get("sent_fields", {}).get("page_files", []))
-        _emit(request, "识别扫描件（OCR）", 25)
-        ocr_pages = transport.ocr_pages(pages, authorized, ledger) if authorized else []
+        for page in rendered_pages:
+            authorized.add((page.file_name, page.page_number))
+        ocr_targets = [
+            page for page in pages if not page.file_name.lower().endswith(".pdf")
+        ] + rendered_pages
+        ocr_pages = (
+            transport.ocr_pages(ocr_targets, authorized, ledger, path_overrides)
+            if ocr_targets else []
+        )
         ocr_by_key = {(p.file_name, p.page_number): p.text for p in ocr_pages}
 
         def surface_for(page) -> str:
@@ -233,7 +260,13 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
         _emit(request, "Agent 分析中", 60)
         raw = transport.call_analysis(instruction=instruction, ledger=ledger)
         _emit(request, "门禁校验", 85)
-        analysis, gate = normalize_and_gate(raw, engine_amounts=engine_numbers)
+        # 材料原文数字白名单：事实引用保留，模型自算数字剔除。
+        source_amounts = extract_source_amounts(
+            [page.text for page in pages] + [page.text for page in ocr_pages]
+        )
+        analysis, gate = normalize_and_gate(
+            raw, engine_amounts=engine_numbers, source_amounts=source_amounts
+        )
         out_root.joinpath("agent_raw_output.json").write_text(
             json.dumps(raw, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     except ShadowBlocked as error:
@@ -268,6 +301,15 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
         case_number=request.case_number, role=request.role, result=result,
         proposal_source=f"{preflight.get('model', 'qwen')}（真实调用）",
     )
+    if render_note or scanned_pdf_pages:
+        note_parts = [f"扫描版 PDF 处理：{render_note or renderer_unavailable_reason()}"]
+        if scanned_pdf_pages:
+            note_parts.append(
+                f"本次识别到 {len(scanned_pdf_pages)} 个无文本层页面"
+                + (f"，已渲染 {len(rendered_pages)} 页进入 OCR。" if rendered_pages
+                   else "，未能进入 OCR（见上）。")
+            )
+        report = _inject_render_note(report, " ".join(note_parts))
     report = _inject_engine_note(report, engine_note)
     out_root.joinpath("决策包.md").write_text(report, encoding="utf-8")
     _emit(request, "完成", 100)
@@ -283,6 +325,49 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
         cost_cny=_spent(ledger),
         calls=_ok_calls(ledger),
     )
+
+
+def _render_scanned_pages(request: AnalysisRequest, pages, out_root: Path):
+    """把无文本层的 PDF 页渲染为图片；返回 (PageText 列表, 说明, 路径覆盖表)。
+
+    来源仍指向原 PDF 的页号与文件名，保证引用可通过导入清单解析。
+    """
+    from case_kernel.shadow_mode import PageText
+
+    rendered: list = []
+    overrides: dict = {}
+    notes: list[str] = []
+    by_file: dict[str, list[int]] = {}
+    for page in pages:
+        if page.file_name.lower().endswith(".pdf") and not page.text.strip():
+            by_file.setdefault(page.file_name, []).append(page.page_number)
+    if not by_file:
+        return [], "", {}
+
+    render_dir = Path(out_root) / "rendered"
+    for file_name, page_numbers in sorted(by_file.items()):
+        source = Path(request.materials_dir) / file_name
+        rendered_file_pages, note = render_pdf_pages(
+            source, render_dir,
+            pages=sorted(page_numbers)[:MAX_RENDERED_PAGES_DEFAULT],
+        )
+        notes.append(f"{Path(file_name).name}: {note}")
+        for item in rendered_file_pages:
+            key = (file_name, item.page_number)
+            overrides[key] = item.path
+            rendered.append(PageText(file_name, "", item.page_number, ""))
+    return rendered, "；".join(notes), overrides
+
+
+def _inject_render_note(report: str, note: str) -> str:
+    """把扫描件处理说明写入报告（不可静默假装已读取）。"""
+    if not note:
+        return report
+    marker = "## 一、案情与立场"
+    block = f"> 材料读取说明：{note}\n\n"
+    if marker in report:
+        return report.replace(marker, block + marker, 1)
+    return report + f"\n\n{block}"
 
 
 def _inject_engine_note(report: str, note: str) -> str:

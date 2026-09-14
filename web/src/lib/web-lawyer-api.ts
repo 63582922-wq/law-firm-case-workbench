@@ -123,6 +123,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 
 /** Kept in sync with the server-side Web PDF staging limit. */
 export const WEB_MAX_PDF_BYTES = 256 * 1024 * 1024;
+export const WEB_MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 export const WEB_MAX_ARCHIVE_BYTES = 256 * 1024 * 1024;
 /** Kept in sync with the server-side common-material admission policy. */
 export const WEB_MAX_COMMON_MATERIAL_BYTES = 100 * 1024 * 1024;
@@ -2869,8 +2870,9 @@ export async function createWebMaterialUploadSlot(
   const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
   const normalizedExpectedVersion = requiredPositiveInteger(expectedVersion, "案件版本格式不正确", Number.MAX_SAFE_INTEGER);
   const clientFilename = normalizeClientFilename(file.name);
-  if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > WEB_MAX_PDF_BYTES) {
-    throw new Error("PDF 大小不符合要求，未创建材料接收位。");
+  const sizeLimit = isImageMaterialCandidate(file) ? WEB_MAX_IMAGE_BYTES : WEB_MAX_PDF_BYTES;
+  if (!Number.isSafeInteger(file.size) || file.size <= 0 || file.size > sizeLimit) {
+    throw new Error("文件大小不符合要求，未创建材料接收位。");
   }
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/material-uploads`, {
     method: "POST",
@@ -2878,7 +2880,7 @@ export async function createWebMaterialUploadSlot(
     body: JSON.stringify({
       client_filename: clientFilename,
       content_length: file.size,
-      content_type: "application/pdf",
+      content_type: webMaterialContentType(file),
       expected_version: normalizedExpectedVersion,
     }),
   });
@@ -2905,7 +2907,7 @@ export async function uploadWebMaterialPdf(
     `/api/v1/cases/${normalizedCaseId}/material-uploads/${normalizedUploadId}/content`,
     {
       method: "PUT",
-      headers: { "Content-Type": "application/pdf" },
+      headers: { "Content-Type": webMaterialContentType(file) },
       body: file,
     },
   );
@@ -3054,10 +3056,25 @@ export function normalizeCaseTitle(value: string): string {
   return normalized;
 }
 
+export function webMaterialContentType(file: File): string {
+  if (isImageMaterialCandidate(file)) {
+    return file.name.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
+  }
+  return "application/pdf";
+}
+
 export function isPdfCandidate(file: File): boolean {
   const filename = file.name.toLowerCase();
   const type = file.type.toLowerCase();
   return filename.endsWith(".pdf") && (type === "" || type === "application/pdf" || type === "application/x-pdf");
+}
+
+export function isImageMaterialCandidate(file: File): boolean {
+  const filename = file.name.toLowerCase();
+  const type = file.type.toLowerCase();
+  const suffixOk = filename.endsWith(".jpg") || filename.endsWith(".jpeg") || filename.endsWith(".png");
+  const typeOk = type === "" || type === "image/jpeg" || type === "image/png";
+  return suffixOk && typeOk;
 }
 
 export function isZipCandidate(file: File): boolean {
