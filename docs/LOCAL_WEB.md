@@ -80,6 +80,25 @@ python3 scripts/start_local_web.py --model-env-file ... --budget-cny 2
 正式数字当前为**不含付款冲抵的毛额**：付款性质与债务分配必须由律师确认后，才能计算净额。
 没有文本层的扫描页在任何情况下都不得被称为「Agent 已完成」。
 
+## 浏览器自检（会真的点页面，而不是只看构建结果）
+
+只跑构建或只调 API 无法发现「页面点不开」「响应解析失败」这类缺陷——本机模式曾因此
+长时间呈现「决策包尚未开放」而没人发现。自检脚本用真实 Chrome 走一遍关键路径：
+
+```text
+# 只读：打开决策包页面，核对状态、正式数字与导出按钮（不产生模型费用）
+python3 scripts/browser_check_decision_package.py --case-id <案件ID>
+
+# 真实运行：填写参数、授权扫描件、点击「开始分析」并等待终态，再核对导出
+python3 scripts/browser_check_decision_package.py --case-id <案件ID> \
+    --parameters /path/to/parameters.json --run --authorize-image-identifiers
+```
+
+脚本要求模型状态出现「进行中」才承认结果属于本次运行，并核对服务端调用次数与费用；
+未进入运行态时会打印页面告警并立即失败，不会拿上一次的「分析完成」冒充本次结果。
+依赖 `playwright`（`python3 -m pip install --user playwright`），复用本机已安装的 Chrome。
+
+
 ## 为什么生产模式需要更多服务
 
 OIDC/MFA、PostgreSQL、私有对象存储、ClamAV、Poppler、LibreOffice 是服务器端的生产能力，不应由每位律师单独安装。律所管理员部署一次后，律师只需浏览器登录。它们分别负责身份和权限、多人并发台账、原件保存、病毒扫描、PDF 页面渲染和文书转换。
