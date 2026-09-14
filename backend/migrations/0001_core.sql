@@ -84,6 +84,11 @@ CREATE TABLE submission_bundles (
     exported_at timestamptz,
     created_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (matter_id, bundle_id),
+    -- Later tenant-bound submission tables reference the immutable bundle
+    -- together with its firm and matter. PostgreSQL requires that exact
+    -- column tuple to be backed by a unique key; the bundle_id primary key
+    -- alone does not satisfy a composite foreign key.
+    UNIQUE (bundle_id, firm_id, matter_id),
     FOREIGN KEY (matter_id, firm_id) REFERENCES matters (matter_id, firm_id),
     FOREIGN KEY (approved_by, firm_id) REFERENCES users (user_id, firm_id)
 );
@@ -120,7 +125,9 @@ CREATE TABLE audit_events (
     actor_id uuid REFERENCES users(user_id),
     event_type text NOT NULL,
     input_version integer NOT NULL CHECK (input_version >= 0),
-    output_version integer NOT NULL CHECK (output_version > input_version),
+    output_version integer NOT NULL
+        CONSTRAINT audit_events_output_version_check
+        CHECK (output_version > input_version),
     request_id uuid NOT NULL,
     payload jsonb NOT NULL,
     occurred_at timestamptz NOT NULL DEFAULT now(),

@@ -55,7 +55,7 @@ class LocalStandaloneRuntimeTests(unittest.TestCase):
         with TemporaryDirectory(prefix="lawcase-local-standalone-") as temporary:
             root = Path(temporary)
             workspace = root / "workspace"
-            materials = root / "测试甲诉讼"
+            materials = root / "周雅丽诉讼"
             materials.mkdir()
             (materials / "法院送达资料.pdf").write_bytes(b"not-a-real-pdf")
             (materials / "微信转账记录.txt").write_text("local fixture", encoding="utf-8")
@@ -72,18 +72,18 @@ class LocalStandaloneRuntimeTests(unittest.TestCase):
             )
             self.assertEqual(selection.status_code, 200, selection.text)
             selected = selection.json()
-            self.assertEqual(selected["display_name"], "测试甲诉讼")
+            self.assertEqual(selected["display_name"], "周雅丽诉讼")
             self.assertNotIn(str(materials), selection.text)
 
             created = client.post(
                 "/v1/native-local/cases",
                 headers=parent_headers,
-                json={"title": "测试甲民间借贷应诉", "selection_id": selected["selection_id"]},
+                json={"title": "周雅丽民间借贷应诉", "selection_id": selected["selection_id"]},
             )
             self.assertEqual(created.status_code, 201, created.text)
             case = created.json()
             self.assertEqual(case["stage"], "MATERIALS_PENDING")
-            self.assertEqual(case["material_root"]["display_name"], "测试甲诉讼")
+            self.assertEqual(case["material_root"]["display_name"], "周雅丽诉讼")
             self.assertNotIn("selected_root", case)
             self.assertNotIn(str(materials), created.text)
 

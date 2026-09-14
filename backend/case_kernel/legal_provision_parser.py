@@ -22,6 +22,10 @@ class LegalProvisionParseBlocked(ValueError):
     """Captured content cannot support the required pinpoint provisions."""
 
 
+class LegalProvisionDocumentProjectionBlocked(ValueError):
+    """A registered source cannot yield a bounded, pinpoint document extract."""
+
+
 @dataclass(frozen=True)
 class ProvisionCandidate:
     provision_key: str
@@ -42,6 +46,22 @@ class ParsedLegalProvisionSnapshot:
     provisions: tuple[ProvisionCandidate, ...]
     parsed_output_hash: str
     review_status: str = "HUMAN_REVIEW_REQUIRED"
+
+
+@dataclass(frozen=True)
+class DocumentLegalSourceProjection:
+    """One deterministic, source-bound provision extract for a document.
+
+    ``source_content_sha256`` remains on the enclosing document source.  This
+    receipt hashes only the short, reproducible projection that may enter the
+    document compiler; it never replaces or truncates the immutable source.
+    """
+
+    schema_version: str
+    source_id: str
+    provision_labels: tuple[str, ...]
+    reviewed_text: str
+    reviewed_text_sha256: str
 
 
 _SOURCE_ID = "SPC-PRIVATE-LENDING-2020-SECOND-REVISION"
@@ -107,6 +127,12 @@ _CIVIL_CODE_ARTICLE_RULES = (
         ("禁止高利放贷", "没有约定", "视为没有利息", "约定不明确"),
     ),
 )
+_DOCUMENT_PROJECTION_SCHEMA_VERSION = "registered-legal-provision-projection-v1"
+_MAX_DOCUMENT_PROJECTION_CHARACTERS = 40_000
+_VERIFIED_SOURCE_READER_LABEL_PREFIX = (
+    "来源定位标签（由律师核验；系统未自动定位到精确条款）："
+)
+_CHINESE_ARTICLE_LABEL = re.compile(r"第[一二三四五六七八九十百千万零〇]+条")
 _FIRST_REVISION_SOURCE_ID = "SPC-PRIVATE-LENDING-2020-FIRST-REVISION"
 _FIRST_REVISION_RULES = (
     (
@@ -229,6 +255,69 @@ def parse_civil_code_borrowing_provisions(
         document_title=_CIVIL_CODE_TITLE,
         version_label="2020年5月28日通过",
         provisions=provisions,
+    )
+
+
+def project_registered_legal_source_for_document(
+    *,
+    source_id: str,
+    provision_locator: str,
+    literal_text: str,
+) -> DocumentLegalSourceProjection | None:
+    """Return a bounded exact extract only for a registered parser/source pair.
+
+    Most officially captured sources remain opaque to this helper: their
+    existing literal text is retained and the document compiler applies its
+    normal size gate.  The one supported source below has a version-specific
+    parser and a fixed, lawyer-recorded locator.  The locator is a permission
+    boundary, not a free-text search query: a changed or broadened locator
+    blocks rather than selecting a different provision.
+    """
+
+    normalized_source_id = _normalized_source_id(source_id)
+    if normalized_source_id != _CIVIL_CODE_SOURCE_ID:
+        return None
+    locator = _normalized_locator(provision_locator)
+    expected_labels = tuple(rule[1] for rule in _CIVIL_CODE_ARTICLE_RULES)
+    observed_labels = tuple(_CHINESE_ARTICLE_LABEL.findall(locator))
+    if observed_labels != expected_labels:
+        raise LegalProvisionDocumentProjectionBlocked(
+            "Civil Code document projection requires the exact registered article locator"
+        )
+    text = _literal_text_without_reader_label(literal_text=literal_text, locator=locator)
+    if _CIVIL_CODE_TITLE not in text[:2_000] or "2020年5月28日" not in text[:3_000]:
+        raise LegalProvisionDocumentProjectionBlocked(
+            "Civil Code document projection title or adoption-date anchor is missing"
+        )
+    positions = [text.find(rule[1]) for rule in _CIVIL_CODE_ARTICLE_RULES]
+    if positions[0] < 0 or positions[1] <= positions[0]:
+        raise LegalProvisionDocumentProjectionBlocked(
+            "Civil Code document projection article order is invalid"
+        )
+    try:
+        provisions = tuple(
+            _extract_provision(text, *rule) for rule in _CIVIL_CODE_ARTICLE_RULES
+        )
+    except LegalProvisionParseBlocked as error:
+        raise LegalProvisionDocumentProjectionBlocked(
+            "Civil Code document projection cannot authenticate the required articles"
+        ) from error
+    reviewed_text = "\n".join(
+        (
+            f"《{_CIVIL_CODE_TITLE}》已核验条款摘录（仅限登记定位范围）",
+            *(item.normalized_text for item in provisions),
+        )
+    )
+    if len(reviewed_text) > _MAX_DOCUMENT_PROJECTION_CHARACTERS:
+        raise LegalProvisionDocumentProjectionBlocked(
+            "Civil Code document projection exceeds the document source limit"
+        )
+    return DocumentLegalSourceProjection(
+        schema_version=_DOCUMENT_PROJECTION_SCHEMA_VERSION,
+        source_id=normalized_source_id,
+        provision_labels=expected_labels,
+        reviewed_text=reviewed_text,
+        reviewed_text_sha256=sha256(reviewed_text.encode("utf-8")).hexdigest(),
     )
 
 
@@ -407,6 +496,49 @@ def _extract_provision(
         source_locator=f"official text / {label}",
         required_markers=markers,
     )
+
+
+def _normalized_source_id(value: str) -> str:
+    if not isinstance(value, str):
+        raise LegalProvisionDocumentProjectionBlocked("legal source id is invalid")
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > 240
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        raise LegalProvisionDocumentProjectionBlocked("legal source id is invalid")
+    return normalized
+
+
+def _normalized_locator(value: str) -> str:
+    if not isinstance(value, str):
+        raise LegalProvisionDocumentProjectionBlocked("legal source locator is invalid")
+    normalized = _normalize_text(value)
+    if (
+        not normalized
+        or len(normalized) > 2_000
+        or "\x00" in normalized
+        or any(ord(character) < 32 for character in normalized)
+    ):
+        raise LegalProvisionDocumentProjectionBlocked("legal source locator is invalid")
+    return normalized
+
+
+def _literal_text_without_reader_label(*, literal_text: str, locator: str) -> str:
+    if not isinstance(literal_text, str) or not literal_text.strip() or "\x00" in literal_text:
+        raise LegalProvisionDocumentProjectionBlocked("verified legal source text is invalid")
+    expected_prefix = f"{_VERIFIED_SOURCE_READER_LABEL_PREFIX}{locator}\n\n"
+    if literal_text.startswith(_VERIFIED_SOURCE_READER_LABEL_PREFIX):
+        if not literal_text.startswith(expected_prefix):
+            raise LegalProvisionDocumentProjectionBlocked(
+                "verified legal source reader label differs from the registered locator"
+            )
+        literal_text = literal_text[len(expected_prefix) :]
+    normalized = _normalize_text(literal_text)
+    if not normalized:
+        raise LegalProvisionDocumentProjectionBlocked("verified legal source has no literal text")
+    return normalized
 
 
 def _normalize_text(value: str) -> str:

@@ -15,7 +15,11 @@ class AgentCapabilityManifestTests(unittest.TestCase):
         manifest = build_case_agent_capability_manifest()
         self.assertEqual(manifest["schema_version"], SCHEMA_VERSION)
         self.assertEqual([item["skill_id"] for item in manifest["skills"]], sorted(item["skill_id"] for item in manifest["skills"]))
-        self.assertTrue(any(item["maturity"] == "IMPLEMENTED" for item in manifest["skills"]))
+        # The build-time manifest is the fail-closed baseline.  A capability
+        # becomes IMPLEMENTED only in a server composition that has supplied
+        # its concrete runtime adapter; the static browser artifact must not
+        # imply that an adapter is running.
+        self.assertFalse(any(item["maturity"] == "IMPLEMENTED" for item in manifest["skills"]))
         self.assertTrue(any(item["maturity"] == "GATED" for item in manifest["skills"]))
         encoded = render_case_agent_capability_manifest()
         self.assertNotIn("postgres", encoded.casefold())

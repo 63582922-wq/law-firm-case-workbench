@@ -14,7 +14,8 @@ from copy import deepcopy
 from datetime import datetime
 from hashlib import sha256
 import json
-from typing import Callable, Iterator
+from types import MappingProxyType
+from typing import Callable, Iterator, Mapping
 from uuid import UUID, uuid4
 
 import psycopg
@@ -37,13 +38,59 @@ from .models import (
 from .store import StoredCommand
 
 
+class CaseAgentMatterProvisioningBlocked(PermissionError):
+    """A new matter cannot be bound to the fixed server-side Agent identities."""
+
+
+def preflight_case_agent_matter_provisioning_contract(
+    *,
+    dsn: str,
+    system_worker_ids_by_firm: Mapping[str, str],
+    system_verifier_ids_by_firm: Mapping[str, str],
+) -> None:
+    """Prove Web creation can lock the configured dedicated Agent identities.
+
+    Matter creation takes a row lock on both service principals so an identity
+    cannot be suspended or repurposed between validation and role binding.
+    Verify that exact capability while assembling the Web process, rather than
+    letting the first lawyer discover a missing row-lock privilege in the UI.
+    """
+
+    store = PostgresMatterStore(
+        dsn,
+        system_worker_ids_by_firm=system_worker_ids_by_firm,
+        system_verifier_ids_by_firm=system_verifier_ids_by_firm,
+    )
+    for firm_id in sorted(store._system_workers):
+        execution_actor_id, verifier_actor_id = store._case_agent_principals(firm_id)
+        with store._transaction(firm_id) as connection:
+            store._authorize_case_agent_principals(
+                connection,
+                firm_id=firm_id,
+                execution_actor_id=execution_actor_id,
+                verifier_actor_id=verifier_actor_id,
+            )
+
+
 class PostgresMatterStore:
     """Synchronous repository adapter for provisioned UUID identities and PostgreSQL 16+."""
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        system_worker_ids_by_firm: Mapping[str, str] | None = None,
+        system_verifier_ids_by_firm: Mapping[str, str] | None = None,
+    ) -> None:
         if not dsn.strip():
             raise ValueError("PostgreSQL DSN is required")
         self._dsn = dsn
+        self._system_workers, self._system_verifiers = (
+            _normalize_case_agent_principal_mappings(
+                system_worker_ids_by_firm,
+                system_verifier_ids_by_firm,
+            )
+        )
 
     def create(self, *, matter: Matter, actor: Actor, idempotency_key: str) -> CommandReceipt:
         _validate_identifiers(matter_id=matter.matter_id, firm_id=actor.firm_id, actor_id=actor.actor_id)
@@ -52,7 +99,19 @@ class PostgresMatterStore:
         if Role.LEAD_LAWYER not in actor.roles:
             raise PermissionError("only a lead lawyer can create a matter")
         _require_key(idempotency_key)
-        payload = {"command": "CREATE_MATTER", "title": matter.title}
+        execution_actor_id, verifier_actor_id = self._case_agent_principals(
+            actor.firm_id
+        )
+        if actor.actor_id in {execution_actor_id, verifier_actor_id}:
+            raise CaseAgentMatterProvisioningBlocked(
+                "a human matter creator cannot be an Agent service principal"
+            )
+        payload = {
+            "command": "CREATE_MATTER",
+            "title": matter.title,
+            "case_agent_execution_actor_id": execution_actor_id,
+            "case_agent_verifier_actor_id": verifier_actor_id,
+        }
         payload_hash = _payload_hash(payload)
         with self._transaction(actor.firm_id) as connection:
             _advisory_lock(connection, _command_scope(actor.actor_id, matter.matter_id, "CREATE_MATTER", idempotency_key))
@@ -66,6 +125,12 @@ class PostgresMatterStore:
             if prior is not None:
                 return _resolve_idempotency(prior, payload_hash)
 
+            self._authorize_case_agent_principals(
+                connection,
+                firm_id=actor.firm_id,
+                execution_actor_id=execution_actor_id,
+                verifier_actor_id=verifier_actor_id,
+            )
             connection.execute(
                 """
                 INSERT INTO matters (matter_id, firm_id, title, stage, version)
@@ -83,6 +148,27 @@ class PostgresMatterStore:
                 VALUES (%s, %s, %s, 'LEAD_LAWYER')
                 """,
                 (matter.matter_id, actor.firm_id, actor.actor_id),
+            )
+            # The browser never supplies either service identity.  Both are
+            # taken from the immutable server composition and are granted in
+            # the same transaction as the matter, so a successful Web create
+            # can never leave an Agent-ready firm with an unclaimable case.
+            connection.execute(
+                """
+                INSERT INTO matter_actor_roles (
+                    matter_id, firm_id, user_id, role
+                ) VALUES
+                    (%s, %s, %s, 'SYSTEM_WORKER'),
+                    (%s, %s, %s, 'SYSTEM_WORKER')
+                """,
+                (
+                    matter.matter_id,
+                    actor.firm_id,
+                    execution_actor_id,
+                    matter.matter_id,
+                    actor.firm_id,
+                    verifier_actor_id,
+                ),
             )
             event = AuditEvent.create(
                 matter=matter,
@@ -110,6 +196,62 @@ class PostgresMatterStore:
             )
             return receipt
 
+    def _case_agent_principals(self, firm_id: str) -> tuple[str, str]:
+        execution_actor_id = self._system_workers.get(firm_id)
+        verifier_actor_id = self._system_verifiers.get(firm_id)
+        if execution_actor_id is None or verifier_actor_id is None:
+            raise CaseAgentMatterProvisioningBlocked(
+                "case Agent service identities are not provisioned for this firm"
+            )
+        return execution_actor_id, verifier_actor_id
+
+    @staticmethod
+    def _authorize_case_agent_principals(
+        connection: psycopg.Connection,
+        *,
+        firm_id: str,
+        execution_actor_id: str,
+        verifier_actor_id: str,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT principal.user_id AS actor_id, principal.status,
+                   principal.firm_id,
+                   EXISTS (
+                       SELECT 1
+                       FROM matter_actor_roles role
+                       WHERE role.user_id = principal.user_id
+                         AND role.firm_id = %s
+                         AND role.revoked_at IS NULL
+                         AND role.role <> 'SYSTEM_WORKER'
+                   ) AS has_active_non_worker_role
+            FROM users principal
+            WHERE principal.firm_id = %s
+              AND principal.user_id = ANY(%s)
+            ORDER BY principal.user_id
+            FOR UPDATE OF principal
+            """,
+            (
+                firm_id,
+                firm_id,
+                [execution_actor_id, verifier_actor_id],
+            ),
+        ).fetchall()
+        if (
+            len(rows) != 2
+            or {str(row["actor_id"]) for row in rows}
+            != {execution_actor_id, verifier_actor_id}
+            or any(
+                str(row["firm_id"]) != firm_id
+                or row["status"] != "ACTIVE"
+                or bool(row["has_active_non_worker_role"])
+                for row in rows
+            )
+        ):
+            raise CaseAgentMatterProvisioningBlocked(
+                "case Agent service identities are not dedicated active SYSTEM_WORKER principals"
+            )
+
     def get(self, matter_id: str, *, firm_id: str | None = None) -> Matter:
         if firm_id is None:
             raise ValueError("firm_id is required for PostgreSQL matter reads")
@@ -123,7 +265,24 @@ class PostgresMatterStore:
         with self._transaction(actor.firm_id) as connection:
             rows = connection.execute(
                 """
-                SELECT DISTINCT m.matter_id, m.title, m.stage, m.version, m.updated_at
+                SELECT DISTINCT m.matter_id, m.title, m.stage, m.version, m.updated_at,
+                       (
+                           SELECT count(*)
+                           FROM evidence_original_files evidence
+                           WHERE evidence.firm_id = m.firm_id
+                             AND evidence.matter_id = m.matter_id
+                             -- Web JPEG/PNG admission also creates an evidence
+                             -- original, but its authoritative upload record is
+                             -- case_material_objects below.  Count only native
+                             -- PDF originals here so every browser material is
+                             -- projected exactly once.
+                             AND evidence.media_type = 'application/pdf'
+                       ) + (
+                           SELECT count(*)
+                           FROM case_material_objects material
+                           WHERE material.firm_id = m.firm_id
+                             AND material.matter_id = m.matter_id
+                       ) AS material_count
                 FROM matters m
                 JOIN matter_actor_roles mar
                   ON mar.matter_id = m.matter_id AND mar.firm_id = m.firm_id
@@ -141,6 +300,7 @@ class PostgresMatterStore:
                 "stage": row["stage"],
                 "version": row["version"],
                 "updated_at": row["updated_at"],
+                "material_count": int(row["material_count"]),
             }
             for row in rows
         ]
@@ -491,6 +651,57 @@ def _validate_identifiers(*, matter_id: str | None, firm_id: str, actor_id: str 
             UUID(value)
         except (TypeError, ValueError) as error:
             raise ValueError(f"PostgreSQL persistence requires UUID {label}; Alpha identifiers are not accepted") from error
+
+
+def _normalize_case_agent_principal_mappings(
+    workers: Mapping[str, str] | None,
+    verifiers: Mapping[str, str] | None,
+) -> tuple[Mapping[str, str], Mapping[str, str]]:
+    """Freeze the server-owned per-firm identities used by matter creation.
+
+    An empty pair keeps non-Web/legacy stores constructible for read and
+    migration tooling, but ``create`` then fails closed.  A partially supplied
+    or internally inconsistent pair is rejected at construction.
+    """
+
+    if workers is None and verifiers is None:
+        empty: Mapping[str, str] = MappingProxyType({})
+        return empty, empty
+    if not isinstance(workers, Mapping) or not isinstance(verifiers, Mapping):
+        raise ValueError("case Agent execution/verifier mappings must be supplied together")
+    if not workers or not verifiers:
+        raise ValueError("case Agent execution/verifier mappings cannot be empty")
+
+    def normalized(source: Mapping[str, str], label: str) -> dict[str, str]:
+        result: dict[str, str] = {}
+        actor_ids: set[str] = set()
+        for firm_id, actor_id in source.items():
+            try:
+                firm = str(UUID(str(firm_id)))
+                principal = str(UUID(str(actor_id)))
+            except (TypeError, ValueError, AttributeError):
+                raise ValueError(f"case Agent {label} mapping is invalid") from None
+            if firm in result or principal in actor_ids:
+                raise ValueError(
+                    f"case Agent {label} mapping must use one dedicated actor per firm"
+                )
+            result[firm] = principal
+            actor_ids.add(principal)
+        return result
+
+    normalized_workers = normalized(workers, "execution")
+    normalized_verifiers = normalized(verifiers, "verifier")
+    if set(normalized_workers) != set(normalized_verifiers) or any(
+        normalized_workers[firm_id] == normalized_verifiers[firm_id]
+        for firm_id in normalized_workers
+    ):
+        raise ValueError("case Agent execution/verifier mappings are inconsistent")
+    if set(normalized_workers.values()).intersection(normalized_verifiers.values()):
+        raise ValueError("case Agent service identities cannot be reused across duties")
+    return (
+        MappingProxyType(normalized_workers),
+        MappingProxyType(normalized_verifiers),
+    )
 
 
 def _require_key(value: str) -> None:

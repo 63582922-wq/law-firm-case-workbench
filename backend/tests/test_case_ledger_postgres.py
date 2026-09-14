@@ -65,6 +65,8 @@ class FakeConnection:
         self.executed.append((normalized, params))
         if "SELECT request_hash, response_json" in normalized:
             return FakeResult(row=None)
+        if normalized.startswith("SELECT response_json FROM command_idempotency"):
+            return FakeResult(row=getattr(self,"recovery_row",None))
         if "SELECT m.version," in normalized:
             return FakeResult(row={"version": 1, "permitted": self.permitted})
         if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"):
@@ -100,8 +102,9 @@ class FakeConnection:
             return FakeResult(rows=list(self.summary_claim_rows))
         if normalized.startswith("SELECT issue.issue_id, issue.question, issue.status"):
             return FakeResult(rows=list(self.summary_issue_rows))
-        if "SELECT status FROM case_facts" in normalized:
-            return FakeResult(row={"status": self.fact_status})
+        if normalized.startswith("SELECT status, to_jsonb(case_facts)"):
+            return FakeResult(row={"status": self.fact_status,
+                "correction_proposal_id":getattr(self,"correction_proposal_id",None)})
         if "SELECT status, claimed_amount, currency FROM case_claims" in normalized:
             return FakeResult(row={"status": "CONFIRMED_SCOPE", "claimed_amount": Decimal("1000.00"), "currency": "CNY"})
         if "SELECT fact_id, status FROM case_facts WHERE fact_id = ANY" in normalized:
@@ -254,6 +257,34 @@ class PostgresCaseLedgerStoreTests(unittest.TestCase):
         self.assertIn("UPDATE case_dispute_issues", sql)
         self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
         self.assertIn("current_submission_bundle_id = CASE WHEN", sql)
+
+    def test_corrected_fact_cannot_use_an_unconfigured_decision_adapter(self) -> None:
+        connection=FakeConnection()
+        connection.correction_proposal_id=str(uuid4())
+        with patch("case_kernel.case_ledger_postgres.psycopg.connect",
+                   return_value=FakeConnectionContext(connection)):
+            with self.assertRaisesRegex(ValueError,"independent source verification"):
+                self.store.decide_fact(matter_id=self.matter_id,fact_id=str(uuid4()),actor=self.actor,
+                    expected_version=1,idempotency_key="unconfigured-correction-decision",
+                    status=FactStatus.CONFIRMED,decision_hash="b"*64)
+        self.assertFalse(any("UPDATE case_facts" in sql for sql,_ in connection.executed))
+
+    def test_fact_decision_recovery_is_authorized_read_only_and_fact_bound(self) -> None:
+        from case_kernel.errors import IdempotencyConflict
+        fact_id=str(uuid4())
+        connection=FakeConnection()
+        args=dict(matter_id=self.matter_id,fact_id=fact_id,actor=self.actor,idempotency_key='recovery-fact-test')
+        with patch("case_kernel.case_ledger_postgres.psycopg.connect",return_value=FakeConnectionContext(connection)):
+            self.assertIsNone(self.store.find_fact_decision_by_key(**args))
+            connection.recovery_row=dict(response_json=dict(command_name='DECIDE_FACT',
+                idempotency_key=args['idempotency_key'],matter_id=self.matter_id,matter_version=8,
+                audit_event_id=str(uuid4()),object_type='FACT',object_id=fact_id))
+            self.assertEqual(self.store.find_fact_decision_by_key(**args).matter_version,8)
+            with self.assertRaises(IdempotencyConflict):
+                self.store.find_fact_decision_by_key(**{**args,'fact_id':str(uuid4())})
+            connection.permitted=False
+            with self.assertRaises(PermissionError):self.store.find_fact_decision_by_key(**args)
+        self.assertFalse(any(sql.startswith(('INSERT','UPDATE','DELETE')) for sql,_ in connection.executed))
 
     def test_database_membership_is_required_even_when_actor_claims_a_role(self) -> None:
         connection = FakeConnection(permitted=False)

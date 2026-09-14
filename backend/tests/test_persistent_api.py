@@ -948,7 +948,7 @@ class PersistentApiTests(unittest.TestCase):
         response = client.post(
             "/v1/matters",
             headers={"Idempotency-Key": "create-matter-001", "X-Actor": "forged-actor-is-ignored"},
-            json={"title": "测试甲借款纠纷"},
+            json={"title": "周雅丽借款纠纷"},
         )
         self.assertEqual(response.status_code, 201, response.text)
         payload = response.json()
@@ -961,7 +961,7 @@ class PersistentApiTests(unittest.TestCase):
         store = FakePersistentMatterStore()
         store.items = [{
             "matter_id": self.matter_id,
-            "title": "测试甲借款纠纷",
+            "title": "周雅丽借款纠纷",
             "stage": "INGESTING",
             "version": 2,
             "updated_at": datetime.now(timezone.utc),
@@ -980,7 +980,7 @@ class PersistentApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
         self.assertEqual(payload["matters"][0]["matter_id"], self.matter_id)
-        self.assertEqual(payload["matters"][0]["title"], "测试甲借款纠纷")
+        self.assertEqual(payload["matters"][0]["title"], "周雅丽借款纠纷")
 
     def test_server_identity_drives_fact_candidate_without_actor_headers(self) -> None:
         store = FakePersistentFactStore()

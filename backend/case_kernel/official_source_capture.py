@@ -196,10 +196,12 @@ def capture_authorized_official_source(
     response = transport.fetch(url=request.target_url, max_bytes=max_bytes)
     _validate_response(response=response, request=request, source=source, max_bytes=max_bytes)
     content_hash = sha256(response.body).hexdigest()
-    encrypted = artifact_store.put_bytes(
-        response.body,
+    encrypted = _store_captured_bytes(
+        artifact_store=artifact_store,
+        body=response.body,
         expected_sha256=content_hash,
         case_root=case_root,
+        content_media_type=response.media_type,
     )
     receipt = gateway.record_response(
         request_id=request.request_id,
@@ -245,6 +247,39 @@ def capture_authorized_official_source(
         response_receipt=receipt,
         verification_hash=verification_hash,
     )
+
+
+def _store_captured_bytes(
+    *,
+    artifact_store: object,
+    body: bytes,
+    expected_sha256: str,
+    case_root: str,
+    content_media_type: str,
+) -> StoredArtifactObject:
+    """Persist exact public bytes without weakening the legacy local contract.
+
+    Production Web storage needs the authenticated media type to bind an S3
+    object to a firm and matter.  The local encrypted store intentionally has
+    no such field, so it continues through its original narrow method.
+    """
+    put_captured = getattr(artifact_store, "put_captured_official_source", None)
+    if callable(put_captured):
+        stored = put_captured(
+            body,
+            expected_sha256=expected_sha256,
+            case_root=case_root,
+            content_media_type=content_media_type,
+        )
+    else:
+        stored = artifact_store.put_bytes(
+            body,
+            expected_sha256=expected_sha256,
+            case_root=case_root,
+        )
+    if not isinstance(stored, StoredArtifactObject):
+        raise OfficialSourceCaptureBlocked("official source storage receipt is invalid")
+    return stored
 
 
 def _validate_request_source(*, request: ExternalResearchRequest, source: PublicSource) -> None:

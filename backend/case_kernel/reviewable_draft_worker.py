@@ -12,10 +12,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from typing import Iterable
+from typing import Iterable, Protocol
 
 from .approved_draft_worker import ApprovedDraft, DraftArtifact, create_docx_draft, create_xlsx_ledger
-from .office_pdf_conversion_worker import ConvertedOfficePdf, SandboxedOfficePdfConverter
+from .office_pdf_conversion_worker import ConvertedOfficePdf
+
+
+class ReviewOfficeConverter(Protocol):
+    """Small server-worker contract; it avoids importing macOS sandbox code."""
+
+    def convert_generated_document(self, content: bytes, *, content_sha256: str, source_name: str, detected_kind: str) -> ConvertedOfficePdf: ...
+
+
+class ReviewOfficeConversionBlocked(ValueError):
+    """The renderer returned a known rejection; repeating it is not recovery."""
+
+
+class ReviewOfficeConversionUnknown(TimeoutError):
+    """The renderer may have completed, so the request must not be repeated."""
 
 
 class ReviewableDraftBlocked(ValueError):
@@ -31,7 +45,7 @@ class ReviewableOfficeDraft:
 
 
 def create_reviewable_docx_draft(
-    draft: ApprovedDraft, *, converter: SandboxedOfficePdfConverter
+    draft: ApprovedDraft, *, converter: ReviewOfficeConverter
 ) -> ReviewableOfficeDraft:
     editable = create_docx_draft(draft)
     return _render_editable_draft(
@@ -49,7 +63,7 @@ def create_reviewable_xlsx_ledger(
     sheet_name: str,
     columns: tuple[str, ...],
     rows: Iterable[tuple[str | int | float | None, ...]],
-    converter: SandboxedOfficePdfConverter,
+    converter: ReviewOfficeConverter,
 ) -> ReviewableOfficeDraft:
     editable = create_xlsx_ledger(
         approval_hash=approval_hash,
@@ -72,10 +86,10 @@ def _render_editable_draft(
     approval_hash: str,
     source_name: str,
     detected_kind: str,
-    converter: SandboxedOfficePdfConverter,
+    converter: ReviewOfficeConverter,
 ) -> ReviewableOfficeDraft:
-    if not isinstance(converter, SandboxedOfficePdfConverter):
-        raise ReviewableDraftBlocked("reviewable Office drafts require the isolated desktop converter")
+    if not callable(getattr(converter, "convert_generated_document", None)):
+        raise ReviewableDraftBlocked("reviewable Office drafts require an isolated server converter")
     review_pdf = converter.convert_generated_document(
         editable.content,
         content_sha256=editable.content_sha256,

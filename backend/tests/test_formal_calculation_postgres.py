@@ -39,6 +39,8 @@ class FakeCalculationConnection:
         self.segment_id = str(uuid4())
         self.duplicate_status = duplicate_status
         self.currency = currency
+        self.annual_rate = Decimal("0.12")
+        self.rule_rows = [{"rule_version": "SYNTHETIC-RULE-2020", "issue_key": "INTEREST"}]
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -50,8 +52,8 @@ class FakeCalculationConnection:
             return FakeResult(row={"version": 1, "permitted": True})
         if "SELECT bundle_id, bundle_hash, status FROM case_legal_bundles" in normalized:
             return FakeResult(row={"bundle_id": self.bundle_id, "bundle_hash": "a" * 64, "status": "APPROVED"})
-        if "SELECT rule_version FROM case_legal_bundle_rule_versions" in normalized:
-            return FakeResult(rows=[{"rule_version": "SYNTHETIC-RULE-2020"}])
+        if "SELECT rule_version, issue_key FROM case_legal_bundle_rule_versions" in normalized:
+            return FakeResult(rows=self.rule_rows)
         if "FROM case_legal_bundle_segments" in normalized:
             return FakeResult(
                 rows=[
@@ -59,7 +61,7 @@ class FakeCalculationConnection:
                         "segment_id": self.segment_id,
                         "start_date": date(2020, 1, 1),
                         "end_date": date(2021, 1, 1),
-                        "annual_rate": Decimal("0.12"),
+                        "annual_rate": self.annual_rate,
                         "source_rule_version": "SYNTHETIC-RULE-2020",
                         "applicability_anchor": "synthetic approved event",
                         "approval_hash": "c" * 64,
@@ -185,6 +187,27 @@ class FormalCalculationStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "CNY-cent"):
             self.calculate(foreign)
         self.assertFalse(any("INSERT INTO calculation_runs" in sql for sql, _ in foreign.executed))
+
+    def test_source_review_scope_cannot_authorize_calculation_even_in_mixed_bundle(self) -> None:
+        review_rule = {
+            "rule_version": "M2-SOURCE-2026-09-04",
+            "issue_key": "PRIVATE_LENDING_RESPONSE_SOURCE_SCOPE",
+        }
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                connection = FakeCalculationConnection()
+                connection.rule_rows = ([*connection.rule_rows] if mixed else []) + [review_rule]
+                with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "source-review-only"):
+                    self.calculate(connection)
+                self.assertFalse(any("INSERT INTO" in sql for sql, _ in connection.executed))
+                self.assertFalse(any("FROM case_payment_allocations" in sql for sql, _ in connection.executed))
+
+    def test_genuine_approved_zero_rate_is_not_rejected_as_source_review(self) -> None:
+        connection = FakeCalculationConnection()
+        connection.annual_rate = Decimal("0")
+        receipt = self.calculate(connection)
+        self.assertEqual(receipt.matter_version, 2)
+        self.assertTrue(any("INSERT INTO calculation_runs" in sql for sql, _ in connection.executed))
 
 
 if __name__ == "__main__":

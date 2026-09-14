@@ -40,6 +40,8 @@ class FakeLegalConnection:
         rate_authority: str = "OFFICIAL_RATE_DATA",
         impacted_matter_id: str | None = None,
         license_reviewed: bool = True,
+        reused_source_snapshot: dict | None = None,
+        reused_rule_version: dict | None = None,
     ) -> None:
         self.source_snapshot_id = str(uuid4())
         self.rate_source_snapshot_id = str(uuid4())
@@ -51,6 +53,8 @@ class FakeLegalConnection:
         self.rate_authority = rate_authority
         self.impacted_matter_id = impacted_matter_id
         self.license_reviewed = license_reviewed
+        self.reused_source_snapshot = reused_source_snapshot
+        self.reused_rule_version = reused_rule_version
         self.executed: list[tuple[str, tuple | None]] = []
 
     def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
@@ -80,6 +84,11 @@ class FakeLegalConnection:
                     "license_review_hash": "e" * 64 if self.license_reviewed else None,
                 }
             )
+        if (
+            "FROM official_legal_source_snapshots" in normalized
+            and "WHERE firm_id = %s AND source_id = %s AND content_sha256 = %s" in normalized
+        ):
+            return FakeResult(row=self.reused_source_snapshot)
         if "FROM official_lpr_observations" in normalized:
             return FakeResult(row={"one_year_rate": Decimal("0.0385")})
         if "FROM case_legal_bundle_segments segment" in normalized:
@@ -182,6 +191,11 @@ class FakeLegalConnection:
                     }
                 ]
             )
+        if (
+            "FROM legal_rule_versions" in normalized
+            and "WHERE firm_id = %s AND rule_id = %s AND rule_version = %s" in normalized
+        ):
+            return FakeResult(row=self.reused_rule_version)
         if "FROM case_legal_fact_bindings binding" in normalized:
             if not self.include_required_binding:
                 return FakeResult(rows=[])
@@ -344,6 +358,31 @@ class LegalSourceStoreTests(unittest.TestCase):
                 **{**common, "storage_object_key": f"bb/bb/{'b' * 64}.lca"},
                 official_url="https://www.court.gov.cn/zixun/xiangqing/282621.html",
             )
+        # ``www.spp.gov.cn`` is an explicitly registered primary-law mirror,
+        # not a broad ``*.gov.cn`` exception.  Reaching the missing-reader
+        # guard proves the URL passed the formal-source allowlist.
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "encrypted-object verifier"):
+            self.store.register_official_source_snapshot(
+                **common,
+                official_url="https://www.spp.gov.cn/zdgz/202006/t20200602_463886.shtml",
+            )
+        # ADR-0073 admits this exact government host for the frozen M1 Civil
+        # Code source.  A missing object reader proves URL validation passed;
+        # the following assertion keeps the exception from becoming a broad
+        # MIIT-domain wildcard.
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "encrypted-object verifier"):
+            self.store.register_official_source_snapshot(
+                **common,
+                official_url=(
+                    "https://tjca.miit.gov.cn/zwgk/zcwj/flfg/art/2020/"
+                    "art_20cf1a2e1b854924b5caa744c8045d1f.html"
+                ),
+            )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "registered official"):
+            self.store.register_official_source_snapshot(
+                **common,
+                official_url="https://miit.gov.cn/zwgk/not-the-approved-source.html",
+            )
         with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "encrypted-object verifier"):
             self.store.register_official_source_snapshot(
                 **common,
@@ -386,6 +425,106 @@ class LegalSourceStoreTests(unittest.TestCase):
         )
         self.assertEqual(receipt.matter_version, 2)
         self.assertTrue(
+            any("INSERT INTO official_legal_source_snapshots" in sql for sql, _ in connection.executed)
+        )
+
+    def test_matching_firm_source_snapshot_is_reused_with_a_new_matter_receipt(self) -> None:
+        plaintext = b"synthetic shared official source bytes"
+        content_hash = sha256(plaintext).hexdigest()
+        storage_object_key = f"{content_hash[:2]}/{content_hash[2:4]}/{content_hash}.lca"
+        connection = FakeLegalConnection()
+        connection.reused_source_snapshot = {
+            "snapshot_id": connection.source_snapshot_id,
+            "publisher": "最高人民法院",
+            "authority_level": "JUDICIAL_INTERPRETATION",
+            "official_url": "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+            "provision_locator": "第二十五条、第三十一条",
+            "content_media_type": "text/html",
+            "storage_object_key": storage_object_key,
+            "verification_status": "VERIFIED",
+            "license_status": "ACTIVE",
+            "license_basis": "official public access for internal legal review",
+            "license_review_hash": "e" * 64,
+        }
+        store = PostgresLegalSourceStore(
+            "postgresql://not-used.invalid/lawcase_test",
+            official_source_reader=lambda _key, _expected: plaintext,
+        )
+
+        receipt = self.run_with(
+            connection,
+            lambda: store.register_official_source_snapshot(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="official-source-reuse-001",
+                source_id="PRIVATE-LENDING-CURRENT",
+                publisher="最高人民法院",
+                authority_level=LegalAuthorityLevel.JUDICIAL_INTERPRETATION,
+                official_url="https://www.court.gov.cn/zixun/xiangqing/282621.html",
+                provision_locator="第二十五条、第三十一条",
+                retrieved_at=datetime.now(timezone.utc),
+                content_sha256=content_hash,
+                content_media_type="text/html",
+                storage_object_key=storage_object_key,
+                verification_hash="b" * 64,
+                license_basis="official public access for internal legal review",
+                license_review_hash="f" * 64,
+            ),
+        )
+
+        self.assertEqual(receipt.object_id, connection.source_snapshot_id)
+        self.assertFalse(
+            any("INSERT INTO official_legal_source_snapshots" in sql for sql, _ in connection.executed)
+        )
+        self.assertIn("OFFICIAL_LEGAL_SOURCE_SNAPSHOT_REUSED", str(connection.executed))
+
+    def test_conflicting_firm_source_snapshot_cannot_be_silently_reused(self) -> None:
+        plaintext = b"synthetic conflicting official source bytes"
+        content_hash = sha256(plaintext).hexdigest()
+        storage_object_key = f"{content_hash[:2]}/{content_hash[2:4]}/{content_hash}.lca"
+        connection = FakeLegalConnection()
+        connection.reused_source_snapshot = {
+            "snapshot_id": connection.source_snapshot_id,
+            "publisher": "错误发布者",
+            "authority_level": "JUDICIAL_INTERPRETATION",
+            "official_url": "https://www.court.gov.cn/zixun/xiangqing/282621.html",
+            "provision_locator": "第二十五条、第三十一条",
+            "content_media_type": "text/html",
+            "storage_object_key": storage_object_key,
+            "verification_status": "VERIFIED",
+            "license_status": "ACTIVE",
+            "license_basis": "official public access for internal legal review",
+            "license_review_hash": "e" * 64,
+        }
+        store = PostgresLegalSourceStore(
+            "postgresql://not-used.invalid/lawcase_test",
+            official_source_reader=lambda _key, _expected: plaintext,
+        )
+
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "different governance fields"):
+            self.run_with(
+                connection,
+                lambda: store.register_official_source_snapshot(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="official-source-reuse-conflict-001",
+                    source_id="PRIVATE-LENDING-CURRENT",
+                    publisher="最高人民法院",
+                    authority_level=LegalAuthorityLevel.JUDICIAL_INTERPRETATION,
+                    official_url="https://www.court.gov.cn/zixun/xiangqing/282621.html",
+                    provision_locator="第二十五条、第三十一条",
+                    retrieved_at=datetime.now(timezone.utc),
+                    content_sha256=content_hash,
+                    content_media_type="text/html",
+                    storage_object_key=storage_object_key,
+                    verification_hash="b" * 64,
+                    license_basis="official public access for internal legal review",
+                    license_review_hash="f" * 64,
+                ),
+            )
+        self.assertFalse(
             any("INSERT INTO official_legal_source_snapshots" in sql for sql, _ in connection.executed)
         )
 
@@ -569,6 +708,114 @@ class LegalSourceStoreTests(unittest.TestCase):
         self.assertIn("FROM official_lpr_observations", sql)
         self.assertIn("UPDATE calculation_runs", sql)
         self.assertIn("UPDATE case_legal_bundles", sql)
+
+    def test_matching_firm_rule_version_is_reused_with_a_new_matter_receipt(self) -> None:
+        connection = FakeLegalConnection()
+        connection.reused_rule_version = {
+            "rule_version_id": connection.rule_version_id,
+            "issue_key": "private_lending_response_source_scope",
+            "source_snapshot_id": connection.source_snapshot_id,
+            "parameter_source_snapshot_id": None,
+            "parameter_evidence_locator": None,
+            "effective_from": date(2019, 1, 1),
+            "effective_to": None,
+            "trigger_event_kind": "CONTRACT_SIGNED",
+            "formula_kind": "NO_INTEREST",
+            "base_annual_rate": None,
+            "rate_multiplier": None,
+            "derived_annual_rate": Decimal("0"),
+            "required_fact_keys": [],
+            "transition_rule_versions": [],
+            "conflict_set": None,
+            "priority": 1,
+            "status": "APPROVED",
+        }
+
+        receipt = self.run_with(
+            connection,
+            lambda: self.store.approve_rule_version(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="legal-rule-reuse-001",
+                rule_id="private-lending-response-source-scope",
+                rule_version="1.0.0",
+                issue_key="private_lending_response_source_scope",
+                source_snapshot_id=connection.source_snapshot_id,
+                parameter_source_snapshot_id=None,
+                parameter_evidence_locator=None,
+                effective_from=date(2019, 1, 1),
+                effective_to=None,
+                trigger_event_kind=LegalEventKind.CONTRACT_SIGNED,
+                formula_kind=LegalRateFormulaKind.NO_INTEREST,
+                base_annual_rate=None,
+                rate_multiplier=None,
+                required_fact_keys=(),
+                transition_rule_versions=(),
+                conflict_set=None,
+                priority=1,
+                approval_hash="b" * 64,
+            ),
+        )
+
+        self.assertEqual(receipt.object_id, connection.rule_version_id)
+        self.assertFalse(
+            any("INSERT INTO legal_rule_versions" in sql for sql, _ in connection.executed)
+        )
+        self.assertIn("LEGAL_RULE_VERSION_REUSED", str(connection.executed))
+
+    def test_conflicting_firm_rule_version_cannot_be_silently_reused(self) -> None:
+        connection = FakeLegalConnection()
+        connection.reused_rule_version = {
+            "rule_version_id": connection.rule_version_id,
+            "issue_key": "wrong_issue_key",
+            "source_snapshot_id": connection.source_snapshot_id,
+            "parameter_source_snapshot_id": None,
+            "parameter_evidence_locator": None,
+            "effective_from": date(2019, 1, 1),
+            "effective_to": None,
+            "trigger_event_kind": "CONTRACT_SIGNED",
+            "formula_kind": "NO_INTEREST",
+            "base_annual_rate": None,
+            "rate_multiplier": None,
+            "derived_annual_rate": Decimal("0"),
+            "required_fact_keys": [],
+            "transition_rule_versions": [],
+            "conflict_set": None,
+            "priority": 1,
+            "status": "APPROVED",
+        }
+
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "different governed fields"):
+            self.run_with(
+                connection,
+                lambda: self.store.approve_rule_version(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="legal-rule-reuse-conflict-001",
+                    rule_id="private-lending-response-source-scope",
+                    rule_version="1.0.0",
+                    issue_key="private_lending_response_source_scope",
+                    source_snapshot_id=connection.source_snapshot_id,
+                    parameter_source_snapshot_id=None,
+                    parameter_evidence_locator=None,
+                    effective_from=date(2019, 1, 1),
+                    effective_to=None,
+                    trigger_event_kind=LegalEventKind.CONTRACT_SIGNED,
+                    formula_kind=LegalRateFormulaKind.NO_INTEREST,
+                    base_annual_rate=None,
+                    rate_multiplier=None,
+                    required_fact_keys=(),
+                    transition_rule_versions=(),
+                    conflict_set=None,
+                    priority=1,
+                    approval_hash="b" * 64,
+                ),
+            )
+        self.assertFalse(
+            any("INSERT INTO legal_rule_versions" in sql for sql, _ in connection.executed)
+        )
 
     def test_legacy_source_without_license_review_cannot_support_a_new_rule(self) -> None:
         connection = FakeLegalConnection(license_reviewed=False)

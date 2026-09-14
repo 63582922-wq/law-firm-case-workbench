@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+import logging
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -36,6 +37,9 @@ from .official_source_capture import (
 )
 from .official_source_capture_postgres import OfficialSourceCaptureRunLease
 from .research_gateway import PublicResearchGateway, ResearchBlocked
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class OfficialSourceCaptureCoordinationBlocked(ValueError):
@@ -146,6 +150,17 @@ def execute_claimed_official_source_capture(
         ResearchBlocked,
     ) as error:
         failure_code = _failure_code(error)
+        # Keep the database and browser on a stable, non-sensitive failure
+        # code. The worker log retains only the bounded implementation reason
+        # (never source bytes, case text, credentials or request payload), so
+        # an operator can distinguish transport, storage and parser failures.
+        _LOGGER.warning(
+            "official source capture failed run=%s source=%s code=%s reason=%s",
+            lease.run_id,
+            lease.source_id,
+            failure_code,
+            str(error),
+        )
         receipt = persistence.fail_capture(
             matter_id=lease.matter_id,
             run_id=lease.run_id,

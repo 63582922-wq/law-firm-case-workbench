@@ -28,6 +28,7 @@ from .case_ledger_postgres import (
 )
 from .models import Actor, Role
 from .skill_registry import CaseSkillRegistry, SkillMaturity, default_case_skill_registry
+from .skill_tool_gateway import CaseSkillToolGateway
 
 
 @dataclass(frozen=True)
@@ -321,12 +322,14 @@ class PostgresAgentExecutionStore:
         return agent_execution_policy_hash(self._registry)
 
     def planning_skill_tools(self) -> tuple[tuple[str, str], ...]:
-        """Only currently implemented tools may be proposed by a model."""
+        """Only policy-enabled tools with a concrete adapter reach a model."""
+        executable = CaseSkillToolGateway.executable_tool_ids()
         return tuple(
             (skill.skill_id, tool_id)
             for skill in self._registry.list_skills()
             if skill.maturity is SkillMaturity.IMPLEMENTED
             for tool_id in skill.allowed_tools
+            if tool_id in executable
         )
 
     def _validate_proposals(self, proposals: tuple[AgentToolProposal, ...]) -> tuple[AgentToolProposal, ...]:

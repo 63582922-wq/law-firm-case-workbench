@@ -76,6 +76,14 @@ class FakeSubmissionConnection:
         self.consistency_blocking_count = 0
         self.consistency_reviewed_version = 1
         self.final_text_hash = "d" * 64
+        self.work_plan_id = str(uuid4())
+        self.profile_id = str(uuid4())
+        self.work_plan_hash = "2" * 64
+        self.profile_hash = "3" * 64
+        self.required_document_kinds = (
+            "DEFENCE_STATEMENT", "EVIDENCE_INDEX", "EVIDENCE_MATERIAL", "INTEREST_CALCULATION"
+        )
+        self.primary_document_kind = "DEFENCE_STATEMENT"
         self.work_product_ids = [str(uuid4()) for _ in range(4)]
         self.product_rows = [
             {
@@ -151,6 +159,32 @@ class FakeSubmissionConnection:
                     "current_submission_bundle_id": self.current_bundle_id,
                 }
             )
+        if "FROM case_work_plan_heads plan_head" in normalized:
+            return FakeResult(row={
+                "plan_id": self.work_plan_id,
+                "plan_hash": self.work_plan_hash,
+                "profile_id": self.profile_id,
+                "profile_hash": self.profile_hash,
+                "required_court_document_kinds": list(self.required_document_kinds),
+                "primary_court_document_kind": self.primary_document_kind,
+            })
+        if "FROM case_work_plan_context_references" in normalized:
+            return FakeResult(rows=[
+                {
+                    "source_type": "POSTURE_PROFILE",
+                    "source_id": self.profile_id,
+                    "source_version": "1",
+                    "source_hash": self.profile_hash,
+                    "reference_use": "POSTURE",
+                }
+            ])
+        if "FROM case_posture_profiles profile" in normalized:
+            return FakeResult(row={
+                "version": 1,
+                "hash": self.profile_hash,
+                "current": True,
+                "conflict_key": None,
+            })
         if "FROM submission_work_products" in normalized and "work_product_id = ANY" in normalized:
             requested = [str(value) for value in params[0]]
             by_id = {row["work_product_id"]: row for row in self.product_rows}
@@ -338,6 +372,10 @@ class SubmissionStoreTests(unittest.TestCase):
                 consistency_review_id=connection.consistency_review_id,
                 consistency_input_hash=connection.consistency_input_hash,
                 consistency_output_hash=connection.consistency_output_hash,
+                work_plan_id=connection.work_plan_id,
+                work_plan_hash=connection.work_plan_hash,
+                posture_profile_id=connection.profile_id,
+                posture_profile_hash=connection.profile_hash,
                 approved_by=self.lead.actor_id,
             )
         )
@@ -492,6 +530,70 @@ class SubmissionStoreTests(unittest.TestCase):
             )
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertNotIn("INSERT INTO submission_bundles", sql)
+
+    def test_qa_bundle_does_not_hard_code_defence_statement(self) -> None:
+        connection = FakeSubmissionConnection()
+        connection.product_rows[0]["document_kind"] = "CIVIL_COMPLAINT"
+        connection.required_document_kinds = (
+            "CIVIL_COMPLAINT", "EVIDENCE_INDEX", "EVIDENCE_MATERIAL", "INTEREST_CALCULATION"
+        )
+        connection.primary_document_kind = "CIVIL_COMPLAINT"
+        selections = list(self.selections(connection))
+        selections[0] = SubmissionComponentSelection(
+            selections[0].work_product_id, 1, "01_民事起诉状.pdf"
+        )
+        products_by_id = {row["work_product_id"]: row for row in connection.product_rows}
+        products = tuple(products_by_id[item.work_product_id] for item in selections)
+        qa_hash = _payload_hash(_compilation_input_payload(
+            matter_id=self.matter_id,
+            matter_version=1,
+            required_document_kinds=connection.required_document_kinds,
+            selections=tuple(selections),
+            products=products,
+            evidence_manifest_id=connection.manifest_id,
+            evidence_manifest_hash="5" * 64,
+            legal_bundle_id=connection.legal_bundle_id,
+            legal_bundle_hash="6" * 64,
+            calculation_run_id=connection.calculation_run_id,
+            calculation_output_hash="7" * 64,
+            final_text_approval_id=connection.final_approval_id,
+            final_text_hash=connection.final_text_hash,
+            consistency_review_id=connection.consistency_review_id,
+            consistency_input_hash=connection.consistency_input_hash,
+            consistency_output_hash=connection.consistency_output_hash,
+            work_plan_id=connection.work_plan_id,
+            work_plan_hash=connection.work_plan_hash,
+            posture_profile_id=connection.profile_id,
+            posture_profile_hash=connection.profile_hash,
+            approved_by=self.lead.actor_id,
+        ))
+        receipt = self.run_with(connection, lambda: self.store.create_qa_ready_bundle(
+            matter_id=self.matter_id, actor=self.lead, expected_version=1,
+            idempotency_key="submission-plaintiff-plan-001",
+            selections=tuple(selections), required_document_kinds=connection.required_document_kinds,
+            evidence_manifest_id=connection.manifest_id, legal_bundle_id=connection.legal_bundle_id,
+            calculation_run_id=connection.calculation_run_id,
+            final_text_approval_id=connection.final_approval_id,
+            consistency_review_id=connection.consistency_review_id,
+            consistency_output_hash=connection.consistency_output_hash,
+            expected_qa_hash=qa_hash,
+        ))
+        self.assertEqual(receipt.object_type, "SUBMISSION_BUNDLE")
+
+    def test_browser_required_kinds_cannot_override_active_work_plan(self) -> None:
+        connection = FakeSubmissionConnection()
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "exactly match"):
+            self.run_with(connection, lambda: self.store.create_qa_ready_bundle(
+                matter_id=self.matter_id, actor=self.lead, expected_version=1,
+                idempotency_key="submission-browser-override-001",
+                selections=self.selections(connection), required_document_kinds=("CIVIL_COMPLAINT",),
+                evidence_manifest_id=connection.manifest_id, legal_bundle_id=connection.legal_bundle_id,
+                calculation_run_id=connection.calculation_run_id,
+                final_text_approval_id=connection.final_approval_id,
+                consistency_review_id=connection.consistency_review_id,
+                consistency_output_hash=connection.consistency_output_hash,
+                expected_qa_hash="0" * 64,
+            ))
 
     def test_qa_bundle_rejects_blocked_or_stale_document_consistency_review(self) -> None:
         connection = FakeSubmissionConnection()

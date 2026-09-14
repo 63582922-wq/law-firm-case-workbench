@@ -181,10 +181,19 @@ class ReviewableDraftPostgresTests(TestCase):
     def test_registration_authenticates_both_objects_and_binds_exact_pair_hash(self) -> None:
         connection = _Connection(review_input_hash=self.review_input_hash)
         receipt = self._register(connection)
-        self.assertEqual(receipt.matter_version, 2)
+        self.assertEqual(receipt.matter_version, 1)
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("INSERT INTO reviewable_office_draft_pairs", sql)
+        self.assertNotIn("UPDATE matters SET version = version + 1", sql)
+        self.assertNotIn("INSERT INTO outbox_events", sql)
         self.assertNotIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+        audit = next(
+            entry for entry in connection.executed if "INSERT INTO audit_events" in entry[0]
+        )
+        self.assertEqual(
+            audit[1][4:7],
+            ("REVIEWABLE_OFFICE_DRAFT_PAIR_REGISTERED", 1, 1),
+        )
 
     def test_registration_rejects_review_hash_that_does_not_describe_stored_pair(self) -> None:
         connection = _Connection(review_input_hash=self.review_input_hash)
@@ -206,9 +215,18 @@ class ReviewableDraftPostgresTests(TestCase):
                 approval_hash=self.review_input_hash,
             ),
         )
-        self.assertEqual(receipt.matter_version, 2)
+        self.assertEqual(receipt.matter_version, 1)
         sql = "\n".join(statement for statement, _ in connection.executed)
         self.assertIn("UPDATE reviewable_office_draft_pairs", sql)
+        self.assertNotIn("UPDATE matters SET version = version + 1", sql)
+        self.assertNotIn("INSERT INTO outbox_events", sql)
+        audit = next(
+            entry for entry in connection.executed if "INSERT INTO audit_events" in entry[0]
+        )
+        self.assertEqual(
+            audit[1][4:7],
+            ("REVIEWABLE_OFFICE_DRAFT_PAIR_APPROVED", 1, 1),
+        )
         with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "exact review pair hash"):
             self._run(
                 _Connection(review_input_hash=self.review_input_hash),

@@ -19,26 +19,32 @@ from case_kernel.skill_tool_gateway import CaseSkillToolGateway, SkillToolGatewa
 
 class CaseSkillToolGatewayTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.gateway = CaseSkillToolGateway(registry=default_case_skill_registry())
+        self.gateway = CaseSkillToolGateway(
+            registry=default_case_skill_registry(
+                pdf_reading_adapter_enabled=True,
+                common_document_adapter_enabled=True,
+                document_consistency_adapter_enabled=True,
+                legal_research_planner_enabled=True,
+            )
+        )
 
     def _source(self, path: Path) -> AuthorizedOriginalFile:
         return AuthorizedOriginalFile(path.name, path, path.stat().st_size, sha256(path.read_bytes()).hexdigest())
 
-    def test_enabled_normalization_accepts_only_an_authorized_handle(self) -> None:
+    def test_planned_normalization_stays_blocked_until_its_full_adapter_set_exists(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "付款截图.png"
             Image.new("RGB", (100, 60), color="white").save(path)
-            result, output_hash = self.gateway.execute(
-                skill_id="evidence_pdf_normalization",
-                tool_id="normalize_image_or_text_pdf",
-                payload={"source": self._source(path), "detected_kind": "IMAGE"},
-                granted_scopes=frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}),
-                lawyer_approved=False,
-                release_locked=False,
-            )
-        self.assertEqual(output_hash, result.pdf_sha256)
-        self.assertTrue(result.pdf_content.startswith(b"%PDF-"))
-        with self.assertRaisesRegex(SkillToolGatewayBlocked, "authorized original"):
+            with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):
+                self.gateway.execute(
+                    skill_id="evidence_pdf_normalization",
+                    tool_id="normalize_image_or_text_pdf",
+                    payload={"source": self._source(path), "detected_kind": "IMAGE"},
+                    granted_scopes=frozenset({CapabilityScope.CASE_READ, CapabilityScope.MANAGED_DERIVATIVE_WRITE}),
+                    lawyer_approved=False,
+                    release_locked=False,
+                )
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):
             self.gateway.execute(
                 skill_id="evidence_pdf_normalization",
                 tool_id="normalize_image_or_text_pdf",
@@ -101,7 +107,7 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
                 lawyer_approved=True,
                 release_locked=False,
             )
-        with self.assertRaisesRegex(SkillToolGatewayBlocked, "no local execution adapter"):
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):
             self.gateway.execute(
                 skill_id="material_inventory",
                 tool_id="inspect_pdf_structure",
@@ -111,8 +117,8 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
                 release_locked=False,
             )
 
-    def test_interest_transition_planner_is_a_review_gated_deterministic_skill(self) -> None:
-        with self.assertRaisesRegex(SkillToolGatewayBlocked, "lawyer approval"):
+    def test_interest_transition_skill_is_not_exposed_until_calculation_adapter_is_complete(self) -> None:
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):
             self.gateway.execute(
                 skill_id="interest_calculation",
                 tool_id="plan_private_lending_transition",
@@ -121,22 +127,21 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
                 lawyer_approved=False,
                 release_locked=False,
             )
-        result, output_hash = self.gateway.execute(
-            skill_id="interest_calculation",
-            tool_id="plan_private_lending_transition",
-            payload={
-                "contract_formed_on": date(2019, 6, 17),
-                "claim_filed_on": date(2023, 4, 3),
-                "first_instance_accepted_on": date(2023, 4, 6),
-                "calculation_start": date(2019, 6, 17),
-                "calculation_end": date(2023, 8, 1),
-            },
-            granted_scopes=frozenset({CapabilityScope.FORMAL_CALCULATION}),
-            lawyer_approved=True,
-            release_locked=False,
-        )
-        self.assertEqual(len(result.segments), 2)
-        self.assertEqual(len(output_hash), 64)
+        with self.assertRaisesRegex(SkillToolGatewayBlocked, "not enabled"):
+            self.gateway.execute(
+                skill_id="interest_calculation",
+                tool_id="plan_private_lending_transition",
+                payload={
+                    "contract_formed_on": date(2019, 6, 17),
+                    "claim_filed_on": date(2023, 4, 3),
+                    "first_instance_accepted_on": date(2023, 4, 6),
+                    "calculation_start": date(2019, 6, 17),
+                    "calculation_end": date(2023, 8, 1),
+                },
+                granted_scopes=frozenset({CapabilityScope.FORMAL_CALCULATION}),
+                lawyer_approved=True,
+                release_locked=False,
+            )
 
     def test_document_consistency_review_is_non_mutating_and_available_to_the_agent(self) -> None:
         draft = ApprovedDraft(
@@ -164,16 +169,16 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
     def test_legal_research_only_prepares_registered_public_source_candidates(self) -> None:
         with self.assertRaisesRegex(SkillToolGatewayBlocked, "lawyer approval"):
             self.gateway.execute(
-                skill_id="legal_rule_research",
-                tool_id="search_authoritative_rules",
+                skill_id="legal_rule_research_planning",
+                tool_id="plan_authoritative_rule_research",
                 payload={"issue": "民间借贷利率保护", "proposed_query": "民间借贷 过渡规则"},
                 granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
                 lawyer_approved=False,
                 release_locked=False,
             )
         result, output_hash = self.gateway.execute(
-            skill_id="legal_rule_research",
-            tool_id="search_authoritative_rules",
+            skill_id="legal_rule_research_planning",
+            tool_id="plan_authoritative_rule_research",
             payload={"issue": "民间借贷利率保护", "proposed_query": "民间借贷 过渡规则"},
             granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
             lawyer_approved=True,
@@ -183,8 +188,8 @@ class CaseSkillToolGatewayTests(unittest.TestCase):
         self.assertEqual(len(output_hash), 64)
         with self.assertRaisesRegex(SkillToolGatewayBlocked, "candidate planning was blocked"):
             self.gateway.execute(
-                skill_id="legal_rule_research",
-                tool_id="search_authoritative_rules",
+                skill_id="legal_rule_research_planning",
+                tool_id="plan_authoritative_rule_research",
                 payload={"issue": "民间借贷", "proposed_query": "当事人电话 13800138000"},
                 granted_scopes=frozenset({CapabilityScope.PUBLIC_RESEARCH_READ}),
                 lawyer_approved=True,

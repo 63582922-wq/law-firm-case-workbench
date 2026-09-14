@@ -31,6 +31,7 @@ from .case_ledger_postgres import (
     _validate_uuid,
 )
 from .models import Actor, Role
+from .case_work_plan_postgres import assert_case_work_plan_references_current
 from .submission_access import VerifiedSubmissionExportLocator
 from .submission_bundle_compiler import (
     SubmissionBundleCompilationBlocked,
@@ -223,13 +224,14 @@ class PostgresSubmissionStore:
         expected_version: int,
         idempotency_key: str,
         work_product_id: str,
-        approval_hash: str,
+        approval_hash: str | None = None,
     ) -> CaseLedgerCommandReceipt:
         self._validate_command(
             matter_id, actor, expected_version, idempotency_key, self._REVIEW_ROLES
         )
         _validate_uuid("work_product_id", work_product_id)
-        _validate_sha256("approval_hash", approval_hash)
+        if approval_hash is not None:
+            _validate_sha256("approval_hash", approval_hash)
         command_name = "APPROVE_SUBMISSION_WORK_PRODUCT"
         payload = {
             "matter_id": matter_id,
@@ -269,7 +271,8 @@ class PostgresSubmissionStore:
                 raise CaseLedgerPersistenceBlocked(
                     "legacy work product has no review binding and must be regenerated"
                 )
-            if approval_hash != product["review_input_hash"]:
+            effective_approval_hash = product["review_input_hash"] if approval_hash is None else approval_hash
+            if effective_approval_hash != product["review_input_hash"]:
                 raise CaseLedgerPersistenceBlocked(
                     "work-product approval must bind to the exact candidate review hash"
                 )
@@ -280,7 +283,7 @@ class PostgresSubmissionStore:
                     approval_hash = %s, approved_at = now()
                 WHERE work_product_id = %s AND matter_id = %s AND firm_id = %s
                 """,
-                (actor.actor_id, approval_hash, work_product_id, matter_id, actor.firm_id),
+                (actor.actor_id, effective_approval_hash, work_product_id, matter_id, actor.firm_id),
             )
             if product["semantic_text_sha256"] is not None:
                 connection.execute(
@@ -318,7 +321,7 @@ class PostgresSubmissionStore:
                     "document_kind": product["document_kind"],
                     "audience": product["audience"],
                     "artifact_sha256": product["artifact_sha256"],
-                    "approval_hash": approval_hash,
+                    "approval_hash": effective_approval_hash,
                 },
                 stale_submission=True,
                 stale_calculations=False,
@@ -345,8 +348,8 @@ class PostgresSubmissionStore:
             matter_id, actor, expected_version, idempotency_key, self._LEAD_ROLES
         )
         normalized_selections = _validate_selections(selections)
-        normalized_required = _unique_texts(required_document_kinds, "required_document_kinds")
-        if not normalized_required:
+        requested_required = _unique_texts(required_document_kinds, "required_document_kinds")
+        if not requested_required:
             raise CaseLedgerPersistenceBlocked("submission profile requires document kinds")
         for label, value in (
             ("evidence_manifest_id", evidence_manifest_id),
@@ -370,7 +373,7 @@ class PostgresSubmissionStore:
                 }
                 for item in normalized_selections
             ),
-            "required_document_kinds": normalized_required,
+            "required_document_kinds": requested_required,
             "evidence_manifest_id": evidence_manifest_id,
             "legal_bundle_id": legal_bundle_id,
             "calculation_run_id": calculation_run_id,
@@ -406,6 +409,17 @@ class PostgresSubmissionStore:
                 )
             if matter["current_submission_bundle_id"] is not None:
                 raise CaseLedgerPersistenceBlocked("a current submission bundle already exists")
+            work_plan = _load_active_submission_work_plan(
+                connection, actor=actor, matter_id=matter_id
+            )
+            normalized_required = _unique_texts(
+                tuple(work_plan["required_court_document_kinds"]),
+                "active work-plan required court documents",
+            )
+            if not normalized_required or requested_required != normalized_required:
+                raise CaseLedgerPersistenceBlocked(
+                    "submission document requirements must exactly match the current lawyer-confirmed work plan"
+                )
             products = _load_selected_products(
                 connection,
                 actor=actor,
@@ -418,10 +432,11 @@ class PostgresSubmissionStore:
                 raise CaseLedgerPersistenceBlocked(
                     "submission is missing required documents: " + ", ".join(missing_kinds)
                 )
-            defence_products = [row for row in products if row["document_kind"] == "DEFENCE_STATEMENT"]
-            if len(defence_products) != 1 or defence_products[0]["semantic_text_sha256"] is None:
+            primary_kind = work_plan["primary_court_document_kind"]
+            primary_products = [row for row in products if row["document_kind"] == primary_kind]
+            if primary_kind is None or len(primary_products) != 1 or primary_products[0]["semantic_text_sha256"] is None:
                 raise CaseLedgerPersistenceBlocked(
-                    "submission requires exactly one text-hash-bound defence statement"
+                    "submission requires exactly one text-hash-bound primary document from the active work plan"
                 )
             consistency_review = _load_passing_consistency_review(
                 connection=connection,
@@ -490,10 +505,10 @@ class PostgresSubmissionStore:
                 or approval["approval_type"] != "FINAL_TEXT"
                 or approval["revoked_at"] is not None
                 or approval["approved_matter_version"] != expected_version
-                or approval["object_hash"] != defence_products[0]["semantic_text_sha256"]
+                or approval["object_hash"] != primary_products[0]["semantic_text_sha256"]
             ):
                 raise CaseLedgerPersistenceBlocked(
-                    "submission defence statement differs from the current final-text approval"
+                    "submission primary document differs from the current final-text approval"
                 )
 
             input_payload = _compilation_input_payload(
@@ -513,6 +528,10 @@ class PostgresSubmissionStore:
                 consistency_review_id=consistency_review_id,
                 consistency_input_hash=consistency_review["input_hash"],
                 consistency_output_hash=consistency_output_hash,
+                work_plan_id=str(work_plan["plan_id"]),
+                work_plan_hash=work_plan["plan_hash"],
+                posture_profile_id=str(work_plan["profile_id"]),
+                posture_profile_hash=work_plan["profile_hash"],
                 approved_by=actor.actor_id,
             )
             input_hash = _payload_hash(input_payload)
@@ -556,9 +575,11 @@ class PostgresSubmissionStore:
                     calculation_run_id, calculation_output_hash,
                     final_text_approval_id, final_text_hash,
                     consistency_review_id, consistency_input_hash, consistency_output_hash,
+                    work_plan_id, work_plan_hash, posture_profile_id, posture_profile_hash,
                     qa_hash, qa_approved_by, qa_approved_at
                 ) VALUES (%s, %s, %s, 'COURT_PDF_ONLY_V1', 'CNY', %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s, now())
                 """,
                 (
                     bundle_id,
@@ -577,6 +598,10 @@ class PostgresSubmissionStore:
                     consistency_review_id,
                     consistency_review["input_hash"],
                     consistency_output_hash,
+                    work_plan["plan_id"],
+                    work_plan["plan_hash"],
+                    work_plan["profile_id"],
+                    work_plan["profile_hash"],
                     input_hash,
                     actor.actor_id,
                 ),
@@ -1316,10 +1341,14 @@ def _compilation_input_payload(
     consistency_review_id: str,
     consistency_input_hash: str,
     consistency_output_hash: str,
+    work_plan_id: str | None = None,
+    work_plan_hash: str | None = None,
+    posture_profile_id: str | None = None,
+    posture_profile_hash: str | None = None,
     approved_by: str,
 ) -> dict[str, Any]:
     return {
-        "schema_version": "submission-qa-input-v1",
+        "schema_version": "submission-qa-input-v2",
         "matter_id": matter_id,
         "matter_version": matter_version,
         "export_profile": "COURT_PDF_ONLY_V1",
@@ -1348,8 +1377,54 @@ def _compilation_input_payload(
         "consistency_review_id": consistency_review_id,
         "consistency_input_hash": consistency_input_hash,
         "consistency_output_hash": consistency_output_hash,
+        "work_plan_id": work_plan_id,
+        "work_plan_hash": work_plan_hash,
+        "posture_profile_id": posture_profile_id,
+        "posture_profile_hash": posture_profile_hash,
         "approved_by": approved_by,
     }
+
+
+def _load_active_submission_work_plan(
+    connection: psycopg.Connection,
+    *,
+    actor: Actor,
+    matter_id: str,
+) -> dict[str, Any]:
+    """Return only the current lawyer-confirmed, current-posture work-plan projection."""
+
+    row = connection.execute(
+        """
+        SELECT plan.plan_id, plan.plan_hash, plan.profile_id, plan.profile_hash,
+               plan.required_court_document_kinds, plan.primary_court_document_kind
+        FROM case_work_plan_heads plan_head
+        JOIN case_work_plans plan
+          ON plan.plan_id = plan_head.current_plan_id
+         AND plan.matter_id = plan_head.matter_id AND plan.firm_id = plan_head.firm_id
+        JOIN case_posture_profile_heads profile_head
+          ON profile_head.matter_id = plan.matter_id AND profile_head.firm_id = plan.firm_id
+        JOIN case_posture_profiles profile
+          ON profile.profile_id = profile_head.current_profile_id
+         AND profile.matter_id = plan.matter_id AND profile.firm_id = plan.firm_id
+        WHERE plan_head.matter_id = %s AND plan_head.firm_id = %s
+          AND plan.status = 'ACTIVE' AND profile.status = 'CONFIRMED'
+          AND plan.profile_id = profile.profile_id
+          AND plan.profile_hash = profile.profile_hash
+        FOR SHARE
+        """,
+        (matter_id, actor.firm_id),
+    ).fetchone()
+    if row is None:
+        raise CaseLedgerPersistenceBlocked(
+            "submission requires the current lawyer-confirmed dynamic work plan and posture profile"
+        )
+    assert_case_work_plan_references_current(
+        connection,
+        actor=actor,
+        matter_id=matter_id,
+        plan_id=str(row["plan_id"]),
+    )
+    return row
 
 
 def _load_passing_consistency_review(

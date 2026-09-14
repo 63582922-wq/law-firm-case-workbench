@@ -76,7 +76,13 @@ class AgentExecutionPostgresTests(TestCase):
         self.lawyer = Actor(str(uuid4()), self.firm_id, frozenset({Role.LEAD_LAWYER}))
         self.assistant = Actor(str(uuid4()), self.firm_id, frozenset({Role.ASSISTANT}))
         self.worker = Actor(str(uuid4()), self.firm_id, frozenset({Role.SYSTEM_WORKER}))
-        self.store = PostgresAgentExecutionStore("postgresql://not-used.invalid/lawcase_test")
+        self.registry = default_case_skill_registry(
+            pdf_reading_adapter_enabled=True,
+            common_document_adapter_enabled=True,
+        )
+        self.store = PostgresAgentExecutionStore(
+            "postgresql://not-used.invalid/lawcase_test", registry=self.registry
+        )
 
     def _run(self, connection: _Connection, callback):
         with patch("case_kernel.agent_execution_postgres.psycopg.connect", return_value=_Context(connection)):
@@ -87,7 +93,7 @@ class AgentExecutionPostgresTests(TestCase):
         receipt = self._run(connection, lambda: self.store.plan_agent_run(
             matter_id=self.matter_id, actor=self.lawyer, expected_version=4,
             idempotency_key="agent-plan-001", agent_id="case-manager", agent_version="1.0.0",
-            policy_manifest_hash=agent_execution_policy_hash(default_case_skill_registry()), input_hash="b" * 64,
+            policy_manifest_hash=agent_execution_policy_hash(self.registry), input_hash="b" * 64,
             proposals=(AgentToolProposal(1, "office_reading", "parse_office_document", "c" * 64, "d" * 64),),
         ))
         self.assertEqual(receipt.matter_version, 5)
@@ -98,7 +104,7 @@ class AgentExecutionPostgresTests(TestCase):
             self.store.plan_agent_run(
                 matter_id=self.matter_id, actor=self.lawyer, expected_version=4,
                 idempotency_key="agent-plan-002", agent_id="case-manager", agent_version="1.0.0",
-                policy_manifest_hash=agent_execution_policy_hash(default_case_skill_registry()), input_hash="b" * 64,
+                policy_manifest_hash=agent_execution_policy_hash(self.registry), input_hash="b" * 64,
                 proposals=(AgentToolProposal(1, "document_drafting", "create_reviewable_docx_draft", "c" * 64, "d" * 64),),
             )
         with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "policy manifest"):
@@ -109,6 +115,12 @@ class AgentExecutionPostgresTests(TestCase):
                 proposals=(AgentToolProposal(1, "office_reading", "parse_office_document", "c" * 64, "d" * 64),),
             )
 
+    def test_planner_surface_excludes_registered_tools_without_execution_adapter(self) -> None:
+        exposed = set(self.store.planning_skill_tools())
+        self.assertIn(("pdf_reading", "extract_pdf_text"), exposed)
+        self.assertNotIn(("material_inventory", "register_source_file"), exposed)
+        self.assertNotIn(("evidence_pdf_normalization", "render_registered_page"), exposed)
+        self.assertNotIn(("interest_calculation", "calculate_interest_schedule"), exposed)
     def test_only_system_worker_records_hashed_execution_outcome(self) -> None:
         connection = _Connection()
         receipt = self._run(connection, lambda: self.store.record_tool_execution_receipt(

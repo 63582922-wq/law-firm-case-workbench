@@ -10,7 +10,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 import re
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -48,6 +48,15 @@ _OFFICIAL_SOURCE_DOMAINS = frozenset(
         "gongbao.court.gov.cn",
         "chinamoney.com.cn",
         "www.chinamoney.com.cn",
+        # The fixed Civil Code acceptance snapshot is fetched from the
+        # Supreme People's Procuratorate's public HTTPS mirror.  This exact
+        # host is already a registered public-research source for the same
+        # primary-law identifier; do not widen this to a wildcard domain.
+        "www.spp.gov.cn",
+        # ADR-0073 freezes one Civil Code acceptance snapshot on this exact
+        # government host.  This deliberately does not allow ``miit.gov.cn``
+        # or a ``*.miit.gov.cn`` wildcard.
+        "tjca.miit.gov.cn",
     }
 )
 _OBJECT_KEY = re.compile(r"^[0-9a-f]{2}/[0-9a-f]{2}/([0-9a-f]{64})\.lca$")
@@ -89,6 +98,12 @@ class PersistentLegalReviewSnapshot:
     current_bundle: dict[str, Any] | None
     bundle_segments: tuple[dict[str, Any], ...]
     snapshot_hash: str
+    # An approved bundle is deliberately omitted from ``current_bundle`` once
+    # the matter changes.  Keep a minimal, case-scoped explanation alongside
+    # the review snapshot so the browser can take the lawyer to one explicit
+    # re-confirmation step instead of presenting a generic missing-prerequisite
+    # error.  This is status only: it never revives or reuses a stale bundle.
+    bundle_reconfirmation: dict[str, Any] | None = None
 
 
 class PostgresLegalSourceStore:
@@ -203,6 +218,58 @@ class PostgresLegalSourceStore:
             )
             if prior is not None:
                 return prior
+            existing = connection.execute(
+                """
+                SELECT snapshot_id, publisher, authority_level, official_url,
+                       provision_locator, content_media_type, storage_object_key,
+                       verification_status, license_status, license_basis,
+                       license_review_hash
+                FROM official_legal_source_snapshots
+                WHERE firm_id = %s AND source_id = %s AND content_sha256 = %s
+                FOR SHARE
+                """,
+                (actor.firm_id, source_id.strip(), content_sha256),
+            ).fetchone()
+            if existing is not None:
+                if supersedes_snapshot_id is not None:
+                    raise CaseLedgerPersistenceBlocked(
+                        "an already registered source hash cannot be registered as a replacement"
+                    )
+                if not _is_reusable_official_source_snapshot(
+                    existing,
+                    publisher=publisher,
+                    authority_level=authority_level,
+                    official_url=official_url,
+                    provision_locator=provision_locator,
+                    content_media_type=content_media_type,
+                    storage_object_key=storage_object_key,
+                    license_basis=license_basis,
+                ):
+                    raise CaseLedgerPersistenceBlocked(
+                        "the same official source and content hash already exists with different governance fields"
+                    )
+                snapshot_id = str(existing["snapshot_id"])
+                return _finish_command(
+                    connection,
+                    actor=actor,
+                    matter_id=matter_id,
+                    expected_version=expected_version,
+                    command_name=command_name,
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    event_type="OFFICIAL_LEGAL_SOURCE_SNAPSHOT_REUSED",
+                    object_type="OFFICIAL_LEGAL_SOURCE_SNAPSHOT",
+                    object_id=snapshot_id,
+                    audit_payload={
+                        "snapshot_id": snapshot_id,
+                        "source_id": source_id.strip(),
+                        "content_sha256": content_sha256,
+                        "binding_verification_hash": verification_hash,
+                        "binding_license_review_hash": license_review_hash,
+                        "reused": True,
+                    },
+                    stale_submission=True,
+                )
             if supersedes_snapshot_id is not None:
                 prior_source = connection.execute(
                     """
@@ -705,6 +772,65 @@ class PostgresLegalSourceStore:
                     )
                 resolved_base_rate = Decimal(str(observation["one_year_rate"]))
             derived_rate = _derive_rate(formula_kind, resolved_base_rate, rate_multiplier)
+            existing = connection.execute(
+                """
+                SELECT rule_version_id, issue_key, source_snapshot_id,
+                       parameter_source_snapshot_id, parameter_evidence_locator,
+                       effective_from, effective_to, trigger_event_kind, formula_kind,
+                       base_annual_rate, rate_multiplier, derived_annual_rate,
+                       required_fact_keys, transition_rule_versions, conflict_set,
+                       priority, status
+                FROM legal_rule_versions
+                WHERE firm_id = %s AND rule_id = %s AND rule_version = %s
+                FOR SHARE
+                """,
+                (actor.firm_id, rule_id.strip(), rule_version.strip()),
+            ).fetchone()
+            if existing is not None:
+                if not _is_reusable_rule_version(
+                    existing,
+                    issue_key=issue_key,
+                    source_snapshot_id=source_snapshot_id,
+                    parameter_source_snapshot_id=parameter_source_snapshot_id,
+                    parameter_evidence_locator=parameter_evidence_locator,
+                    effective_from=effective_from,
+                    effective_to=effective_to,
+                    trigger_event_kind=trigger_event_kind,
+                    formula_kind=formula_kind,
+                    base_annual_rate=resolved_base_rate,
+                    rate_multiplier=rate_multiplier,
+                    derived_annual_rate=derived_rate,
+                    required_fact_keys=normalized_required,
+                    transition_rule_versions=normalized_transitions,
+                    conflict_set=conflict_set,
+                    priority=priority,
+                ):
+                    raise CaseLedgerPersistenceBlocked(
+                        "the same legal rule version already exists with different governed fields"
+                    )
+                rule_version_id = str(existing["rule_version_id"])
+                return _finish_command(
+                    connection,
+                    actor=actor,
+                    matter_id=matter_id,
+                    expected_version=expected_version,
+                    command_name=command_name,
+                    idempotency_key=idempotency_key,
+                    payload_hash=payload_hash,
+                    event_type="LEGAL_RULE_VERSION_REUSED",
+                    object_type="LEGAL_RULE_VERSION",
+                    object_id=rule_version_id,
+                    audit_payload={
+                        "rule_version_id": rule_version_id,
+                        "rule_version": rule_version.strip(),
+                        "source_snapshot_id": source_snapshot_id,
+                        "parameter_source_snapshot_id": parameter_source_snapshot_id,
+                        "derived_annual_rate": format(derived_rate, "f"),
+                        "binding_approval_hash": approval_hash,
+                        "reused": True,
+                    },
+                    stale_submission=True,
+                )
             connection.execute(
                 """
                 INSERT INTO legal_rule_versions (
@@ -1419,6 +1545,16 @@ class PostgresLegalSourceStore:
                 """,
                 (matter_id, actor.firm_id),
             ).fetchone()
+            latest_bundle = connection.execute(
+                """
+                SELECT version, status, stale_reason, stale_at
+                FROM case_legal_bundles
+                WHERE matter_id = %s AND firm_id = %s
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (matter_id, actor.firm_id),
+            ).fetchone()
             segments = []
             if bundle is not None:
                 segments = connection.execute(
@@ -1444,6 +1580,13 @@ class PostgresLegalSourceStore:
             "fact_bindings": tuple(_serialize_legal_row(row) for row in fact_bindings),
             "current_bundle": _serialize_legal_row(bundle) if bundle is not None else None,
             "bundle_segments": tuple(_serialize_legal_row(row) for row in segments),
+            "bundle_reconfirmation": (
+                _serialize_legal_row(latest_bundle)
+                if bundle is None
+                and latest_bundle is not None
+                and latest_bundle["status"] == "STALE"
+                else None
+            ),
         }
         return PersistentLegalReviewSnapshot(snapshot_hash=_payload_hash(payload), **payload)
 
@@ -1509,6 +1652,144 @@ class PostgresLegalSourceStore:
             connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             connection.execute("SELECT set_config('app.firm_id', %s, true)", (firm_id,))
             yield connection
+
+
+def _is_reusable_official_source_snapshot(
+    existing: Mapping[str, Any],
+    *,
+    publisher: str,
+    authority_level: LegalAuthorityLevel,
+    official_url: str,
+    provision_locator: str,
+    content_media_type: str,
+    storage_object_key: str,
+    license_basis: str,
+) -> bool:
+    """Accept only an immutable, governance-equivalent firm source snapshot.
+
+    Official-source snapshots are firm-scoped by schema, while their private
+    byte objects remain matter-bound.  A later matter can therefore attest its
+    own exact object and attach an audit receipt to the already verified global
+    snapshot, but it must never silently reuse changed source governance.
+    """
+
+    try:
+        _validate_uuid("existing_source_snapshot_id", str(existing["snapshot_id"]))
+        return (
+            isinstance(existing["publisher"], str)
+            and existing["publisher"].strip() == publisher.strip()
+            and existing["authority_level"] == authority_level.value
+            and existing["official_url"] == official_url
+            and isinstance(existing["provision_locator"], str)
+            and existing["provision_locator"].strip() == provision_locator.strip()
+            and isinstance(existing["content_media_type"], str)
+            and existing["content_media_type"].strip() == content_media_type.strip()
+            and existing["storage_object_key"] == storage_object_key
+            and existing["verification_status"] == "VERIFIED"
+            and existing["license_status"] == "ACTIVE"
+            and isinstance(existing["license_basis"], str)
+            and existing["license_basis"].strip() == license_basis.strip()
+            and isinstance(existing["license_review_hash"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", existing["license_review_hash"]) is not None
+        )
+    except (CaseLedgerPersistenceBlocked, KeyError, TypeError):
+        return False
+
+
+def _is_reusable_rule_version(
+    existing: Mapping[str, Any],
+    *,
+    issue_key: str,
+    source_snapshot_id: str,
+    parameter_source_snapshot_id: str | None,
+    parameter_evidence_locator: str | None,
+    effective_from: date,
+    effective_to: date | None,
+    trigger_event_kind: LegalEventKind,
+    formula_kind: LegalRateFormulaKind,
+    base_annual_rate: Decimal | None,
+    rate_multiplier: Decimal | None,
+    derived_annual_rate: Decimal,
+    required_fact_keys: tuple[str, ...],
+    transition_rule_versions: tuple[str, ...],
+    conflict_set: str | None,
+    priority: int,
+) -> bool:
+    """Accept only an already-approved firm rule with the same full contract."""
+
+    try:
+        _validate_uuid("existing_rule_version_id", str(existing["rule_version_id"]))
+        existing_required = _stored_rule_texts(
+            existing["required_fact_keys"], "existing_required_fact_keys"
+        )
+        existing_transitions = _stored_rule_texts(
+            existing["transition_rule_versions"], "existing_transition_rule_versions"
+        )
+        if existing_required is None or existing_transitions is None:
+            return False
+        expected_parameter_locator = (
+            parameter_evidence_locator.strip() if parameter_evidence_locator else None
+        )
+        expected_conflict_set = conflict_set.strip() if conflict_set else None
+        return (
+            existing["status"] == "APPROVED"
+            and isinstance(existing["issue_key"], str)
+            and existing["issue_key"].strip() == issue_key.strip()
+            and str(existing["source_snapshot_id"]) == source_snapshot_id
+            and _same_optional_uuid(
+                existing["parameter_source_snapshot_id"], parameter_source_snapshot_id
+            )
+            and _same_optional_text(
+                existing["parameter_evidence_locator"], expected_parameter_locator
+            )
+            and existing["effective_from"] == effective_from
+            and existing["effective_to"] == effective_to
+            and existing["trigger_event_kind"] == trigger_event_kind.value
+            and existing["formula_kind"] == formula_kind.value
+            and _same_optional_decimal(existing["base_annual_rate"], base_annual_rate)
+            and _same_optional_decimal(existing["rate_multiplier"], rate_multiplier)
+            and Decimal(str(existing["derived_annual_rate"])) == derived_annual_rate
+            and existing_required == required_fact_keys
+            and existing_transitions == transition_rule_versions
+            and _same_optional_text(existing["conflict_set"], expected_conflict_set)
+            and existing["priority"] == priority
+        )
+    except (CaseLedgerPersistenceBlocked, KeyError, TypeError, ValueError):
+        return False
+
+
+def _stored_rule_texts(value: object, field_name: str) -> tuple[str, ...] | None:
+    if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
+        return None
+    try:
+        return _unique_texts(tuple(value), field_name)
+    except CaseLedgerPersistenceBlocked:
+        return None
+
+
+def _same_optional_uuid(existing: object, expected: str | None) -> bool:
+    if expected is None:
+        return existing is None
+    try:
+        _validate_uuid("existing_parameter_source_snapshot_id", str(existing))
+    except (CaseLedgerPersistenceBlocked, TypeError):
+        return False
+    return str(existing) == expected
+
+
+def _same_optional_text(existing: object, expected: str | None) -> bool:
+    if expected is None:
+        return existing is None
+    return isinstance(existing, str) and existing.strip() == expected
+
+
+def _same_optional_decimal(existing: object, expected: Decimal | None) -> bool:
+    if expected is None:
+        return existing is None
+    try:
+        return Decimal(str(existing)) == expected
+    except (TypeError, ValueError):
+        return False
 
 
 def _validate_official_url(value: str) -> None:

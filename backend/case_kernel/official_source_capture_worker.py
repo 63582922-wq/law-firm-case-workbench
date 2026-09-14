@@ -9,7 +9,7 @@ SYSTEM_WORKER actor, then delegates to the bounded HTTPS capture coordinator.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Callable, Protocol
 from uuid import UUID
 
 from .case_ledger_postgres import CaseLedgerPersistenceBlocked
@@ -37,6 +37,12 @@ class OfficialSourceCaptureWorkerStore(Protocol):
     def fail_capture(self, **kwargs): ...
 
 
+class OfficialSourceCaptureArtifactStoreFactory(Protocol):
+    """Issue a per-matter artifact capability after the queue selects a run."""
+
+    def __call__(self, matter_id: str) -> object: ...
+
+
 def run_authorized_official_source_capture(
     *,
     matter_id: str,
@@ -45,7 +51,7 @@ def run_authorized_official_source_capture(
     worker: Actor,
     claim_idempotency_key: str,
     case_root: str | Path,
-    artifact_store: LocalEncryptedArtifactStore,
+    artifact_store: object,
     store: OfficialSourceCaptureWorkerStore,
     transport: OfficialSourceTransport | None = None,
 ) -> OfficialSourceCaptureCoordinationResult:
@@ -95,19 +101,75 @@ def run_authorized_official_source_capture(
 
 
 def run_next_authorized_official_source_capture(
-    *, worker: Actor, case_root: str | Path, artifact_store: LocalEncryptedArtifactStore,
-    store: OfficialSourceCaptureWorkerStore, transport: OfficialSourceTransport | None = None,
+    *,
+    worker: Actor,
+    case_root: str | Path,
+    artifact_store: object | None = None,
+    artifact_store_factory: OfficialSourceCaptureArtifactStoreFactory | None = None,
+    store: OfficialSourceCaptureWorkerStore,
+    transport: OfficialSourceTransport | None = None,
 ) -> OfficialSourceCaptureCoordinationResult | None:
-    """Run at most one eligible, same-firm queued capture; never bulk-drain a queue."""
+    """Run at most one eligible capture; never bulk-drain a queue.
+
+    Production callers provide a factory so storage is created only after the
+    store returns the one lease candidate, bound to that candidate's matter.
+    The legacy fixed store remains available for the local command-line flow.
+    """
+    if (artifact_store is None) == (artifact_store_factory is None):
+        raise OfficialSourceCaptureWorkerBlocked(
+            "official capture requires exactly one artifact-store capability"
+        )
     candidate = store.find_next_claimable_capture(actor=worker)
     if candidate is None:
         return None
     matter_id, run_id, version = candidate
+    selected_store = (
+        artifact_store_factory(matter_id)
+        if artifact_store_factory is not None
+        else artifact_store
+    )
+    if selected_store is None:
+        raise OfficialSourceCaptureWorkerBlocked(
+            "official capture artifact-store capability is unavailable"
+        )
     return run_authorized_official_source_capture(
         matter_id=matter_id, run_id=run_id, expected_version=version, worker=worker,
         claim_idempotency_key=f"official-worker:{run_id}:claim", case_root=case_root,
-        artifact_store=artifact_store, store=store, transport=transport,
+        artifact_store=selected_store, store=store, transport=transport,
     )
+
+
+class BoundedOfficialSourceCaptureWorker:
+    """One bounded auxiliary cycle for the existing single Agent Worker process."""
+
+    def __init__(
+        self,
+        *,
+        worker: Actor,
+        case_root: str | Path,
+        store: OfficialSourceCaptureWorkerStore,
+        artifact_store_factory: OfficialSourceCaptureArtifactStoreFactory,
+        transport: OfficialSourceTransport | None = None,
+    ) -> None:
+        if worker.roles != frozenset({Role.SYSTEM_WORKER}):
+            raise ValueError("official capture requires a dedicated SYSTEM_WORKER")
+        if not callable(artifact_store_factory):
+            raise ValueError("official capture artifact-store factory is required")
+        self._worker = worker
+        self._case_root = case_root
+        self._store = store
+        self._artifact_store_factory = artifact_store_factory
+        self._transport = transport
+
+    def run_cycle(self) -> bool:
+        result = run_next_authorized_official_source_capture(
+            worker=self._worker,
+            case_root=self._case_root,
+            artifact_store_factory=self._artifact_store_factory,
+            store=self._store,
+            transport=self._transport,
+        )
+        return result is not None
 
 
 def _validate_worker_request(

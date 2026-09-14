@@ -3,12 +3,20 @@ import unittest
 
 
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "0007_submission_compilation.sql"
+CORE_MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "0001_core.sql"
 
 
 class SubmissionCompilationMigrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.sql = MIGRATION.read_text(encoding="utf-8")
+        cls.core_sql = CORE_MIGRATION.read_text(encoding="utf-8")
+
+    def test_core_bundle_has_exact_tenant_composite_key_for_compilation_fk(self) -> None:
+        self.assertIn(
+            "UNIQUE (bundle_id, firm_id, matter_id)",
+            self.core_sql,
+        )
 
     def test_all_submission_compilation_tables_force_tenant_rls(self) -> None:
         for table in (

@@ -14,7 +14,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Protocol
 from uuid import UUID, uuid4
 
 import psycopg
@@ -119,16 +119,24 @@ class PersistentTransactionListPage:
     has_more: bool
 
 
+class FactCorrectionDecisionVerifier(Protocol):
+    def verify_for_decision(self, *, actor: Actor, matter_id: str, fact_id: str,
+                            expected_matter_version: int) -> object | None: ...
+    def assert_decision_binding(self, connection: Any, *, actor: Actor, matter_id: str,
+                                fact_id: str, expected_matter_version: int, verified: object) -> None: ...
+
+
 class PostgresCaseLedgerStore:
     """UUID-only fact and transaction repository for PostgreSQL 16+."""
 
     _CANDIDATE_ROLES = frozenset({Role.ASSISTANT, Role.COLLABORATING_LAWYER, Role.LEAD_LAWYER})
     _DECISION_ROLES = frozenset({Role.LEAD_LAWYER})
 
-    def __init__(self, dsn: str) -> None:
+    def __init__(self, dsn: str, *, fact_correction_verifier: FactCorrectionDecisionVerifier | None = None) -> None:
         if not dsn.strip():
             raise ValueError("PostgreSQL DSN is required")
         self._dsn = dsn
+        self._fact_correction_verifier = fact_correction_verifier
 
     def create_fact_candidate(
         self,
@@ -199,6 +207,25 @@ class PostgresCaseLedgerStore:
                 stale_submission=False,
             )
 
+    def find_fact_decision_by_key(self, *, matter_id: str, fact_id: str, actor: Actor,
+                                  idempotency_key: str) -> CaseLedgerCommandReceipt | None:
+        _validate_command_identity(matter_id=matter_id,actor=actor,idempotency_key=idempotency_key)
+        _validate_uuid("fact_id",fact_id)
+        _require_roles(actor,self._DECISION_ROLES)
+        with _ReadSnapshotTransaction(self._dsn,actor.firm_id) as connection:
+            _authorize_matter_read(connection,actor=actor,matter_id=matter_id,allowed_roles=self._DECISION_ROLES)
+            row=connection.execute("""
+                SELECT response_json FROM command_idempotency
+                WHERE firm_id=%s AND matter_id=%s AND actor_id=%s
+                  AND command_name='DECIDE_FACT' AND idempotency_key=%s
+                """,(actor.firm_id,matter_id,actor.actor_id,idempotency_key)).fetchone()
+            if row is None:
+                return None
+            receipt=CaseLedgerCommandReceipt(**row['response_json'])
+            if receipt.object_type != 'FACT' or receipt.object_id != fact_id:
+                raise IdempotencyConflict("request key belongs to another fact")
+            return receipt
+
     def decide_fact(
         self,
         *,
@@ -227,6 +254,20 @@ class PostgresCaseLedgerStore:
         }
         payload_hash = _payload_hash(payload)
 
+        verified_correction = None
+        if self._fact_correction_verifier is not None:
+            # A committed replay may refer to an older case version. Authorize
+            # it before returning, without holding locks during object reads.
+            with _ReadSnapshotTransaction(self._dsn, actor.firm_id) as connection:
+                _authorize_matter_read(connection, actor=actor, matter_id=matter_id,
+                    allowed_roles=self._DECISION_ROLES)
+                prior = _prior_receipt(connection, actor=actor,matter_id=matter_id,
+                    command_name=command_name,idempotency_key=idempotency_key,payload_hash=payload_hash)
+                if prior is not None:
+                    return prior
+            verified_correction = self._fact_correction_verifier.verify_for_decision(
+                actor=actor,matter_id=matter_id,fact_id=fact_id,expected_matter_version=expected_version)
+
         with self._transaction(actor.firm_id) as connection:
             _advisory_lock(connection, actor=actor, matter_id=matter_id, command_name=command_name, idempotency_key=idempotency_key)
             prior = _prior_receipt(
@@ -248,7 +289,7 @@ class PostgresCaseLedgerStore:
             )
             row = connection.execute(
                 """
-                SELECT status
+                SELECT status, to_jsonb(case_facts)->>'correction_proposal_id' AS correction_proposal_id
                 FROM case_facts
                 WHERE fact_id = %s AND matter_id = %s AND firm_id = %s
                 FOR UPDATE
@@ -259,6 +300,13 @@ class PostgresCaseLedgerStore:
                 raise KeyError(fact_id)
             if row["status"] == FactStatus.INVALIDATED.value:
                 raise CaseLedgerPersistenceBlocked("an invalidated fact must be rebuilt from source evidence")
+            if row.get("correction_proposal_id") is not None:
+                if self._fact_correction_verifier is None or verified_correction is None:
+                    raise CaseLedgerPersistenceBlocked("corrected fact requires independent source verification")
+                connection.execute("SELECT set_config('app.actor_id',%s,true)",(actor.actor_id,))
+                self._fact_correction_verifier.assert_decision_binding(connection,actor=actor,
+                    matter_id=matter_id,fact_id=fact_id,expected_matter_version=expected_version,
+                    verified=verified_correction)
 
             # A changed fact cannot leave an approved response or issue silently current.
             connection.execute(
@@ -387,6 +435,116 @@ class PostgresCaseLedgerStore:
                 object_type="CLAIM",
                 object_id=claim_id,
                 audit_payload={"claim_id": claim_id, "status": ClaimStatus.CANDIDATE.value},
+                stale_submission=False,
+            )
+
+    def create_claim_candidate_from_confirmed_facts(
+        self,
+        *,
+        matter_id: str,
+        actor: Actor,
+        expected_version: int,
+        idempotency_key: str,
+        original_claim_text: str,
+        claimed_amount: Decimal | None,
+        currency: str | None,
+        confirmed_fact_ids: tuple[str, ...],
+    ) -> CaseLedgerCommandReceipt:
+        """Create a lawyer-review claim without accepting browser provenance.
+
+        The browser names only already-visible confirmed facts.  This method
+        re-resolves those facts inside the same tenant-scoped transaction and
+        copies their immutable original-evidence links into the claim row.
+        Hashes, object-store paths, page locators and evidence labels therefore
+        never cross the browser write boundary.
+        """
+
+        _validate_command_identity(matter_id=matter_id, actor=actor, idempotency_key=idempotency_key)
+        normalized_fact_ids = _validate_uuid_set("confirmed_fact_ids", confirmed_fact_ids, minimum=1)
+        if len(normalized_fact_ids) > 30:
+            raise CaseLedgerPersistenceBlocked("a claim candidate may reference at most 30 confirmed facts")
+        _require_roles(actor, self._CANDIDATE_ROLES)
+        _require_positive_version(expected_version)
+        _require_text(original_claim_text, "claim original text")
+        _validate_optional_money(claimed_amount, currency, "claim")
+        normalized_currency = currency.strip().upper() if currency else None
+        command_name = "CREATE_CLAIM_CANDIDATE_FROM_CONFIRMED_FACTS"
+        payload = {
+            "matter_id": matter_id,
+            "expected_version": expected_version,
+            "original_claim_text": original_claim_text.strip(),
+            "claimed_amount": claimed_amount,
+            "currency": normalized_currency,
+            "confirmed_fact_ids": normalized_fact_ids,
+        }
+        payload_hash = _payload_hash(payload)
+        with self._transaction(actor.firm_id) as connection:
+            _advisory_lock(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+            )
+            prior = _prior_receipt(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+            )
+            if prior is not None:
+                return prior
+            _authorize_and_lock_matter(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                allowed_roles=self._CANDIDATE_ROLES,
+            )
+            evidence_links = _confirmed_fact_evidence_links(
+                connection,
+                fact_ids=normalized_fact_ids,
+                matter_id=matter_id,
+                firm_id=actor.firm_id,
+                maximum_links=30,
+            )
+            claim_id = str(uuid4())
+            connection.execute(
+                """
+                INSERT INTO case_claims (
+                    claim_id, firm_id, matter_id, original_claim_text, claimed_amount,
+                    currency, status, evidence_links
+                ) VALUES (%s, %s, %s, %s, %s, %s, 'CANDIDATE', %s)
+                """,
+                (
+                    claim_id,
+                    actor.firm_id,
+                    matter_id,
+                    original_claim_text.strip(),
+                    claimed_amount,
+                    normalized_currency,
+                    Jsonb(_evidence_payload(evidence_links)),
+                ),
+            )
+            return _finish_command(
+                connection,
+                actor=actor,
+                matter_id=matter_id,
+                expected_version=expected_version,
+                command_name=command_name,
+                idempotency_key=idempotency_key,
+                payload_hash=payload_hash,
+                event_type="CLAIM_CANDIDATE_CREATED",
+                object_type="CLAIM",
+                object_id=claim_id,
+                audit_payload={
+                    "claim_id": claim_id,
+                    "status": ClaimStatus.CANDIDATE.value,
+                    "source_confirmed_fact_ids": normalized_fact_ids,
+                    "evidence_link_count": len(evidence_links),
+                },
                 stale_submission=False,
             )
 
@@ -645,7 +803,7 @@ class PostgresCaseLedgerStore:
                 expected_version=expected_version,
                 allowed_roles=self._CANDIDATE_ROLES,
             )
-            _require_claim_rows(connection, claim_ids=normalized_claim_ids, matter_id=matter_id, firm_id=actor.firm_id, confirmed=False)
+            _require_claim_rows(connection, claim_ids=normalized_claim_ids, matter_id=matter_id, firm_id=actor.firm_id, confirmed=True)
             _require_confirmed_fact_rows(connection, fact_ids=normalized_fact_ids, matter_id=matter_id, firm_id=actor.firm_id)
             issue_id = str(uuid4())
             connection.execute(
@@ -1944,7 +2102,8 @@ class PostgresCaseLedgerStore:
                 """
                 SELECT fact_id, original_text, origin, status,
                        jsonb_array_length(evidence_links) AS evidence_count,
-                       decision_hash, decided_by
+                       decision_hash, decided_by, evidence_links,
+                       to_jsonb(case_facts)->>'correction_candidate_id' AS correction_candidate_id
                 FROM case_facts
                 WHERE matter_id = %s AND firm_id = %s
                 ORDER BY created_at ASC, fact_id ASC
@@ -2094,6 +2253,8 @@ class PostgresCaseLedgerStore:
                 "evidence_count": row["evidence_count"],
                 "decision_hash": row["decision_hash"],
                 "decided_by": str(row["decided_by"]) if row["decided_by"] else None,
+                "evidence_links": row.get("evidence_links", []),
+                "correction_candidate_id": row.get("correction_candidate_id"),
             }
             for row in fact_rows
         )
@@ -2451,6 +2612,54 @@ def _require_confirmed_fact_rows(
         raise CaseLedgerPersistenceBlocked("responses and issues may only use lawyer-confirmed facts in this matter")
 
 
+def _confirmed_fact_evidence_links(
+    connection: psycopg.Connection,
+    *,
+    fact_ids: tuple[str, ...],
+    matter_id: str,
+    firm_id: str,
+    maximum_links: int,
+) -> tuple[EvidenceLink, ...]:
+    rows = connection.execute(
+        """
+        SELECT fact_id, status, evidence_links
+        FROM case_facts
+        WHERE fact_id = ANY(%s) AND matter_id = %s AND firm_id = %s
+        FOR UPDATE
+        """,
+        (list(fact_ids), matter_id, firm_id),
+    ).fetchall()
+    if len(rows) != len(fact_ids) or any(row["status"] != FactStatus.CONFIRMED.value for row in rows):
+        raise CaseLedgerPersistenceBlocked("claims may only use lawyer-confirmed facts in this matter")
+
+    rows_by_id = {str(row["fact_id"]): row for row in rows}
+    links: list[EvidenceLink] = []
+    seen: set[tuple[str, str, int | None, str | None, str]] = set()
+    for fact_id in fact_ids:
+        row = rows_by_id.get(fact_id)
+        if row is None:
+            raise CaseLedgerPersistenceBlocked("claims may only use lawyer-confirmed facts in this matter")
+        for link in _evidence_links_from_json(row["evidence_links"]):
+            identity = (
+                link.evidence_id,
+                link.original_file_sha256.lower(),
+                link.page_number,
+                link.region_id,
+                link.original_label,
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            links.append(link)
+            if len(links) > maximum_links:
+                raise CaseLedgerPersistenceBlocked(
+                    f"confirmed facts resolve to more than {maximum_links} original evidence links"
+                )
+    result = tuple(links)
+    validate_evidence_links(result)
+    return result
+
+
 def _require_claim_rows(
     connection: psycopg.Connection,
     *,
@@ -2558,6 +2767,8 @@ def _payload_hash(payload: dict[str, Any]) -> str:
             return format(value, "f")
         if isinstance(value, (date, datetime)):
             return value.isoformat()
+        if isinstance(value, UUID):
+            return str(value)
         if isinstance(value, Enum):
             return value.value
         if isinstance(value, dict):
@@ -2773,6 +2984,80 @@ def _finish_command(
         idempotency_key=idempotency_key,
         matter_id=matter_id,
         matter_version=next_version,
+        audit_event_id=audit_event_id,
+        object_type=object_type,
+        object_id=object_id,
+    )
+    connection.execute(
+        """
+        INSERT INTO command_idempotency (
+            firm_id, matter_id, actor_id, command_name, idempotency_key, request_hash, response_json
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            actor.firm_id,
+            matter_id,
+            actor.actor_id,
+            command_name,
+            idempotency_key,
+            payload_hash,
+            Jsonb(asdict(receipt)),
+        ),
+    )
+    return receipt
+
+
+def _finish_non_authoritative_command(
+    connection: psycopg.Connection,
+    *,
+    actor: Actor,
+    matter_id: str,
+    expected_version: int,
+    command_name: str,
+    idempotency_key: str,
+    payload_hash: str,
+    event_type: str,
+    object_type: str,
+    object_id: str,
+    audit_payload: dict[str, Any],
+) -> CaseLedgerCommandReceipt:
+    """Persist an auditable derived-work-product action without changing inputs.
+
+    This is intentionally narrower than :func:`_finish_command`: the caller
+    has already acquired the normal matter/version lock through ``_begin``,
+    but the resulting object is not an authoritative fact, rule, calculation,
+    submission, or Agent input.  It therefore must not advance the aggregate
+    case version, invalidate an Agent snapshot, or emit a matter-change
+    outbox event.  PostgreSQL allowlists the corresponding equal-version audit
+    events; callers cannot choose the event type from browser input.
+    """
+
+    audit_event_id = str(uuid4())
+    request_id = current_request_id() or str(uuid4())
+    connection.execute(
+        """
+        INSERT INTO audit_events (
+            event_id, firm_id, matter_id, actor_id, event_type,
+            input_version, output_version, request_id, payload
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            audit_event_id,
+            actor.firm_id,
+            matter_id,
+            actor.actor_id,
+            event_type,
+            expected_version,
+            expected_version,
+            request_id,
+            Jsonb(audit_payload),
+        ),
+    )
+    receipt = CaseLedgerCommandReceipt(
+        command_name=command_name,
+        idempotency_key=idempotency_key,
+        matter_id=matter_id,
+        matter_version=expected_version,
         audit_event_id=audit_event_id,
         object_type=object_type,
         object_id=object_id,

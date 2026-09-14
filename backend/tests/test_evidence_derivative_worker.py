@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from hashlib import sha256
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 from uuid import uuid4
 import unittest
 
@@ -12,13 +14,16 @@ from pypdf.generic import ArrayObject, DictionaryObject, NameObject, TextStringO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
+import case_kernel.evidence_derivative_worker as evidence_derivative_worker
 from case_kernel.evidence_derivative_worker import (
     ApprovedPageAnnotation,
     EvidenceDerivativeBlocked,
     IncludedManifestPage,
     LockedDerivativeManifest,
     SourcePdfBinding,
+    VerifiedMaterializedPdfSource,
     build_evidence_derivatives,
+    build_evidence_derivatives_from_materialized_sources,
     verify_evidence_derivatives,
 )
 from case_kernel.local_case_folder import root_fingerprint
@@ -87,6 +92,15 @@ class EvidenceDerivativeWorkerTests(unittest.TestCase):
             relative_path="synthetic-source.pdf",
             expected_sha256=self.source_hash,
             expected_page_count=3,
+        )
+
+    def materialized_source(self, source_path: Path, *, expected_page_count: int = 3) -> VerifiedMaterializedPdfSource:
+        return VerifiedMaterializedPdfSource(
+            evidence_file_id=self.file_id,
+            source_path=source_path,
+            expected_sha256=file_hash(source_path),
+            expected_page_count=expected_page_count,
+            source_reference_hash=sha256(b"worker-object:synthetic-source-v1").hexdigest(),
         )
 
     def tearDown(self) -> None:
@@ -279,6 +293,105 @@ class EvidenceDerivativeWorkerTests(unittest.TestCase):
                 confirmed_case_root_fingerprint=root_fingerprint(self.case_root),
                 output_directory=self.root / "rotated-output",
             )
+
+    def test_materialized_sources_return_path_free_metadata_and_path_free_lineage(self) -> None:
+        worker_root = self.root.resolve(strict=True)
+        materialized_root = worker_root / "worker-materialized"
+        materialized_root.mkdir(mode=0o700)
+        materialized_source = create_source_pdf(materialized_root / "object.pdf")
+        output = worker_root / "worker-private-output"
+
+        result = build_evidence_derivatives_from_materialized_sources(
+            self.manifest,
+            (self.materialized_source(materialized_source),),
+            output_directory=output,
+        )
+
+        self.assertEqual(result.related_pages.file_name, "related-pages.pdf")
+        self.assertEqual(result.annotated_pages.file_name, "related-pages-red-box.pdf")
+        self.assertFalse(hasattr(result.related_pages, "path"))
+        self.assertEqual(len(PdfReader(str(output / result.related_pages.file_name)).pages), 2)
+        self.assertEqual(len(PdfReader(str(output / result.annotated_pages.file_name)).pages), 2)
+        returned_payload = json.dumps(asdict(result), ensure_ascii=False)
+        lineage_payload = (output / result.lineage_file_name).read_text(encoding="utf-8")
+        self.assertNotIn(str(materialized_source), returned_payload)
+        self.assertNotIn(str(output), returned_payload)
+        self.assertNotIn(str(materialized_source), lineage_payload)
+        self.assertNotIn(str(materialized_root), lineage_payload)
+        lineage = json.loads(lineage_payload)
+        self.assertEqual(
+            lineage["pages"][0]["source_storage_reference_sha256"],
+            sha256(b"worker-object:synthetic-source-v1").hexdigest(),
+        )
+        self.assertNotIn("source_relative_path_sha256", lineage["pages"][0])
+
+    def test_materialized_sources_reject_symlinks_nonprivate_output_and_bad_page_count(self) -> None:
+        worker_root = self.root.resolve(strict=True)
+        materialized_root = worker_root / "worker-materialized"
+        materialized_root.mkdir(mode=0o700)
+        materialized_source = create_source_pdf(materialized_root / "object.pdf")
+        symlink = materialized_root / "object-link.pdf"
+        symlink.symlink_to(materialized_source)
+
+        with self.assertRaisesRegex(EvidenceDerivativeBlocked, "symbolic link"):
+            build_evidence_derivatives_from_materialized_sources(
+                self.manifest,
+                (self.materialized_source(symlink),),
+                output_directory=worker_root / "worker-output-symlink",
+            )
+
+        nonprivate_output = worker_root / "worker-output-public"
+        nonprivate_output.mkdir(mode=0o700)
+        nonprivate_output.chmod(0o755)
+        with self.assertRaisesRegex(EvidenceDerivativeBlocked, "group or public"):
+            build_evidence_derivatives_from_materialized_sources(
+                self.manifest,
+                (self.materialized_source(materialized_source),),
+                output_directory=nonprivate_output,
+            )
+
+        private_output_target = worker_root / "worker-output-target"
+        private_output_target.mkdir(mode=0o700)
+        symlink_output = worker_root / "worker-output-link"
+        symlink_output.symlink_to(private_output_target, target_is_directory=True)
+        with self.assertRaisesRegex(EvidenceDerivativeBlocked, "symbolic link"):
+            build_evidence_derivatives_from_materialized_sources(
+                self.manifest,
+                (self.materialized_source(materialized_source),),
+                output_directory=symlink_output,
+            )
+
+        with self.assertRaisesRegex(EvidenceDerivativeBlocked, "page count differs"):
+            build_evidence_derivatives_from_materialized_sources(
+                self.manifest,
+                (self.materialized_source(materialized_source, expected_page_count=2),),
+                output_directory=worker_root / "worker-output-page-count",
+            )
+
+    def test_materialized_sources_are_rechecked_after_derivative_generation(self) -> None:
+        worker_root = self.root.resolve(strict=True)
+        materialized_root = worker_root / "worker-materialized"
+        materialized_root.mkdir(mode=0o700)
+        materialized_source = create_source_pdf(materialized_root / "object.pdf")
+        original_write = evidence_derivative_worker._write_pdf_atomically
+        changed = False
+
+        def write_then_change_source(writer: PdfWriter, destination: Path) -> None:
+            nonlocal changed
+            original_write(writer, destination)
+            if destination.name == "related-pages.pdf" and not changed:
+                with materialized_source.open("ab") as stream:
+                    stream.write(b"\n% source changed during derivative build\n")
+                changed = True
+
+        with patch.object(evidence_derivative_worker, "_write_pdf_atomically", side_effect=write_then_change_source):
+            with self.assertRaisesRegex(EvidenceDerivativeBlocked, "changed while derivatives"):
+                build_evidence_derivatives_from_materialized_sources(
+                    self.manifest,
+                    (self.materialized_source(materialized_source),),
+                    output_directory=worker_root / "worker-output-changed",
+                )
+        self.assertTrue(changed)
 
 
 if __name__ == "__main__":

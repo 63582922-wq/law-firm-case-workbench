@@ -12,6 +12,7 @@ from case_kernel.models import Actor, Role
 from case_kernel.official_source_capture_coordinator import OfficialSourceCaptureCoordinationResult
 from case_kernel.official_source_capture_postgres import OfficialSourceCaptureRunLease
 from case_kernel.official_source_capture_worker import (
+    BoundedOfficialSourceCaptureWorker,
     OfficialSourceCaptureWorkerBlocked,
     run_authorized_official_source_capture,
     run_next_authorized_official_source_capture,
@@ -127,6 +128,43 @@ class OfficialSourceCaptureWorkerTests(unittest.TestCase):
                 run.assert_called_once()
             store.next_candidate = None
             self.assertIsNone(run_next_authorized_official_source_capture(worker=self.worker, case_root=root, artifact_store=artifact_store, store=store))
+
+    def test_next_run_builds_one_matter_bound_store_only_after_a_candidate_exists(self) -> None:
+        store = CaptureStore(self.lease)
+        store.next_candidate = (self.matter_id, self.run_id, 3)
+        selected = object()
+        factory_calls: list[str] = []
+        with TemporaryDirectory(prefix="official-capture-worker-") as temporary:
+            root = Path(temporary) / "case"; root.mkdir()
+            with patch(
+                "case_kernel.official_source_capture_worker.run_authorized_official_source_capture",
+                return_value="done",
+            ) as run:
+                self.assertEqual(
+                    run_next_authorized_official_source_capture(
+                        worker=self.worker,
+                        case_root=root,
+                        artifact_store_factory=lambda matter_id: (
+                            factory_calls.append(matter_id) or selected
+                        ),
+                        store=store,
+                    ),
+                    "done",
+                )
+        self.assertEqual(factory_calls, [self.matter_id])
+        self.assertEqual(run.call_args.kwargs["artifact_store"], selected)
+
+    def test_bounded_worker_is_idle_without_an_authorized_capture(self) -> None:
+        store = CaptureStore(self.lease)
+        with TemporaryDirectory(prefix="official-capture-worker-") as temporary:
+            root = Path(temporary) / "case"; root.mkdir()
+            worker = BoundedOfficialSourceCaptureWorker(
+                worker=self.worker,
+                case_root=root,
+                store=store,
+                artifact_store_factory=lambda _matter_id: object(),
+            )
+            self.assertFalse(worker.run_cycle())
 
 
 if __name__ == "__main__":

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
 from case_kernel.legal_provision_parser import (
+    LegalProvisionDocumentProjectionBlocked,
     LegalProvisionParseBlocked,
     parse_civil_code_borrowing_provisions,
     parse_private_lending_2015_original,
     parse_private_lending_first_revision,
     parse_private_lending_second_revision,
+    project_registered_legal_source_for_document,
 )
 from case_kernel.managed_artifact_store import LocalEncryptedArtifactStore
 from case_kernel.official_source_capture import OfficialHttpResponse, capture_authorized_official_source
@@ -122,7 +125,7 @@ class LegalProvisionParserTests(unittest.TestCase):
             parse_private_lending_second_revision(capture=capture, artifact_store=self.store)
 
     def test_civil_code_parser_extracts_contract_formation_and_interest_articles(self) -> None:
-        url = "https://www.court.gov.cn/zixun/xiangqing/233181.html"
+        url = "https://www.spp.gov.cn/zdgz/202006/t20200602_463886.shtml"
         body = """<!doctype html><html><body><h1>中华人民共和国民法典</h1><p>（2020年5月28日第十三届全国人民代表大会第三次会议通过）</p><p>第六百七十九条 自然人之间的借款合同，自贷款人提供借款时成立。</p><p>第六百八十条 禁止高利放贷。借款合同对支付利息没有约定的，视为没有利息。借款合同对支付利息约定不明确，自然人之间借款的，视为没有利息。</p><p>第六百八十一条 保证合同另行规定。</p></body></html>""".encode("utf-8")
         gateway = PublicResearchGateway()
         plan = gateway.prepare_plan(issue="民法典借款利息", proposed_query="民法典 借款利息 高利放贷")
@@ -145,6 +148,62 @@ class LegalProvisionParserTests(unittest.TestCase):
         self.assertEqual([item.provision_label for item in parsed.provisions], ["第六百七十九条", "第六百八十条"])
         self.assertIn("贷款人提供借款时成立", parsed.provisions[0].normalized_text)
         self.assertIn("禁止高利放贷", parsed.provisions[1].normalized_text)
+
+    def test_document_projection_reduces_registered_civil_code_to_exact_bound_articles(self) -> None:
+        locator = "《中华人民共和国民法典》第六百七十九条、第六百八十条；律师复核适用。"
+        literal = (
+            "中华人民共和国民法典 （2020年5月28日第十三届全国人民代表大会第三次会议通过） "
+            "第一条 总则内容。 "
+            "第六百七十九条 自然人之间的借款合同，自贷款人提供借款时成立。 "
+            "第六百八十条 禁止高利放贷。借款合同对支付利息没有约定的，视为没有利息。"
+            "借款合同对支付利息约定不明确，自然人之间借款的，视为没有利息。 "
+            "第六百八十一条 保证合同另行规定。"
+        )
+        projection = project_registered_legal_source_for_document(
+            source_id="CN-CIVIL-CODE-680",
+            provision_locator=locator,
+            literal_text=(
+                "来源定位标签（由律师核验；系统未自动定位到精确条款）："
+                f"{locator}\n\n{literal}"
+            ),
+        )
+        self.assertIsNotNone(projection)
+        assert projection is not None
+        self.assertEqual(
+            projection.provision_labels,
+            ("第六百七十九条", "第六百八十条"),
+        )
+        self.assertIn("贷款人提供借款时成立", projection.reviewed_text)
+        self.assertIn("禁止高利放贷", projection.reviewed_text)
+        self.assertNotIn("第六百八十一条", projection.reviewed_text)
+        self.assertEqual(
+            projection.reviewed_text_sha256,
+            sha256(projection.reviewed_text.encode("utf-8")).hexdigest(),
+        )
+
+    def test_document_projection_blocks_changed_locator_and_does_not_guess_unknown_sources(self) -> None:
+        literal = (
+            "中华人民共和国民法典 （2020年5月28日第十三届全国人民代表大会第三次会议通过） "
+            "第六百七十九条 自然人之间的借款合同，自贷款人提供借款时成立。 "
+            "第六百八十条 禁止高利放贷。借款合同对支付利息没有约定的，视为没有利息。"
+            "借款合同对支付利息约定不明确，自然人之间借款的，视为没有利息。 "
+            "第六百八十一条 保证合同另行规定。"
+        )
+        with self.assertRaisesRegex(
+            LegalProvisionDocumentProjectionBlocked, "exact registered article locator"
+        ):
+            project_registered_legal_source_for_document(
+                source_id="CN-CIVIL-CODE-680",
+                provision_locator="《中华人民共和国民法典》第六百七十九条、第六百八十一条",
+                literal_text=literal,
+            )
+        self.assertIsNone(
+            project_registered_legal_source_for_document(
+                source_id="UNREGISTERED_TEST_SOURCE",
+                provision_locator="第六条",
+                literal_text=literal,
+            )
+        )
 
     def test_first_revision_parser_preserves_historical_filing_time_rule(self) -> None:
         url = "https://www.court.gov.cn/zixun/xiangqing/249031.html"

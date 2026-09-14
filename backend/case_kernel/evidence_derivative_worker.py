@@ -16,9 +16,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID
 
 from PIL import Image, ImageChops
@@ -39,6 +40,23 @@ class SourcePdfBinding:
     relative_path: str
     expected_sha256: str
     expected_page_count: int
+
+
+@dataclass(frozen=True)
+class VerifiedMaterializedPdfSource:
+    """A server-worker-only reference to one quarantined PDF materialization.
+
+    ``source_path`` is deliberately an input-only worker concern.  It is never
+    persisted into derivative lineage or returned by the materialized build
+    result.  ``source_reference_hash`` is the caller-provided hash of the
+    storage-layer reference that is safe to record as provenance instead.
+    """
+
+    evidence_file_id: str
+    source_path: str | Path
+    expected_sha256: str
+    expected_page_count: int
+    source_reference_hash: str
 
 
 @dataclass(frozen=True)
@@ -77,12 +95,40 @@ class DerivativeArtifact:
 
 
 @dataclass(frozen=True)
+class MaterializedDerivativeArtifact:
+    """Derivative metadata safe to return from a server-worker materialization."""
+
+    artifact_type: str
+    file_name: str
+    sha256: str
+    page_count: int
+
+
+@dataclass(frozen=True)
 class DerivativeBuildResult:
     manifest_id: str
     manifest_content_hash: str
     related_pages: DerivativeArtifact
     annotated_pages: DerivativeArtifact
     lineage_path: Path
+    lineage_sha256: str
+
+
+@dataclass(frozen=True)
+class MaterializedDerivativeBuildResult:
+    """A path-free result for the Web worker's private output directory.
+
+    The worker that supplied ``output_directory`` can resolve the fixed output
+    names itself.  API and persistence layers receive only file names, hashes,
+    and page counts, so neither a quarantined source path nor a worker staging
+    path can cross the worker boundary.
+    """
+
+    manifest_id: str
+    manifest_content_hash: str
+    related_pages: MaterializedDerivativeArtifact
+    annotated_pages: MaterializedDerivativeArtifact
+    lineage_file_name: str
     lineage_sha256: str
 
 
@@ -95,6 +141,24 @@ class DerivativeVerification:
     changed_red_pixel_count: int
     related_pages_sha256: str
     annotated_pages_sha256: str
+
+
+@dataclass(frozen=True)
+class _ResolvedPdfSource:
+    source_path: Path
+    reader: PdfReader
+    source_hash: str
+    expected_page_count: int
+    lineage_reference: dict[str, str]
+    revalidate_path: Callable[[], Path]
+
+
+@dataclass(frozen=True)
+class _DerivativeBuildFiles:
+    related_pages: DerivativeArtifact
+    annotated_pages: DerivativeArtifact
+    lineage_path: Path
+    lineage_sha256: str
 
 
 def build_evidence_derivatives(
@@ -117,110 +181,92 @@ def build_evidence_derivatives(
         raise EvidenceDerivativeBlocked("derivative output must not be written inside the original case folder")
     _prepare_empty_output(output)
 
-    bindings = {binding.evidence_file_id: binding for binding in source_bindings}
-    if len(bindings) != len(source_bindings):
-        raise EvidenceDerivativeBlocked("each evidence file can have only one source binding")
-    required_file_ids = {page.evidence_file_id for page in manifest.pages}
-    if set(bindings) != required_file_ids:
-        raise EvidenceDerivativeBlocked("source bindings must exactly match the files used by the locked Manifest")
-
-    resolved_sources: dict[str, tuple[Path, PdfReader, str]] = {}
-    source_hashes_before: dict[str, str] = {}
+    bindings = _index_source_bindings(manifest, source_bindings)
+    resolved_sources: dict[str, _ResolvedPdfSource] = {}
     for file_id, binding in bindings.items():
         _validate_uuid("evidence_file_id", file_id)
-        _validate_sha256("source PDF", binding.expected_sha256)
-        if binding.expected_page_count < 1:
-            raise EvidenceDerivativeBlocked("source PDF page count must be positive")
+        _validate_source_registration(binding.expected_sha256, binding.expected_page_count)
         source_path = _resolve_source_pdf(root, binding.relative_path)
-        source_hash = _file_sha256(source_path)
-        if source_hash != binding.expected_sha256:
-            raise EvidenceDerivativeBlocked("source PDF hash differs from the registered original")
-        reader = PdfReader(str(source_path))
-        if reader.is_encrypted:
-            raise EvidenceDerivativeBlocked("encrypted source PDFs require a separate approved unlock workflow")
-        if len(reader.pages) != binding.expected_page_count:
-            raise EvidenceDerivativeBlocked("source PDF page count differs from the registered original")
-        resolved_sources[file_id] = (source_path, reader, source_hash)
-        source_hashes_before[file_id] = source_hash
+        source_hash, reader = _read_verified_source_pdf(
+            source_path,
+            expected_sha256=binding.expected_sha256,
+            expected_page_count=binding.expected_page_count,
+        )
+        relative_path_hash = sha256(str(source_path.relative_to(root)).encode("utf-8")).hexdigest()
+        resolved_sources[file_id] = _ResolvedPdfSource(
+            source_path=source_path,
+            reader=reader,
+            source_hash=source_hash,
+            expected_page_count=binding.expected_page_count,
+            lineage_reference={"source_relative_path_sha256": relative_path_hash},
+            revalidate_path=lambda binding=binding: _resolve_source_pdf(root, binding.relative_path),
+        )
 
-    related_writer = PdfWriter()
-    annotated_writer = PdfWriter()
-    lineage_pages: list[dict[str, Any]] = []
-    with TemporaryDirectory(prefix="evidence-derivative-overlay-", dir=output) as temporary:
-        temporary_path = Path(temporary)
-        for entry in manifest.pages:
-            source_path, reader, source_hash = resolved_sources[entry.evidence_file_id]
-            if entry.source_page_number > len(reader.pages):
-                raise EvidenceDerivativeBlocked("Manifest page number exceeds the registered source PDF")
-            source_page = reader.pages[entry.source_page_number - 1]
-            _validate_page_geometry(source_page)
-            related_writer.add_page(_sanitized_page_copy(source_page))
-            annotated_writer.add_page(_sanitized_page_copy(source_page))
-            target_page = annotated_writer.pages[-1]
-            overlay_path = temporary_path / f"overlay-{entry.derivative_sequence}.pdf"
-            _write_annotation_overlay(
-                overlay_path,
-                width=float(target_page.mediabox.width),
-                height=float(target_page.mediabox.height),
-                annotations=entry.annotations,
-            )
-            target_page.merge_page(PdfReader(str(overlay_path)).pages[0])
-            lineage_pages.append(
-                {
-                    "derivative_sequence": entry.derivative_sequence,
-                    "evidence_page_id": entry.evidence_page_id,
-                    "evidence_file_id": entry.evidence_file_id,
-                    "source_relative_path_sha256": sha256(
-                        str(source_path.relative_to(root)).encode("utf-8")
-                    ).hexdigest(),
-                    "source_file_sha256": source_hash,
-                    "source_page_number": entry.source_page_number,
-                    "annotations": [asdict(annotation) for annotation in entry.annotations],
-                }
-            )
-
-        related_path = output / "related-pages.pdf"
-        annotated_path = output / "related-pages-red-box.pdf"
-        _write_pdf_atomically(related_writer, related_path)
-        _write_pdf_atomically(annotated_writer, annotated_path)
-
-    for file_id, (source_path, _, _) in resolved_sources.items():
-        if _file_sha256(source_path) != source_hashes_before[file_id]:
-            raise EvidenceDerivativeBlocked("a source PDF changed while derivatives were being built")
-
-    related_artifact = _inspect_artifact("RELATED_PAGES_PDF", related_path, len(manifest.pages))
-    annotated_artifact = _inspect_artifact(
-        "ANNOTATED_RELATED_PAGES_PDF", annotated_path, len(manifest.pages)
-    )
-    lineage = {
-        "schema_version": "evidence-derivative-lineage-v1",
-        "manifest_id": manifest.manifest_id,
-        "manifest_content_hash": manifest.content_hash,
-        "coordinate_space": "normalized top-left origin: 0 <= x,y <= 1",
-        "originals_unchanged": True,
-        "pages": lineage_pages,
-        "artifacts": {
-            "related_pages": {
-                "file_name": related_artifact.path.name,
-                "sha256": related_artifact.sha256,
-                "page_count": related_artifact.page_count,
-            },
-            "annotated_pages": {
-                "file_name": annotated_artifact.path.name,
-                "sha256": annotated_artifact.sha256,
-                "page_count": annotated_artifact.page_count,
-            },
-        },
-    }
-    lineage_path = output / "evidence-derivative-lineage.json"
-    _write_json_atomically(lineage_path, lineage)
+    build = _build_derivative_files(manifest, resolved_sources, output)
     return DerivativeBuildResult(
         manifest_id=manifest.manifest_id,
         manifest_content_hash=manifest.content_hash,
-        related_pages=related_artifact,
-        annotated_pages=annotated_artifact,
-        lineage_path=lineage_path,
-        lineage_sha256=_file_sha256(lineage_path),
+        related_pages=build.related_pages,
+        annotated_pages=build.annotated_pages,
+        lineage_path=build.lineage_path,
+        lineage_sha256=build.lineage_sha256,
+    )
+
+
+def build_evidence_derivatives_from_materialized_sources(
+    manifest: LockedDerivativeManifest,
+    sources: tuple[VerifiedMaterializedPdfSource, ...],
+    *,
+    output_directory: str | Path,
+) -> MaterializedDerivativeBuildResult:
+    """Build derivatives from server-owned quarantined PDF materializations.
+
+    This entry point is only for a trusted worker after upload quarantine and
+    object-storage materialization.  It refuses relative paths, symlinks, and
+    non-private output directories.  Neither source paths nor output paths are
+    included in the returned result or in the evidence lineage JSON.
+    """
+    _validate_manifest(manifest)
+    output = _prepare_private_output_directory(output_directory)
+    indexed_sources = _index_materialized_sources(manifest, sources)
+    resolved_sources: dict[str, _ResolvedPdfSource] = {}
+    for file_id, source in indexed_sources.items():
+        _validate_uuid("evidence_file_id", file_id)
+        _validate_source_registration(source.expected_sha256, source.expected_page_count)
+        _validate_sha256("source storage reference", source.source_reference_hash)
+        source_path = _resolve_materialized_source_pdf(source.source_path)
+        source_hash, reader = _read_verified_source_pdf(
+            source_path,
+            expected_sha256=source.expected_sha256,
+            expected_page_count=source.expected_page_count,
+        )
+        resolved_sources[file_id] = _ResolvedPdfSource(
+            source_path=source_path,
+            reader=reader,
+            source_hash=source_hash,
+            expected_page_count=source.expected_page_count,
+            lineage_reference={"source_storage_reference_sha256": source.source_reference_hash},
+            revalidate_path=lambda source=source: _resolve_materialized_source_pdf(source.source_path),
+        )
+
+    build = _build_derivative_files(manifest, resolved_sources, output)
+    return MaterializedDerivativeBuildResult(
+        manifest_id=manifest.manifest_id,
+        manifest_content_hash=manifest.content_hash,
+        related_pages=MaterializedDerivativeArtifact(
+            artifact_type=build.related_pages.artifact_type,
+            file_name=build.related_pages.path.name,
+            sha256=build.related_pages.sha256,
+            page_count=build.related_pages.page_count,
+        ),
+        annotated_pages=MaterializedDerivativeArtifact(
+            artifact_type=build.annotated_pages.artifact_type,
+            file_name=build.annotated_pages.path.name,
+            sha256=build.annotated_pages.sha256,
+            page_count=build.annotated_pages.page_count,
+        ),
+        lineage_file_name=build.lineage_path.name,
+        lineage_sha256=build.lineage_sha256,
     )
 
 
@@ -282,6 +328,184 @@ def verify_evidence_derivatives(
     )
 
 
+def _index_source_bindings(
+    manifest: LockedDerivativeManifest,
+    source_bindings: tuple[SourcePdfBinding, ...],
+) -> dict[str, SourcePdfBinding]:
+    bindings: dict[str, SourcePdfBinding] = {}
+    for binding in source_bindings:
+        if not isinstance(binding, SourcePdfBinding):
+            raise EvidenceDerivativeBlocked("source bindings must use registered PDF binding records")
+        if binding.evidence_file_id in bindings:
+            raise EvidenceDerivativeBlocked("each evidence file can have only one source binding")
+        bindings[binding.evidence_file_id] = binding
+    _validate_source_ids(manifest, bindings)
+    return bindings
+
+
+def _index_materialized_sources(
+    manifest: LockedDerivativeManifest,
+    sources: tuple[VerifiedMaterializedPdfSource, ...],
+) -> dict[str, VerifiedMaterializedPdfSource]:
+    indexed: dict[str, VerifiedMaterializedPdfSource] = {}
+    for source in sources:
+        if not isinstance(source, VerifiedMaterializedPdfSource):
+            raise EvidenceDerivativeBlocked("materialized sources must use verified worker records")
+        if source.evidence_file_id in indexed:
+            raise EvidenceDerivativeBlocked("each evidence file can have only one materialized source")
+        indexed[source.evidence_file_id] = source
+    _validate_source_ids(manifest, indexed)
+    return indexed
+
+
+def _validate_source_ids(
+    manifest: LockedDerivativeManifest,
+    sources: dict[str, Any],
+) -> None:
+    required_file_ids = {page.evidence_file_id for page in manifest.pages}
+    if set(sources) != required_file_ids:
+        raise EvidenceDerivativeBlocked("source bindings must exactly match the files used by the locked Manifest")
+
+
+def _validate_source_registration(expected_sha256: str, expected_page_count: int) -> None:
+    _validate_sha256("source PDF", expected_sha256)
+    if isinstance(expected_page_count, bool) or not isinstance(expected_page_count, int) or expected_page_count < 1:
+        raise EvidenceDerivativeBlocked("source PDF page count must be positive")
+
+
+def _read_verified_source_pdf(
+    source_path: Path,
+    *,
+    expected_sha256: str,
+    expected_page_count: int,
+) -> tuple[str, PdfReader]:
+    try:
+        source_hash = _file_sha256(source_path)
+    except OSError as error:
+        raise EvidenceDerivativeBlocked("registered source PDF is no longer readable") from error
+    if source_hash != expected_sha256:
+        raise EvidenceDerivativeBlocked("source PDF hash differs from the registered original")
+    try:
+        reader = PdfReader(str(source_path))
+        if reader.is_encrypted:
+            raise EvidenceDerivativeBlocked("encrypted source PDFs require a separate approved unlock workflow")
+        if len(reader.pages) != expected_page_count:
+            raise EvidenceDerivativeBlocked("source PDF page count differs from the registered original")
+    except EvidenceDerivativeBlocked:
+        raise
+    except Exception as error:
+        raise EvidenceDerivativeBlocked("registered source PDF cannot be read safely") from error
+    return source_hash, reader
+
+
+def _build_derivative_files(
+    manifest: LockedDerivativeManifest,
+    resolved_sources: dict[str, _ResolvedPdfSource],
+    output: Path,
+) -> _DerivativeBuildFiles:
+    related_writer = PdfWriter()
+    annotated_writer = PdfWriter()
+    lineage_pages: list[dict[str, Any]] = []
+    with TemporaryDirectory(prefix="evidence-derivative-overlay-", dir=output) as temporary:
+        temporary_path = Path(temporary)
+        for entry in manifest.pages:
+            source = resolved_sources[entry.evidence_file_id]
+            if entry.source_page_number > len(source.reader.pages):
+                raise EvidenceDerivativeBlocked("Manifest page number exceeds the registered source PDF")
+            source_page = source.reader.pages[entry.source_page_number - 1]
+            _validate_page_geometry(source_page)
+            related_writer.add_page(_sanitized_page_copy(source_page))
+            annotated_writer.add_page(_sanitized_page_copy(source_page))
+            target_page = annotated_writer.pages[-1]
+            overlay_path = temporary_path / f"overlay-{entry.derivative_sequence}.pdf"
+            _write_annotation_overlay(
+                overlay_path,
+                width=float(target_page.mediabox.width),
+                height=float(target_page.mediabox.height),
+                annotations=entry.annotations,
+            )
+            target_page.merge_page(PdfReader(str(overlay_path)).pages[0])
+            lineage_page = {
+                "derivative_sequence": entry.derivative_sequence,
+                "evidence_page_id": entry.evidence_page_id,
+                "evidence_file_id": entry.evidence_file_id,
+                "source_file_sha256": source.source_hash,
+                "source_page_number": entry.source_page_number,
+                "annotations": [asdict(annotation) for annotation in entry.annotations],
+            }
+            lineage_page.update(_safe_lineage_reference(source.lineage_reference))
+            lineage_pages.append(lineage_page)
+
+        related_path = output / "related-pages.pdf"
+        annotated_path = output / "related-pages-red-box.pdf"
+        _write_pdf_atomically(related_writer, related_path)
+        _write_pdf_atomically(annotated_writer, annotated_path)
+
+    _assert_sources_unchanged(resolved_sources)
+
+    related_artifact = _inspect_artifact("RELATED_PAGES_PDF", related_path, len(manifest.pages))
+    annotated_artifact = _inspect_artifact(
+        "ANNOTATED_RELATED_PAGES_PDF", annotated_path, len(manifest.pages)
+    )
+    lineage = {
+        "schema_version": "evidence-derivative-lineage-v1",
+        "manifest_id": manifest.manifest_id,
+        "manifest_content_hash": manifest.content_hash,
+        "coordinate_space": "normalized top-left origin: 0 <= x,y <= 1",
+        "originals_unchanged": True,
+        "pages": lineage_pages,
+        "artifacts": {
+            "related_pages": {
+                "file_name": related_artifact.path.name,
+                "sha256": related_artifact.sha256,
+                "page_count": related_artifact.page_count,
+            },
+            "annotated_pages": {
+                "file_name": annotated_artifact.path.name,
+                "sha256": annotated_artifact.sha256,
+                "page_count": annotated_artifact.page_count,
+            },
+        },
+    }
+    lineage_path = output / "evidence-derivative-lineage.json"
+    _write_json_atomically(lineage_path, lineage)
+    return _DerivativeBuildFiles(
+        related_pages=related_artifact,
+        annotated_pages=annotated_artifact,
+        lineage_path=lineage_path,
+        lineage_sha256=_file_sha256(lineage_path),
+    )
+
+
+def _safe_lineage_reference(reference: dict[str, str]) -> dict[str, str]:
+    allowed_keys = {
+        "source_relative_path_sha256",
+        "source_storage_reference_sha256",
+    }
+    if len(reference) != 1 or not set(reference).issubset(allowed_keys):
+        raise EvidenceDerivativeBlocked("source lineage reference is not safe for persistence")
+    key, value = next(iter(reference.items()))
+    _validate_sha256("source lineage reference", value)
+    return {key: value}
+
+
+def _assert_sources_unchanged(resolved_sources: dict[str, _ResolvedPdfSource]) -> None:
+    for source in resolved_sources.values():
+        try:
+            revalidated_path = source.revalidate_path()
+            if revalidated_path != source.source_path:
+                raise EvidenceDerivativeBlocked("a source PDF changed while derivatives were being built")
+            if _file_sha256(revalidated_path) != source.source_hash:
+                raise EvidenceDerivativeBlocked("a source PDF changed while derivatives were being built")
+            reader = PdfReader(str(revalidated_path))
+            if reader.is_encrypted or len(reader.pages) != source.expected_page_count:
+                raise EvidenceDerivativeBlocked("a source PDF changed while derivatives were being built")
+        except EvidenceDerivativeBlocked:
+            raise
+        except Exception as error:
+            raise EvidenceDerivativeBlocked("a source PDF changed while derivatives were being built") from error
+
+
 def _validate_manifest(manifest: LockedDerivativeManifest) -> None:
     _validate_uuid("manifest_id", manifest.manifest_id)
     _validate_sha256("manifest content_hash", manifest.content_hash)
@@ -328,6 +552,30 @@ def _resolve_source_pdf(root: Path, relative_path: str) -> Path:
     if resolved.suffix.lower() != ".pdf":
         raise EvidenceDerivativeBlocked("this derivative worker accepts registered PDF originals only")
     return resolved
+
+
+def _resolve_materialized_source_pdf(source_path: str | Path) -> Path:
+    """Validate a worker-materialized source without normalizing away symlinks."""
+    try:
+        candidate = Path(source_path)
+    except TypeError as error:
+        raise EvidenceDerivativeBlocked("materialized source path is required") from error
+    if not candidate.is_absolute():
+        raise EvidenceDerivativeBlocked("materialized source path must be absolute")
+    _assert_no_symbolic_link_components(
+        candidate,
+        label="materialized source path",
+        allow_missing_tail=False,
+    )
+    try:
+        metadata = os.lstat(candidate)
+    except OSError as error:
+        raise EvidenceDerivativeBlocked("materialized source PDF is unavailable") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise EvidenceDerivativeBlocked("materialized source PDF must be a regular file")
+    if candidate.suffix.lower() != ".pdf":
+        raise EvidenceDerivativeBlocked("this derivative worker accepts registered PDF originals only")
+    return candidate
 
 
 def _validate_page_geometry(page: Any) -> None:
@@ -442,6 +690,81 @@ def _prepare_empty_output(output: Path) -> None:
         output.mkdir(parents=True, mode=0o700)
 
 
+def _prepare_private_output_directory(output_directory: str | Path) -> Path:
+    """Create or validate an empty 0700 server-worker output directory.
+
+    The materialized-source entry point intentionally does not call
+    ``Path.resolve()``: resolving first would hide a symlink in a worker path.
+    The lexical absolute path is checked component by component before use.
+    """
+    try:
+        output = Path(output_directory)
+    except TypeError as error:
+        raise EvidenceDerivativeBlocked("private derivative output directory is required") from error
+    if not output.is_absolute():
+        raise EvidenceDerivativeBlocked("private derivative output directory must be absolute")
+    _assert_no_symbolic_link_components(
+        output,
+        label="private derivative output directory",
+        allow_missing_tail=True,
+    )
+    try:
+        metadata = os.lstat(output)
+    except FileNotFoundError:
+        try:
+            output.mkdir(parents=True, mode=0o700)
+            output.chmod(0o700)
+        except OSError as error:
+            raise EvidenceDerivativeBlocked("private derivative output directory cannot be created") from error
+    except OSError as error:
+        raise EvidenceDerivativeBlocked("private derivative output directory is unavailable") from error
+    _assert_no_symbolic_link_components(
+        output,
+        label="private derivative output directory",
+        allow_missing_tail=False,
+    )
+    try:
+        metadata = os.lstat(output)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise EvidenceDerivativeBlocked("private derivative output must be a directory")
+        if stat.S_IMODE(metadata.st_mode) & 0o077:
+            raise EvidenceDerivativeBlocked("private derivative output directory must not grant group or public access")
+        if any(output.iterdir()):
+            raise EvidenceDerivativeBlocked("private derivative output directory must be empty")
+    except EvidenceDerivativeBlocked:
+        raise
+    except OSError as error:
+        raise EvidenceDerivativeBlocked("private derivative output directory cannot be inspected") from error
+    return output
+
+
+def _assert_no_symbolic_link_components(
+    path: Path,
+    *,
+    label: str,
+    allow_missing_tail: bool,
+) -> None:
+    if not path.is_absolute():
+        raise EvidenceDerivativeBlocked(f"{label} must be absolute")
+    anchor_parts = Path(path.anchor).parts
+    components = path.parts[len(anchor_parts) :]
+    if any(component in {"", ".", ".."} for component in components):
+        raise EvidenceDerivativeBlocked(f"{label} cannot use parent-directory traversal")
+    current = Path(path.anchor)
+    for component in components:
+        current = current / component
+        try:
+            metadata = os.lstat(current)
+        except FileNotFoundError:
+            if allow_missing_tail:
+                return
+            raise EvidenceDerivativeBlocked(f"{label} is unavailable") from None
+        except OSError as error:
+            raise EvidenceDerivativeBlocked(f"{label} cannot be inspected") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise EvidenceDerivativeBlocked(f"{label} cannot traverse a symbolic link")
+
+
 def _validate_uuid(label: str, value: str) -> None:
     try:
         UUID(value)
@@ -450,7 +773,7 @@ def _validate_uuid(label: str, value: str) -> None:
 
 
 def _validate_sha256(label: str, value: str) -> None:
-    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+    if not isinstance(value, str) or len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise EvidenceDerivativeBlocked(f"{label} must be a lowercase SHA-256 value")
 
 

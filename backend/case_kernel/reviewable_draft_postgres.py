@@ -20,7 +20,7 @@ from .case_ledger_postgres import (
     _advisory_lock,
     _authorize_and_lock_matter,
     _authorize_matter_read,
-    _finish_command,
+    _finish_non_authoritative_command,
     _payload_hash,
     _prior_receipt,
     _require_positive_version,
@@ -151,7 +151,7 @@ class PostgresReviewableDraftStore:
                  review_pdf_sha256, review_pdf_bytes, review_pdf_page_count, approval_input_hash,
                  render_verification_hash, review_input_hash, actor.actor_id),
             )
-            return _finish_command(
+            return _finish_non_authoritative_command(
                 connection, actor=actor, matter_id=matter_id, expected_version=expected_version,
                 command_name=command_name, idempotency_key=idempotency_key, payload_hash=payload_hash,
                 event_type="REVIEWABLE_OFFICE_DRAFT_PAIR_REGISTERED",
@@ -160,7 +160,6 @@ class PostgresReviewableDraftStore:
                                "editable_sha256": editable_sha256, "review_pdf_sha256": review_pdf_sha256,
                                "review_input_hash": review_input_hash,
                                "render_verification_hash": render_verification_hash},
-                stale_submission=False, stale_calculations=False,
             )
 
     def approve_reviewable_office_draft_pair(
@@ -198,7 +197,7 @@ class PostgresReviewableDraftStore:
                 WHERE pair_id = %s AND matter_id = %s AND firm_id = %s
                 """, (actor.actor_id, approval_hash, pair_id, matter_id, actor.firm_id),
             )
-            return _finish_command(
+            return _finish_non_authoritative_command(
                 connection, actor=actor, matter_id=matter_id, expected_version=expected_version,
                 command_name=command_name, idempotency_key=idempotency_key, payload_hash=payload_hash,
                 event_type="REVIEWABLE_OFFICE_DRAFT_PAIR_APPROVED",
@@ -207,9 +206,6 @@ class PostgresReviewableDraftStore:
                                "editable_sha256": pair["editable_sha256"],
                                "review_pdf_sha256": pair["review_pdf_sha256"],
                                "approval_hash": approval_hash},
-                # This pair is internal-only.  It cannot reach court export until a separately
-                # generated PDF work product passes its own approval and QA chain.
-                stale_submission=False, stale_calculations=False,
             )
 
     def get_reviewable_office_draft_snapshot(

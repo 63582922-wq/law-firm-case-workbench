@@ -142,7 +142,7 @@ class PostgresFormalCalculationStore:
                 raise CaseLedgerPersistenceBlocked("formal calculation requires the current approved legal bundle")
             rule_rows = connection.execute(
                 """
-                SELECT rule_version FROM case_legal_bundle_rule_versions
+                SELECT rule_version, issue_key FROM case_legal_bundle_rule_versions
                 WHERE bundle_id = %s AND matter_id = %s AND firm_id = %s
                 ORDER BY issue_key, rule_version
                 """,
@@ -151,6 +151,17 @@ class PostgresFormalCalculationStore:
             approved_rule_versions = tuple(row["rule_version"] for row in rule_rows)
             if not approved_rule_versions:
                 raise CaseLedgerPersistenceBlocked("approved legal bundle contains no rule versions")
+            # Historical acceptance bundles used NO_INTEREST only to carry
+            # source-review authority. They never approved a monetary rule.
+            # Preserve those records, but do not interpret their zero rate as
+            # a lawyer-approved interest-free calculation (even in mixed bundles).
+            if any(
+                row["issue_key"] == "PRIVATE_LENDING_RESPONSE_SOURCE_SCOPE"
+                for row in rule_rows
+            ):
+                raise CaseLedgerPersistenceBlocked(
+                    "source-review-only legal bundles cannot authorize formal calculation"
+                )
             segment_rows = connection.execute(
                 """
                 SELECT segment_id, start_date, end_date, annual_rate,

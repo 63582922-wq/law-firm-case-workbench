@@ -59,9 +59,17 @@ class ExternalResearchReceipt:
 PUBLIC_SOURCES: tuple[PublicSource, ...] = (
     PublicSource(
         source_id="CN-CIVIL-CODE-680",
-        publisher="国家法律法规数据库 / 最高人民法院",
+        publisher="国家法律法规数据库 / 最高人民法院 / 最高人民检察院",
         source_tier="PRIMARY_LAW",
-        allowed_domains=frozenset({"court.gov.cn", "www.court.gov.cn", "flk.npc.gov.cn", "wb.flk.npc.gov.cn"}),
+        allowed_domains=frozenset(
+            {
+                "court.gov.cn",
+                "www.court.gov.cn",
+                "flk.npc.gov.cn",
+                "wb.flk.npc.gov.cn",
+                "www.spp.gov.cn",
+            }
+        ),
         topics=frozenset({"民法典", "借款利息", "高利放贷"}),
     ),
     PublicSource(

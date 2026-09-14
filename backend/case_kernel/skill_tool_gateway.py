@@ -1,4 +1,4 @@
-"""Concrete local Tool Gateway for the Agent's enabled document skills.
+"""Concrete bounded Tool Gateway for the Agent's enabled document skills.
 
 The gateway accepts already-authorized in-memory evidence handles and approved
 draft snapshots only.  It deliberately has no path-string, shell or generic
@@ -45,6 +45,27 @@ class CaseSkillToolGateway:
         self._registry = registry
         self._office_pdf_converter = office_pdf_converter
 
+    @staticmethod
+    def executable_tool_ids() -> frozenset[str]:
+        """Exact adapters implemented by this gateway.
+
+        Planner exposure must be intersected with this list.  A policy entry
+        on its own is not evidence that a server Worker can execute the Tool.
+        """
+
+        return frozenset({
+            "parse_office_document",
+            "extract_pdf_text",
+            "normalize_image_or_text_pdf",
+            "render_office_to_pdf",
+            "create_reviewable_docx_draft",
+            "create_pdf_derivative",
+            "create_reviewable_xlsx_ledger",
+            "review_document_consistency",
+            "plan_authoritative_rule_research",
+            "plan_private_lending_transition",
+        })
+
     def execute(
         self,
         *,
@@ -81,7 +102,7 @@ class CaseSkillToolGateway:
         elif tool_id == "render_office_to_pdf":
             source = _authorized_source(payload)
             if self._office_pdf_converter is None:
-                raise SkillToolGatewayBlocked("the isolated Office PDF converter is not configured for this desktop")
+                raise SkillToolGatewayBlocked("the isolated Office PDF converter is not configured for this server")
             result = self._office_pdf_converter.convert(source, detected_kind=_text(payload, "detected_kind"))
         elif tool_id == "create_reviewable_docx_draft":
             result = create_reviewable_docx_draft(
@@ -102,7 +123,7 @@ class CaseSkillToolGateway:
                 documents=_document_snapshots(payload),
                 canonical_fields=_canonical_fields(payload),
             )
-        elif tool_id == "search_authoritative_rules":
+        elif tool_id == "plan_authoritative_rule_research":
             try:
                 result = PublicResearchGateway().prepare_plan(
                     issue=_text(payload, "issue"),
