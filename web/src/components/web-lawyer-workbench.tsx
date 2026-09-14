@@ -15,6 +15,7 @@ import {
   WebLawyerApiError,
   WEB_MAX_ARCHIVE_BYTES,
   WEB_MAX_COMMON_MATERIAL_BYTES,
+  WEB_MAX_IMAGE_BYTES,
   WEB_MAX_PDF_BYTES,
   createWebCaseIdempotencyKey,
   createWebCommonMaterialUploadSlot,
@@ -88,6 +89,8 @@ type UploadItem = {
   id: string;
   file: File | null;
   kind: UploadItemKind;
+  /** 图片走与 PDF 相同的接收通道（服务端 kind 仍为 PDF），仅用于界面标签与大小上限。 */
+  image: boolean;
   name: string;
   byteSize: number;
   serverId: string | null;
@@ -908,18 +911,22 @@ function MaterialIntake({
     const selected = Array.from(files);
     const withheldCommonCount = selected.filter((file) => isCommonMaterialCandidate(file) && !canUploadCommon).length;
     const nextItems = selected.flatMap((file): UploadItem[] => {
-      const pdf = isPdfCandidate(file) || isImageMaterialCandidate(file);
+      const image = isImageMaterialCandidate(file);
+      const pdf = isPdfCandidate(file) || image;
       const zip = isZipCandidate(file);
       const common = !pdf && isCommonMaterialCandidate(file);
       if (common && !canUploadCommon) return [];
       const kind: UploadItemKind = pdf ? "PDF" : zip ? "ZIP" : "COMMON";
-      const maximum = kind === "ZIP" ? WEB_MAX_ARCHIVE_BYTES : kind === "COMMON" ? WEB_MAX_COMMON_MATERIAL_BYTES : WEB_MAX_PDF_BYTES;
+      const maximum = kind === "ZIP" ? WEB_MAX_ARCHIVE_BYTES
+        : kind === "COMMON" ? WEB_MAX_COMMON_MATERIAL_BYTES
+        : image ? WEB_MAX_IMAGE_BYTES : WEB_MAX_PDF_BYTES;
       const valid = (pdf || zip || common) && file.size > 0 && file.size <= maximum;
       const legacy = isLegacyCommonMaterialCandidate(file);
       return [{
         id: makeQueueId(),
         file: valid ? file : null,
         kind,
+        image,
         serverId: null,
         name: file.name || "未命名文件",
         byteSize: file.size,
@@ -929,7 +936,7 @@ function MaterialIntake({
             : file.size <= 0
               ? "文件为空，未上传。"
               : file.size > maximum
-                ? `文件超过 ${kind === "COMMON" ? "100 MiB" : "256 MiB"} 的受管接收上限，未上传。`
+                ? `文件超过 ${kind === "COMMON" ? "100 MiB" : image ? "64 MiB" : "256 MiB"} 的受管接收上限，未上传。`
                 : legacy
                   ? "当前不接收旧版 DOC / XLS / PPT、MSG 或 OFD；请先转换为受支持格式后重新选择。"
                   : "当前支持 PDF、ZIP、DOCX、XLSX、PPTX、RTF、TXT、CSV、HTML、EML、JPEG 和 PNG；该文件未上传。",
@@ -1093,7 +1100,8 @@ function MaterialIntake({
       const receipt = status.receipt;
       onMaterialsReceived();
       onCaseVersionAdvanced(caseItem.caseId, receipt.matterVersion);
-      setItems((current) => updateUploadItem(current, itemId, { file: null, state: "RECEIVED", message: "PDF 已接收并归入本案。", receipt }));
+      const image = items.find((candidate) => candidate.id === itemId)?.image ?? false;
+      setItems((current) => updateUploadItem(current, itemId, { file: null, state: "RECEIVED", message: image ? "图片已接收并归入本案。" : "PDF 已接收并归入本案。", receipt }));
       return;
     }
     if (kind === "ZIP" && status.receipt && "processingStatus" in status.receipt) {
@@ -1203,7 +1211,7 @@ function MaterialIntake({
               <article key={item.id}>
                 <div className={styles.webLawyerUploadTitle}>
                   <span className={uploadStateClass(item.state)}>{uploadStateLabel(item.state)}</span>
-                  <div><strong>{item.name}</strong><small>{item.kind} · {formatBytes(item.byteSize)}</small></div>
+                  <div><strong>{item.name}</strong><small>{item.image ? "图片" : item.kind} · {formatBytes(item.byteSize)}</small></div>
                 </div>
                 <div className={styles.webLawyerUploadDetail}>
                   {item.message ? <p>{item.message}</p> : <p>等待律师确认接收。</p>}

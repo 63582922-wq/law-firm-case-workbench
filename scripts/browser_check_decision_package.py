@@ -45,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parameters", type=Path, default=None,
                         help="案件计算参数 JSON（含 lpr_4x_monthly_rate/interest_cutoff/debts）")
     parser.add_argument("--timeout-seconds", type=int, default=1800, help="等待分析完成的上限")
+    parser.add_argument("--expect-status", default="COMPLETED",
+                        help="允许的终态，逗号分隔；默认 COMPLETED。"
+                             "未配置模型时用 MODEL_NOT_CONFIGURED")
     parser.add_argument("--screenshot-dir", type=Path, default=None,
                         help="截图输出目录（默认不截图）")
     parser.add_argument("--json-out", type=Path, default=None, help="把自检结果写入 JSON 文件")
@@ -170,9 +173,11 @@ def main() -> int:
             snapshot(page, "03-final")
             browser.close()
             return 1
-        if report["terminal_status"] != "COMPLETED":
+        expected = {item.strip() for item in str(args.expect_status).split(",") if item.strip()}
+        if report["terminal_status"] not in expected:
             report["outcome"] = "REVIEW"
-            step("检查未通过", reason=f"本次分析终态为 {report['terminal_status']}，不是 COMPLETED")
+            step("检查未通过",
+                 reason=f"本次分析终态为 {report['terminal_status']}，不在允许的终态 {sorted(expected)} 内")
             snapshot(page, "03-final")
             browser.close()
             return 1
