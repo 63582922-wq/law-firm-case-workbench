@@ -11,7 +11,10 @@ body {
 }
 
 body {
-  min-width: 1180px;
+  /* Route-level shells own their minimum width.  The managed lawyer Web
+     workbench is responsive, while the legacy desktop shell keeps its
+     explicit 1180px floor in case-workbench.module.css. */
+  min-width: 0;
   color: #26312f;
   background: #f3f0e6;
   font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;

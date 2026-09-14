@@ -1,5 +1,5 @@
-import { CaseWorkbench } from "@/components/case-workbench";
+import { WebLawyerWorkbench } from "@/components/web-lawyer-workbench";
 
 export default function EvidencePage() {
-  return <CaseWorkbench initialView="evidence" />;
+  return <WebLawyerWorkbench initialView="evidence" />;
 }

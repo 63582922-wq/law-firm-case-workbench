@@ -38,6 +38,7 @@ import {
   restoreActiveLocalStandaloneCase,
 } from "@/lib/local-standalone-case-source";
 import { syntheticMatter } from "@/lib/synthetic-matter";
+import { WebLawyerWorkbench } from "@/components/web-lawyer-workbench";
 import styles from "./case-workbench.module.css";
 
 type View = "overview" | "evidence" | "facts" | "legal" | "calculation" | "bundle" | "security";
@@ -97,8 +98,13 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
       ? desktopRuntime?.message ?? "本机案件工作区尚未完成身份、会话和资料库核验。"
       : desktopWorkspaceMessage;
   const localFeatureLabel = navItems.find((item) => item.id === view)?.label ?? "该功能";
+  // The browser product never falls back to a synthetic case or the legacy
+  // desktop workspace. Browser users enter the same-origin, server-backed
+  // lawyer flow below; Tauri keeps its existing isolated behavior.
+  const webDeploymentRequired = !isDesktopCaseWorkspaceShell();
 
   useEffect(() => {
+    if (!isDesktopCaseWorkspaceShell()) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let unavailableBridgeAttempts = 0;
@@ -165,6 +171,7 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
   }, []);
 
   useEffect(() => {
+    if (!isDesktopCaseWorkspaceShell()) return;
     let active = true;
     void Promise.resolve().then(async () => {
       if (!active) return;
@@ -214,6 +221,10 @@ export function CaseWorkbench({ initialView = "overview" }: { initialView?: View
       active = false;
     };
   }, [desktopRuntime]);
+
+  if (webDeploymentRequired) {
+    return <WebLawyerWorkbench initialView={view} />;
+  }
 
   return (
     <main className={styles.shell}>
@@ -500,7 +511,7 @@ function PersistentWorkspaceSetup({ onMatterCreated }: { onMatterCreated: (matte
       <form className={styles.caseSetupForm} onSubmit={(event) => void createMatter(event)}>
         <label>
           <span>案件名称</span>
-          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：测试甲民间借贷纠纷" required />
+          <input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="例如：周雅丽民间借贷纠纷" required />
         </label>
         <div className={styles.caseSetupActions}>
           <button type="submit" disabled={busy || openingMatterId !== null || title.trim().length < 2}>{busy ? "正在建立…" : "建立案件，下一步选择材料文件夹"}</button>
@@ -563,7 +574,7 @@ function Overview({
       { state: "接下来", title: "核对每笔还款的时间、金额和币种", detail: "不先判断它是否属于本金或利息", href: "/facts", action: "去核对" },
       { state: "待材料确认", title: "确定法律依据与利息口径", detail: "先确认适用规则和时间边界，不让系统自行选择利率", href: "/legal", action: "看依据" },
       { state: "接着处理", title: "核算已支付利息与可抵扣本金", detail: "按已确认交易和律师确定的规则计算", href: "/calculation", action: "去核算" },
-      { state: "最后形成", title: "生成答辩材料和证据目录", detail: "所有内容保留来源并由律师确认后导出", href: "/bundle", action: "查看材料" },
+      { state: "最后形成", title: "整理应诉材料", detail: "答辩初稿、收付款核对表与材料核对清单均保留来源，须经律师确认后导出", href: "/bundle", action: "查看材料" },
     ]}
   />;
 }
@@ -698,7 +709,7 @@ function PersistentOverview({ sourceConfig }: { sourceConfig: CaseDataSourceConf
       { state: review.pendingFacts.length ? "需要确认" : "下一步", title: "核对案情与还款记录", detail: `${review.factPage.totalCount} 项事实、${review.transactionPage.totalCount} 笔交易在台账中`, href: "/facts", action: "去核对" },
       { state: "准备中", title: "确定法律依据与利息口径", detail: "先核对适用规则、时间边界和官方依据，再计算金额", href: "/legal", action: "查看依据" },
       { state: "接着处理", title: "核算还款与利息", detail: "只读取已确认的交易、分类和律师批准的规则", href: "/calculation", action: "去核算" },
-      { state: "最后形成", title: "整理应诉材料", detail: "答辩状、证据目录与核算表均可编辑和逐项确认", href: "/bundle", action: "查看材料" },
+      { state: "最后形成", title: "整理应诉材料", detail: "答辩初稿、收付款核对表与材料核对清单均可逐项核对和确认", href: "/bundle", action: "查看材料" },
     ]}
   />;
 }

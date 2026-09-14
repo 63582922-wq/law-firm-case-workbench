@@ -1,5 +1,5 @@
-import { CaseWorkbench } from "@/components/case-workbench";
+import { WebLawyerWorkbench } from "@/components/web-lawyer-workbench";
 
 export default function CalculationPage() {
-  return <CaseWorkbench initialView="calculation" />;
+  return <WebLawyerWorkbench initialView="calculation" />;
 }

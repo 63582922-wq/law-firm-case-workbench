@@ -1,0 +1,16 @@
+# ADR-0096：异常分组校验函数必须可从备份恢复
+
+状态：已部署0085；隔离副本完整还原已通过，全系统灾备未验收。
+
+在同一PostgreSQL服务的隔离副本执行真实pg_dump/pg_restore时，数据COPY被0047的
+case_agent_ledger_exception_source_policy拒绝：SQL函数内部的辅助函数未限定schema，
+且没有固定search_path。pg_restore使用空搜索路径，因此普通运行可用不代表还原可用。
+同类risk_policy也调用该辅助函数，具有相同缺陷。随后还原文书表时，同类问题使
+case_agent_document_source_refs_hash找不到public.digest。已核对全部7个未固定搜索路径的
+public SQL函数，另外4个仅调用pg_catalog内置函数；修复范围为上述3个有非内置依赖的函数。
+
+新增0085，只为这三个已有SQL函数设置pg_catalog,public搜索路径，不改函数结果、
+原迁移、约束、权限或案件数据。public schema必须继续禁止不可信角色CREATE。
+旧备份先恢复pre-data，再应用此修复，然后恢复data/post-data；修复后新备份应可普通还原。
+先在隔离副本证明完整还原，再检查数据/权限；不能用备份目录可读替代还原演练。
+当前恢复测试不包含私有对象存储/身份服务灾备，不据此宣称全系统灾备完成。

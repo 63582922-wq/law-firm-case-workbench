@@ -1,5 +1,8 @@
-import { CaseWorkbench } from "@/components/case-workbench";
+import { redirect } from "next/navigation";
 
 export default function SecurityPage() {
-  return <CaseWorkbench initialView="security" />;
+  // Technical identity/model controls are administrator-only deployment
+  // concerns.  Keep them out of the lawyer's browser workflow rather than
+  // rendering the legacy desktop settings surface at a public route.
+  redirect("/");
 }

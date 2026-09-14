@@ -1,0 +1,4 @@
+**
+!deployment
+!deployment/local-managed-test
+!deployment/local-managed-test/keycloak.Dockerfile

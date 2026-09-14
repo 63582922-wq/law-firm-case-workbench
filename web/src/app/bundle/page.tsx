@@ -1,5 +1,5 @@
-import { CaseWorkbench } from "@/components/case-workbench";
+import { WebLawyerWorkbench } from "@/components/web-lawyer-workbench";
 
 export default function BundlePage() {
-  return <CaseWorkbench initialView="bundle" />;
+  return <WebLawyerWorkbench initialView="bundle" />;
 }

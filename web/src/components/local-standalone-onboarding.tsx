@@ -141,7 +141,7 @@ export function LocalStandaloneOnboarding({ onCaseOpened, initialNotice = null }
               disabled={!selection || busy !== null}
               maxLength={160}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如：测试甲民间借贷纠纷"
+              placeholder="例如：周雅丽民间借贷纠纷"
               required
               value={title}
             />

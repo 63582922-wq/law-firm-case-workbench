@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+# The application deliberately accepts only one explicit, non-symbolic
+# executable path.  Force clamdscan to stream the already-open descriptor to
+# the separate daemon so that the daemon never receives a container pathname.
+exec /usr/bin/clamdscan \
+  --config-file=/opt/lawcase-clamav/clamd.conf \
+  --stream \
+  "$@"

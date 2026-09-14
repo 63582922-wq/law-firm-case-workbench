@@ -1,0 +1,31 @@
+# Local-only, non-release overlay for a bounded historical sealed-response
+# recovery inspection. It is intentionally separate from compose.yaml:
+# scripts/manage_local_managed_test.py never loads this file for preflight,
+# start, resume, or verify. A container created with this overlay is an
+# acceptance aid, not a distributable image or a commercial release baseline.
+services:
+  frontend:
+    # Host-built production output only; retain the image's Linux Node runtime
+    # and dependencies. Never mount the macOS node_modules into the container.
+    volumes:
+      - ../../web/.next:/app/web/.next:ro
+  api:
+    volumes:
+      # Keep the two application packages on one source baseline. Individual
+      # file overrides silently mixed new composition with old review modules.
+      # This remains a local acceptance aid, NOT an immutable release image.
+      - ../../backend/case_kernel:/app/backend/case_kernel:ro
+      - ../../backend/case_api:/app/backend/case_api:ro
+      - ../../backend/scripts/run_managed_defence_acceptance.py:/app/backend/scripts/run_managed_defence_acceptance.py:ro
+  case-agent-worker:
+    # Qualified against the synthetic v1 -> v2 content revision in this overlay.
+    # Remains separate from the commercial release configuration.
+    environment:
+      LAWCASE_AGENT_WORKER_DOCUMENT_CONTENT_REVISIONS_ENABLED: "true"
+    volumes:
+      # Match the API's complete source baseline; partial overrides leave the
+      # consumer running old contracts against newly migrated persistence.
+      # This remains local acceptance only, not a release image.
+      - ../../backend/case_kernel:/app/backend/case_kernel:ro
+      - ../../backend/case_api:/app/backend/case_api:ro
+      - ../../backend/scripts/render_managed_defence_v4_sealed_candidate.py:/app/backend/scripts/render_managed_defence_v4_sealed_candidate.py:ro

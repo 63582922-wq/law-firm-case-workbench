@@ -1,0 +1,8 @@
+**
+!backend
+!backend/**
+!deployment
+!deployment/web
+!deployment/web/api-gate.py
+!deployment/local-managed-test
+!deployment/local-managed-test/api.Dockerfile

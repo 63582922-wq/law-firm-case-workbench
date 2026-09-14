@@ -1267,10 +1267,17 @@ export function clearActivePersistentMatter(): CaseDataSourceConfig {
 }
 
 export function resolveCaseDataSourceConfig(input: { mode?: string; apiBase?: string; matterId?: string }): CaseDataSourceConfig {
-  const mode = input.mode?.trim() || "synthetic-alpha";
+  // Synthetic material remains available only when a developer explicitly
+  // requests it. A browser build must never silently present it as a usable
+  // law-firm workspace while Web identity and storage are still configured.
+  const mode = input.mode?.trim() || "web-setup";
   if (mode === "synthetic-alpha") return { kind: "synthetic-alpha", label: "演示资料" };
   if (mode !== "persistent-preview") {
-    return { kind: "persistent-disabled", label: "案件资料库未连接", reason: "案件资料库尚未启用，请先在工作台设置中完成启用。" };
+    return {
+      kind: "persistent-disabled",
+      label: "案件资料库未连接",
+      reason: "律所 Web 服务尚未完成身份、案件权限和受管资料库配置；系统没有打开演示案件。",
+    };
   }
   const apiBase = input.apiBase?.trim().replace(/\/$/, "") || "";
   const matterId = input.matterId?.trim() || "";
