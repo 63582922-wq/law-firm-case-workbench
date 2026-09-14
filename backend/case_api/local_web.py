@@ -236,6 +236,8 @@ class LocalWebStore:
             "agent_error": "TEXT NOT NULL DEFAULT ''",
             "agent_engine_json": "TEXT NOT NULL DEFAULT '{}'",
             "agent_source_version": "INTEGER NOT NULL DEFAULT 0",
+            "agent_run_id": "TEXT NOT NULL DEFAULT ''",
+            "agent_started_at": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
             if column not in existing:
@@ -575,7 +577,8 @@ class LocalWebStore:
             row = db.execute(
                 """SELECT source_version, result_json, agent_status, agent_progress,
                           agent_stage, agent_gate_level, agent_report_path, agent_cost_cny,
-                          agent_calls, agent_error, agent_engine_json, agent_source_version
+                          agent_calls, agent_error, agent_engine_json, agent_source_version,
+                          agent_run_id, agent_started_at
                    FROM analysis_runs WHERE case_id=?""",
                 (case_id,),
             ).fetchone()
@@ -595,6 +598,8 @@ class LocalWebStore:
             "calls": int(row["agent_calls"]),
             "error": str(row["agent_error"]),
             "engine_numbers": json.loads(str(row["agent_engine_json"]) or "{}"),
+            "run_id": str(row["agent_run_id"] or ""),
+            "started_at": str(row["agent_started_at"] or ""),
             "report_available": (
                 bool(row["agent_report_path"])
                 and Path(str(row["agent_report_path"])).is_file()
@@ -778,9 +783,9 @@ class LocalWebStore:
                      agent_status='RUNNING', agent_progress=0, agent_stage='准备',
                      agent_gate_level='', agent_report_path='', agent_cost_cny='0.000000',
                      agent_calls=0, agent_error='', agent_engine_json='{}',
-                     agent_source_version=?""",
+                     agent_source_version=?, agent_run_id=?, agent_started_at=?""",
                 (case_id, int(case["version"]), "AGENT_RUNNING", "{}", _digest("agent:running"),
-                 _iso(_now()), int(case["version"])),
+                 _iso(_now()), int(case["version"]), str(uuid4()), _iso(_now())),
             )
             if disabled:
                 db.execute(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   exportWebAnalysis,
   readWebAnalysisReport,
@@ -232,12 +232,38 @@ export function WebDecisionPackage({
     return () => { cancelled = true; };
   }, [caseId]);
 
-  // 运行中自动轮询进度（不阻塞界面）
+  // 运行中自动轮询进度（不阻塞界面）。
+  // refresh 的身份随父组件渲染变化，因此放进 ref：定时器不能被反复重建，
+  // 否则在慢速/被节流的环境里会静默停止轮询，界面永远停在「分析进行中」。
+  const refreshRef = useRef(refresh);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+  const running = state?.agent.status === "RUNNING";
   useEffect(() => {
-    if (state?.agent.status !== "RUNNING") return;
-    const timer = window.setInterval(() => void refresh(), 2500);
-    return () => window.clearInterval(timer);
-  }, [state?.agent.status, refresh]);
+    if (!running) return;
+    let timer = 0;
+    let cancelled = false;
+    const startedAt = Date.now();
+    const tick = () => {
+      if (cancelled) return;
+      void refreshRef.current();
+      const elapsed = Date.now() - startedAt;
+      // 前 30 秒用较密节奏（降级路径可能几百毫秒就结束），之后放缓。
+      timer = window.setTimeout(tick, elapsed < 30_000 ? 1_200 : 3_000);
+    };
+    timer = window.setTimeout(tick, 1_200);
+    // 律师离开页面再回来时必须立刻对齐，而不是等下一次节流后的轮询。
+    const wake = () => {
+      if (document.visibilityState === "visible") void refreshRef.current();
+    };
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", wake);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.removeEventListener("focus", wake);
+      document.removeEventListener("visibilitychange", wake);
+    };
+  }, [running, caseId]);
 
   const start = async () => {
     const invalid = validateParameterDraft(draft);

@@ -94,9 +94,15 @@ python3 scripts/browser_check_decision_package.py --case-id <案件ID> \
     --parameters /path/to/parameters.json --run --authorize-image-identifiers
 ```
 
-脚本要求模型状态出现「进行中」才承认结果属于本次运行，并核对服务端调用次数与费用；
-未进入运行态时会打印页面告警并立即失败，不会拿上一次的「分析完成」冒充本次结果。
-依赖 `playwright`（`python3 -m pip install --user playwright`），复用本机已安装的 Chrome。
+脚本以服务端 `run_id` 变化确认「这次点击真的登记了新的一轮运行」，再等终态；未配置模型
+的一轮只需几百毫秒，界面可能来不及显示「进行中」，因此不能只靠界面文案判断。未登记新运行时
+会打印页面告警并立即失败，不会拿上一次的「分析完成」冒充本次结果。未配置模型的降级路径用
+`--expect-status MODEL_NOT_CONFIGURED`。依赖 `playwright`（`python3 -m pip install --user playwright`），
+复用本机已安装的 Chrome。
+
+已用该脚本走通的路径（合成材料，无真实当事人信息）：空工作区建案 → 上传 PDF 与借条照片 →
+填写计算参数 → 真实模型分析（`COMPLETED`）→ 导出 Markdown/Word → 追加材料后结果标记「已失效」；
+以及未配置模型的降级路径（`MODEL_NOT_CONFIGURED`，仍产出正式数字与可导出报告）。
 
 
 ## 为什么生产模式需要更多服务

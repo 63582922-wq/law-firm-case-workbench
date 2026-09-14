@@ -141,24 +141,25 @@ def main() -> int:
 
         # 先确认这次真的跑起来了：必须观察到运行态，否则不能把上一次的「分析完成」
         # 当成这次的结果。页面状态与同源 API 都作为依据，两者取更可靠者。
+        # 先确认这次点击真的登记了新一轮运行：run_id 必须变化，否则不能把上一次的
+        # 终态当成这次的结果（未配置模型时一轮只需几百毫秒，界面可能来不及显示「进行中」）。
         deadline = time.time() + args.timeout_seconds
         observed_at = time.time()
         started = False
         terminal = ""
         page_blob = ""
         while time.time() < deadline:
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
             page_blob = " | ".join(t.strip() for t in page.get_by_role("status").all_inner_texts() if t.strip())
             server = read_run_summary(page, args.case_id)
             server_status = str(server.get("status", ""))
-            if server_status == "RUNNING" or "分析进行中" in page_blob:
+            if str(server.get("run_id", "")) and str(server.get("run_id", "")) != str(before.get("run_id", "")):
                 started = True
             if started and server_status not in ("RUNNING", "NOT_RUN", ""):
                 terminal = server_status
                 break
             if not started and time.time() - observed_at > 90:
-                break  # 90 秒内没有进入运行态：判定没有真正启动，立即报告
-
+                break  # 90 秒内没有登记新一轮：判定没有真正启动，立即报告
         after = read_run_summary(page, args.case_id)
         step("分析终态", 页面=page_blob, 服务端=after)
         report["run_started"] = started
@@ -195,7 +196,8 @@ def read_run_summary(page, case_id: str) -> dict:
       const payload = await response.json();
       const agent = payload.agent ?? {};
       return { status: String(agent.status ?? ""), calls: Number(agent.calls ?? 0),
-               cost: String(agent.cost_cny ?? "0"), progress: Number(agent.progress ?? 0) };
+               cost: String(agent.cost_cny ?? "0"), progress: Number(agent.progress ?? 0),
+               run_id: String(agent.run_id ?? ""), started_at: String(agent.started_at ?? "") };
     }"""
     try:
         return page.evaluate(script, case_id)

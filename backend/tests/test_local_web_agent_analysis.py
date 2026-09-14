@@ -177,6 +177,20 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
             "COMPLETED",
         )
 
+    def test_every_run_gets_a_new_run_id(self) -> None:
+        """run_id 用来判断"这次点击是否真的登记了新的一轮"，必须每次变化。"""
+        first = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
+                                 headers=self._headers("agent-run-id-1"))
+        run_id = first.json()["agent"]["run_id"]
+        self.assertTrue(run_id)
+        self.assertEqual(first.json()["agent"]["status"], "DISABLED")  # 测试环境禁用后台线程
+        second = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
+                                  headers=self._headers("agent-run-id-2"))
+        self.assertNotEqual(second.json()["agent"]["run_id"], run_id)
+        listed = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis").json()["agent"]
+        self.assertEqual(listed["run_id"], second.json()["agent"]["run_id"])
+        self.assertTrue(listed["started_at"])
+
     def test_start_response_carries_full_agent_state(self) -> None:
         """POST 返回的 agent 必须与 GET 同构；只回 {"status": ...} 会让前端解析失败。"""
         response = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
