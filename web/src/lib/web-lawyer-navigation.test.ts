@@ -32,3 +32,11 @@ test("an empty case exposes material intake but keeps result workspaces locked",
   assert.equal(canOpenWebLawyerView(capabilities, "evidence", true, empty), true);
   assert.equal(canOpenWebLawyerView(capabilities, "facts", true, empty), false);
 });
+
+test("决策包视图要求先有案件与材料，且需要核对案情权限", () => {
+  assert.equal(canOpenWebLawyerView(capabilities, "analysis", false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "analysis", true, false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "analysis", true, true), true);
+  const limited: WebLawyerViewCapabilities = { ...capabilities, canReviewFacts: false };
+  assert.equal(canOpenWebLawyerView(limited, "analysis", true, true), false);
+});

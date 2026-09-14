@@ -8,6 +8,8 @@ PostgreSQL, object storage, ClamAV, Poppler, or LibreOffice.
 
 from __future__ import annotations
 
+import argparse
+
 import os
 from pathlib import Path
 import signal
@@ -29,7 +31,33 @@ WEB = ROOT / "web"
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="律师办案工作台（本机模式）：一条命令启动 API 与浏览器界面。"
+    )
+    parser.add_argument(
+        "--enable-model",
+        action="store_true",
+        help="启用模型深度分析（默认关闭；开启后使用项目默认模型环境文件）。",
+    )
+    parser.add_argument(
+        "--model-env-file",
+        type=Path,
+        default=None,
+        help="指定模型密钥环境文件；设置后自动启用模型分析。",
+    )
+    parser.add_argument(
+        "--budget-cny",
+        type=float,
+        default=2.0,
+        help="每案分析成本上限（元），默认 2 元。",
+    )
+    arguments = parser.parse_args()
     env = os.environ.copy()
+    if arguments.model_env_file is not None:
+        env["CASE_WORKBENCH_MODEL_ENV_FILE"] = str(arguments.model_env_file.expanduser())
+    elif arguments.enable_model:
+        env["CASE_WORKBENCH_ENABLE_MODEL"] = "1"
+    env["CASE_WORKBENCH_MODEL_BUDGET_CNY"] = str(arguments.budget_cny)
     configured_python = env.get("LAWCASE_PYTHON", "").strip()
     venv_python = (
         BACKEND / ".venv" / "Scripts" / "python.exe"
@@ -87,7 +115,11 @@ def main() -> int:
         url = f"http://127.0.0.1:{web_port}"
         print(f"律师办案工作台（离线开发模式）已启动： {url}", flush=True)
         print(f"开发数据目录：{env['CASE_WORKBENCH_LOCAL_WEB_ROOT']}", flush=True)
-        print("该入口只验证基础材料流程，不是律所商用部署；律师正式使用同一 Web 界面，但由管理员在服务器启动完整服务。", flush=True)
+        model_state = "已启用模型深度分析" if (
+            env.get("CASE_WORKBENCH_MODEL_ENV_FILE") or env.get("CASE_WORKBENCH_ENABLE_MODEL") == "1"
+        ) else "未启用模型（仅确定性材料核对与正式数字）"
+        print(f"模型状态：{model_state}；每案分析上限 ¥{env.get('CASE_WORKBENCH_MODEL_BUDGET_CNY', '2')}。", flush=True)
+        print("该入口为本机单用户模式；律所多人协作由管理员在服务器启动完整服务。", flush=True)
         if env.get("LAWCASE_OPEN_BROWSER", "1") == "1":
             try:
                 webbrowser.open(url)

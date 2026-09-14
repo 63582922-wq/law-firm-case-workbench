@@ -48,6 +48,7 @@ import {
 } from "@/lib/web-lawyer-api";
 import { WebCaseReview } from "@/components/web-case-review";
 import { WebLegalReview } from "@/components/web-legal-review";
+import { WebDecisionPackage } from "@/components/web-decision-package";
 import { WebCalculationWorkbench } from "@/components/web-calculation-workbench";
 import { WebSubmissionReview } from "@/components/web-submission-review";
 import { WebEvidenceReview } from "@/components/web-evidence-review";
@@ -110,6 +111,7 @@ const sectionLabels: Record<WebLawyerInitialView, string> = {
   facts: "核对案情",
   legal: "法律依据",
   calculation: "还款与利息",
+  analysis: "决策包",
   bundle: "应诉材料",
   security: "工作台设置",
 };
@@ -422,6 +424,7 @@ function AuthenticatedWebLawyerWorkbench({
     ? `${sectionLabels[initialView]}尚未开放`
     : !selectedCase
     ? "01 / 建立案件"
+    : initialView === "analysis" ? "决策包"
     : initialView === "legal"
       ? "03 / 核对适用依据"
     : initialView === "calculation"
@@ -575,6 +578,8 @@ function AuthenticatedWebLawyerWorkbench({
                 onSessionExpired={onSessionExpired}
                 onVersionAdvanced={advanceCaseVersion}
               />
+            ) : initialView === "analysis" ? (
+              <WebDecisionPackage caseId={selectedCase.caseId} caseNumber={selectedCase.title} onSessionExpired={onSessionExpired} />
             ) : initialView === "bundle" ? (
               <WebSubmissionReview
                 canApprove={session.actor.roles.some((role) => role === "LEAD_LAWYER" || role === "REVIEWER")}
@@ -615,6 +620,7 @@ function WebLawyerNavigation({ capabilities, caseId, currentView, hasMaterials }
     { id: "facts", label: "确认案情", href: "/facts" },
     { id: "legal", label: "依据与测算", href: "/legal" },
     { id: "calculation", label: "金额核对", href: "/calculation" },
+    { id: "analysis", label: "决策包", href: "/analysis" },
     { id: "bundle", label: "成果文件", href: "/bundle" },
   ];
   return (

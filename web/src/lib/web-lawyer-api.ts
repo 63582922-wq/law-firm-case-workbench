@@ -1008,6 +1008,117 @@ export async function runWebMaterialAnalysis(caseId: string): Promise<WebLocalMa
   return parseLocalMaterialAnalysis(asRecord(payload, "材料分析响应格式不正确").analysis);
 }
 
+/* ---------------------------------------------------------------- Agent 深度分析 */
+
+export type WebAnalysisAgentStatus =
+  | "NOT_RUN" | "RUNNING" | "COMPLETED" | "FAILED" | "BLOCKED"
+  | "MODEL_NOT_CONFIGURED" | "STALE" | "DISABLED";
+
+export type WebAnalysisAgentState = Readonly<{
+  status: WebAnalysisAgentStatus;
+  progress: number;
+  stage: string;
+  gateLevel: string;
+  costCny: string;
+  calls: number;
+  error: string;
+  engineNumbers: Readonly<Record<string, string>>;
+  reportAvailable: boolean;
+}>;
+
+export type WebCaseAnalysisState = Readonly<{
+  deterministicStatus: string;
+  analysis: WebLocalMaterialAnalysis | null;
+  agent: WebAnalysisAgentState;
+}>;
+
+export type WebAgentAnalysisRequest = Readonly<{
+  caseNumber?: string;
+  role?: "被告" | "原告";
+  stage?: string;
+  budgetCny?: number;
+  caseConfig?: Readonly<Record<string, unknown>>;
+}>;
+
+function parseAnalysisAgentState(value: unknown): WebAnalysisAgentState {
+  const record = asRecord(value, "分析状态响应格式不正确");
+  const engineRaw = record.engine_numbers;
+  const engineNumbers: Record<string, string> = {};
+  if (engineRaw !== null && engineRaw !== undefined) {
+    for (const [key, item] of Object.entries(asRecord(engineRaw, "正式数字格式不正确"))) {
+      if (typeof item === "string") engineNumbers[key] = item;
+    }
+  }
+  const statusValue = requiredText(record.status, "分析状态格式不正确", 40);
+  const allowed: WebAnalysisAgentStatus[] = ["NOT_RUN", "RUNNING", "COMPLETED", "FAILED",
+    "BLOCKED", "MODEL_NOT_CONFIGURED", "STALE", "DISABLED"];
+  const status = (allowed as string[]).includes(statusValue)
+    ? (statusValue as WebAnalysisAgentStatus)
+    : "FAILED";
+  return {
+    status,
+    progress: optionalNonNegativeInteger(record.progress, 100) ?? 0,
+    stage: optionalText(record.stage, 60) ?? "",
+    gateLevel: optionalText(record.gate_level, 40) ?? "",
+    costCny: optionalText(record.cost_cny, 40) ?? "0.000000",
+    calls: optionalNonNegativeInteger(record.calls, 10_000) ?? 0,
+    error: optionalText(record.error, 600) ?? "",
+    engineNumbers,
+    reportAvailable: optionalBoolean(record.report_available, false, "报告状态格式不正确"),
+  };
+}
+
+function parseCaseAnalysisState(payload: unknown, operation: string): WebCaseAnalysisState {
+  const record = asRecord(payload, `${operation}响应格式不正确`);
+  const rawAnalysis = record.analysis;
+  const analysis = rawAnalysis === null || rawAnalysis === undefined
+    ? null
+    : parseLocalMaterialAnalysis(rawAnalysis);
+  return {
+    deterministicStatus: optionalText(record.status, 40) ?? "NOT_RUN",
+    analysis,
+    agent: parseAnalysisAgentState(record.agent ?? {}),
+  };
+}
+
+export async function readWebCaseAnalysisState(caseId: string, signal?: AbortSignal): Promise<WebCaseAnalysisState> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis`, { signal });
+  return parseCaseAnalysisState(await readJsonResponse(response, "读取材料分析"), "读取材料分析");
+}
+
+export async function runWebCaseAgentAnalysis(
+  caseId: string, request: WebAgentAnalysisRequest = {},
+): Promise<WebCaseAnalysisState> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const body: Record<string, unknown> = {};
+  if (request.caseNumber) body.case_number = request.caseNumber;
+  if (request.role) body.role = request.role;
+  if (request.stage) body.stage = request.stage;
+  if (request.budgetCny !== undefined) body.budget_cny = request.budgetCny;
+  if (request.caseConfig) body.case_config = request.caseConfig;
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
+    body: JSON.stringify(body),
+  });
+  return parseCaseAnalysisState(await readJsonResponse(response, "启动案件分析"), "启动案件分析");
+}
+
+export async function readWebAnalysisReport(caseId: string, signal?: AbortSignal): Promise<string> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/report`, { signal });
+  if (!response.ok) throw await readJsonResponse(response, "读取分析报告").then(() => new Error("读取分析报告失败"));
+  return response.text();
+}
+
+export async function exportWebAnalysis(caseId: string, format: "md" | "docx"): Promise<Blob> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/export?format=${format}`, {});
+  if (!response.ok) throw await readJsonResponse(response, "导出分析报告").then(() => new Error("导出分析报告失败"));
+  return response.blob();
+}
+
 export async function readCurrentWebAgentMaterialRun(caseId: string, signal?: AbortSignal): Promise<WebAgentMaterialRun | null> {
   const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/agent-runs/current`, { signal });

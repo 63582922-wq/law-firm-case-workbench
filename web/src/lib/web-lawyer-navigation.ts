@@ -4,6 +4,7 @@ export type WebLawyerInitialView =
   | "facts"
   | "legal"
   | "calculation"
+  | "analysis"
   | "bundle"
   | "security";
 
@@ -40,6 +41,7 @@ export function canOpenWebLawyerView(
   if (view === "facts") return capabilities.canReviewFacts;
   if (view === "legal") return capabilities.canReviewLegal;
   if (view === "calculation") return capabilities.canReviewLegal && capabilities.canRunCalculation;
+  if (view === "analysis") return capabilities.canReviewFacts;
   if (view === "bundle") return capabilities.canReviewSubmission;
   return false;
 }
