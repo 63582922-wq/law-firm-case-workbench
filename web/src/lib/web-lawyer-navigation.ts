@@ -5,6 +5,7 @@ export type WebLawyerInitialView =
   | "legal"
   | "calculation"
   | "analysis"
+  | "brief"
   | "bundle"
   | "security";
 
@@ -20,6 +21,8 @@ export type WebLawyerViewCapabilities = Readonly<{
    * 尚未实现的事实确认/法律审阅步骤，而受管服务仍由这些步骤把守正式成果文件。
    */
   canRunAgent: boolean;
+  /** 答辩状草稿（文书起草）是否已装配。 */
+  canDraftDefenceBrief: boolean;
 }>;
 
 /**
@@ -48,6 +51,7 @@ export function canOpenWebLawyerView(
   if (view === "legal") return capabilities.canReviewLegal;
   if (view === "calculation") return capabilities.canReviewLegal && capabilities.canRunCalculation;
   if (view === "analysis") return capabilities.canRunAgent;
+  if (view === "brief") return capabilities.canDraftDefenceBrief;
   if (view === "bundle") return capabilities.canReviewSubmission;
   return false;
 }

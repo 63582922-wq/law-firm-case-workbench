@@ -159,6 +159,7 @@ export type WebLawyerSession = Readonly<{
     canReviewLegal: boolean;
     canReviewSubmission: boolean;
     canRunAgent: boolean;
+    canDraftDefenceBrief: boolean;
     canRunCaseAgent: boolean;
     canExecuteActivePlan: boolean;
     canCompleteCaseAgentRun: boolean;
@@ -959,6 +960,8 @@ export async function readWebLawyerSession(signal?: AbortSignal): Promise<WebLaw
       canReviewLegal: optionalBoolean(capabilities.can_review_legal, false, "登录状态中的法律审阅能力格式不正确"),
       canReviewSubmission: optionalBoolean(capabilities.can_review_submission, false, "登录状态中的应诉材料能力格式不正确"),
       canRunAgent: optionalBoolean(capabilities.can_run_agent, false, "登录状态中的 Agent 能力格式不正确"),
+      canDraftDefenceBrief: optionalBoolean(capabilities.can_draft_defence_brief, false,
+        "登录状态中的答辩状能力格式不正确"),
       canRunCaseAgent: optionalBoolean(capabilities.can_run_case_agent, false, "登录状态中的统一办案 Agent 能力格式不正确"),
       canExecuteActivePlan: optionalBoolean(capabilities.can_execute_active_plan, false, "登录状态中的已激活计划执行能力格式不正确"),
       canCompleteCaseAgentRun: optionalBoolean(capabilities.can_complete_case_agent_run, false, "登录状态中的 Agent 终审能力格式不正确"),
@@ -1213,6 +1216,200 @@ export async function exportWebAnalysis(caseId: string, format: "md" | "docx"): 
   const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/export?format=${format}`, {});
   if (!response.ok) throw await readJsonResponse(response, "导出分析报告").then(() => new Error("导出分析报告失败"));
+  return response.blob();
+}
+
+/* ------------------------------------------------------ 答辩状草稿（律师工作稿） */
+
+/** 与服务端 GROUNDS 一一对应；律师勾选后才进入文书。 */
+export const WEB_BRIEF_GROUNDS: ReadonlyArray<Readonly<{
+  id: string; title: string; description: string;
+}>> = [
+  { id: "cap", title: "利息按司法保护上限核减",
+    description: "主张原告请求的利息超出司法保护上限部分不应支持；上限参数由律师在决策包页面填写。" },
+  { id: "offset", title: "已付款项予以冲抵",
+    description: "主张被告已支付款项应在计算中冲抵；每笔付款的性质需律师确认后才进入计算。" },
+  { id: "lawyer_fee", title: "律师费承担条款不予支持",
+    description: "对原告主张由其负担律师费的请求提出异议。" },
+  { id: "limitation", title: "诉讼时效抗辩",
+    description: "主张原告的请求已超过诉讼时效期间。" },
+  { id: "delivery", title: "出借事实与款项交付证据不足",
+    description: "主张原告提交的材料不足以证明借贷合意与款项实际交付。" },
+  { id: "amount", title: "本金数额与证据不符",
+    description: "主张原告请求的本金数额与其提交的材料不能对应。" },
+] as const;
+
+export const WEB_BRIEF_CLAIMS: ReadonlyArray<Readonly<{ id: string; label: string }>> = [
+  { id: "principal", label: "借款本金" },
+  { id: "interest", label: "利息" },
+  { id: "lawyer_fee", label: "律师费" },
+  { id: "costs", label: "诉讼费用" },
+] as const;
+
+export const WEB_BRIEF_STANCES: readonly string[] = ["不认可", "部分认可", "认可", "不发表意见"];
+
+export type WebBriefSelections = Readonly<{
+  respondent: string;
+  claimant: string;
+  court: string;
+  caseNumber: string;
+  grounds: Readonly<Record<string, boolean>>;
+  stances: Readonly<Record<string, string>>;
+  authorities: readonly string[];
+  notes: string;
+}>;
+
+export type WebBriefStatus =
+  | "NOT_RUN" | "RUNNING" | "COMPLETED" | "FAILED" | "BLOCKED"
+  | "MODEL_NOT_CONFIGURED" | "STALE" | "DISABLED";
+
+export type WebBriefState = Readonly<{
+  status: WebBriefStatus;
+  progress: number;
+  stage: string;
+  gateLevel: string;
+  costCny: string;
+  calls: number;
+  error: string;
+  engineNumbers: Readonly<Record<string, string>>;
+  markdownAvailable: boolean;
+  stale: boolean;
+  runId: string;
+  generatedAt: string;
+}>;
+
+export type WebBriefPayload = Readonly<{
+  selections: WebBriefSelections;
+  state: WebBriefState;
+  markdown: string;
+}>;
+
+export function emptyWebBriefSelections(): WebBriefSelections {
+  return {
+    respondent: "", claimant: "", court: "", caseNumber: "",
+    grounds: Object.fromEntries(WEB_BRIEF_GROUNDS.map((ground) => [ground.id, false])),
+    stances: Object.fromEntries(WEB_BRIEF_CLAIMS.map((claim) => [claim.id, "不发表意见"])),
+    authorities: [],
+    notes: "",
+  };
+}
+
+function parseWebBriefSelections(value: unknown): WebBriefSelections {
+  const record = asRecord(value ?? {}, "答辩状选择格式不正确");
+  const groundsRaw = asRecord(record.grounds ?? {}, "答辩状主张格式不正确");
+  const stancesRaw = asRecord(record.stances ?? {}, "答辩状态度格式不正确");
+  const authoritiesRaw = record.authorities;
+  const authorities: string[] = [];
+  if (Array.isArray(authoritiesRaw)) {
+    for (const item of authoritiesRaw) {
+      if (typeof item === "string" && item.trim()) authorities.push(item.trim().slice(0, 200));
+    }
+  }
+  const statuses = WEB_BRIEF_STANCES as readonly string[];
+  return {
+    respondent: optionalTextAllowEmpty(record.respondent, 120),
+    claimant: optionalTextAllowEmpty(record.claimant, 120),
+    court: optionalTextAllowEmpty(record.court, 120),
+    caseNumber: optionalTextAllowEmpty(record.case_number, 120),
+    grounds: Object.fromEntries(WEB_BRIEF_GROUNDS.map((ground) => [
+      ground.id, optionalBoolean(groundsRaw[ground.id], false, "主张勾选格式不正确"),
+    ])),
+    stances: Object.fromEntries(WEB_BRIEF_CLAIMS.map((claim) => {
+      const raw = typeof stancesRaw[claim.id] === "string" ? String(stancesRaw[claim.id]) : "";
+      return [claim.id, statuses.includes(raw) ? raw : "不发表意见"];
+    })),
+    authorities,
+    notes: optionalTextAllowEmpty(record.notes, 2_000),
+  };
+}
+
+function parseWebBriefPayload(payload: unknown, operation: string): WebBriefPayload {
+  const record = asRecord(payload, `${operation}响应格式不正确`);
+  const stateRaw = asRecord(record.state ?? {}, "答辩状状态格式不正确");
+  const allowed: WebBriefStatus[] = ["NOT_RUN", "RUNNING", "COMPLETED", "FAILED", "BLOCKED",
+    "MODEL_NOT_CONFIGURED", "STALE", "DISABLED"];
+  const statusValue = requiredText(stateRaw.status, "答辩状状态格式不正确", 40);
+  const engineRaw = stateRaw.engine_numbers;
+  const engineNumbers: Record<string, string> = {};
+  if (engineRaw !== null && engineRaw !== undefined) {
+    for (const [key, item] of Object.entries(asRecord(engineRaw, "正式数字格式不正确"))) {
+      if (typeof item === "string") engineNumbers[key] = item;
+    }
+  }
+  return {
+    selections: parseWebBriefSelections(record.selections),
+    state: {
+      status: (allowed as string[]).includes(statusValue) ? (statusValue as WebBriefStatus) : "FAILED",
+      progress: optionalNonNegativeInteger(stateRaw.progress, 100) ?? 0,
+      stage: optionalTextAllowEmpty(stateRaw.stage, 60),
+      gateLevel: optionalTextAllowEmpty(stateRaw.gate_level, 40),
+      costCny: optionalText(stateRaw.cost_cny, 40) ?? "0.000000",
+      calls: optionalNonNegativeInteger(stateRaw.calls, 10_000) ?? 0,
+      error: optionalTextAllowEmpty(stateRaw.error, 2_000),
+      engineNumbers,
+      markdownAvailable: optionalBoolean(stateRaw.markdown_available, false, "草稿状态格式不正确"),
+      stale: optionalBoolean(stateRaw.stale, false, "失效标记格式不正确"),
+      runId: optionalTextAllowEmpty(stateRaw.run_id, 80),
+      generatedAt: optionalTextAllowEmpty(stateRaw.generated_at, 60),
+    },
+    markdown: optionalMultilineText(record.markdown, 400_000),
+  };
+}
+
+function toWebBriefPayload(selections: WebBriefSelections): Record<string, unknown> {
+  return {
+    respondent: selections.respondent,
+    claimant: selections.claimant,
+    court: selections.court,
+    case_number: selections.caseNumber,
+    grounds: selections.grounds,
+    stances: selections.stances,
+    authorities: selections.authorities,
+    notes: selections.notes,
+  };
+}
+
+export async function readWebBrief(caseId: string, signal?: AbortSignal): Promise<WebBriefPayload> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/brief`, { signal });
+  return parseWebBriefPayload(await readJsonResponse(response, "读取答辩状"), "读取答辩状");
+}
+
+export async function saveWebBriefSelections(
+  caseId: string, selections: WebBriefSelections,
+): Promise<WebBriefPayload> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/brief`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
+    body: JSON.stringify({ selections: toWebBriefPayload(selections) }),
+  });
+  return parseWebBriefPayload(await readJsonResponse(response, "保存答辩状选择"), "保存答辩状选择");
+}
+
+export async function generateWebBrief(
+  caseId: string, request: Readonly<{ caseNumber?: string; budgetCny?: number }> = {},
+): Promise<WebBriefPayload> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const body: Record<string, unknown> = {};
+  if (request.caseNumber) body.case_number = request.caseNumber;
+  if (request.budgetCny !== undefined) body.budget_cny = request.budgetCny;
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/brief/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
+    body: JSON.stringify(body),
+  });
+  return parseWebBriefPayload(await readJsonResponse(response, "生成答辩状"), "生成答辩状");
+}
+
+export async function exportWebBrief(caseId: string, format: "md" | "docx"): Promise<Blob> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/brief/export?format=${format}`, {});
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const message = payload && typeof payload.message === "string" ? payload.message : "导出答辩状失败";
+    throw new WebLawyerApiError(message, { status: response.status, requestId: null });
+  }
   return response.blob();
 }
 
@@ -4966,6 +5163,21 @@ function requiredText(value: unknown, message: string, maxLength: number): strin
   const normalized = value.trim();
   if (normalized.length === 0 || normalized.length > maxLength || containsControlCharacter(normalized)) {
     throw protocolError(message);
+  }
+  return normalized;
+}
+
+/**
+ * 多行文本且允许为空：文书正文/报告含换行，不能套用单行文本的校验。
+ * 其余控制字符仍然是协议违规。
+ */
+function optionalMultilineText(value: unknown, maxLength: number): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "string") throw protocolError("服务端返回的文本字段格式不正确");
+  const normalized = value.trim();
+  if (normalized.length > maxLength
+      || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(normalized)) {
+    throw protocolError("服务端返回的文本字段格式不正确");
   }
   return normalized;
 }

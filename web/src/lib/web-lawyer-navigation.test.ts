@@ -14,6 +14,7 @@ const capabilities: WebLawyerViewCapabilities = {
   canRunCalculation: true,
   canReviewSubmission: true,
   canRunAgent: true,
+  canDraftDefenceBrief: true,
 };
 
 test("server-projected material count keeps downstream views reachable after reload", () => {
@@ -50,4 +51,17 @@ test("决策包视图只要有案件与材料、且 Agent 已装配即可进入�
   // 未装配 Agent 运行时的受管服务仍必须挡住建包。
   const withoutAgent: WebLawyerViewCapabilities = { ...capabilities, canRunAgent: false };
   assert.equal(canOpenWebLawyerView(withoutAgent, "analysis", true, true), false);
+});
+
+test("答辩状视图要求有案件与材料，且文书起草已装配", () => {
+  assert.equal(canOpenWebLawyerView(capabilities, "brief", false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "brief", true, false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "brief", true, true), true);
+  // 本机模式没有事实确认/法律审阅接口，但装配了文书起草：答辩状必须可进入。
+  const localMode: WebLawyerViewCapabilities = {
+    ...capabilities, canReviewFacts: false, canReviewLegal: false, canReviewSubmission: false,
+  };
+  assert.equal(canOpenWebLawyerView(localMode, "brief", true, true), true);
+  const withoutBrief: WebLawyerViewCapabilities = { ...capabilities, canDraftDefenceBrief: false };
+  assert.equal(canOpenWebLawyerView(withoutBrief, "brief", true, true), false);
 });

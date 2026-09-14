@@ -59,6 +59,23 @@ class AnalysisRunRequest(BaseModel):
     allow_image_identifiers: bool = False
 
 
+class BriefSelectionRequest(BaseModel):
+    """律师在答辩状页面做出的选择（唯一立场来源）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selections: dict[str, object]
+
+
+class BriefGenerateRequest(BaseModel):
+    """生成答辩状草稿的可选参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_number: str | None = Field(default=None, max_length=120)
+    budget_cny: float | None = Field(default=None, gt=0, le=50)
+
+
 class AnalysisConfigRequest(BaseModel):
     """律师确认的案件计算参数（正式数字的唯一来源，模型不得写入）。"""
 
@@ -210,6 +227,26 @@ class LocalWebStore:
                     result_json TEXT NOT NULL,
                     result_hash TEXT NOT NULL,
                     generated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS brief_runs (
+                    case_id TEXT PRIMARY KEY REFERENCES cases(case_id),
+                    selections_json TEXT NOT NULL DEFAULT '{}',
+                    selections_hash TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'NOT_RUN',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    stage TEXT NOT NULL DEFAULT '',
+                    gate_level TEXT NOT NULL DEFAULT '',
+                    markdown_path TEXT NOT NULL DEFAULT '',
+                    cost_cny TEXT NOT NULL DEFAULT '0.000000',
+                    calls INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    engine_json TEXT NOT NULL DEFAULT '{}',
+                    source_version INTEGER NOT NULL DEFAULT 0,
+                    config_hash TEXT NOT NULL DEFAULT '',
+                    analysis_run_id TEXT NOT NULL DEFAULT '',
+                    run_id TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    generated_at TEXT NOT NULL DEFAULT ''
                 );
                 """
             )
@@ -583,7 +620,16 @@ class LocalWebStore:
                 (case_id,),
             ).fetchone()
         if row is None:
-            return {"status": "NOT_RUN", "analysis": None, "agent": {"status": "NOT_RUN"}}
+            # 未运行时也返回与运行后同构的 agent 状态，避免客户端拿到残缺对象。
+            return {
+                "status": "NOT_RUN",
+                "analysis": None,
+                "agent": {
+                    "status": "NOT_RUN", "progress": 0, "stage": "", "gate_level": "",
+                    "cost_cny": "0.000000", "calls": 0, "error": "", "engine_numbers": {},
+                    "report_available": False, "run_id": "", "started_at": "",
+                },
+            }
         stale = int(row["source_version"]) != int(case["version"])
         agent_status = str(row["agent_status"])
         agent_stale = bool(row["agent_source_version"]) and int(row["agent_source_version"]) != int(case["version"])
@@ -741,6 +787,246 @@ class LocalWebStore:
             and int(row["agent_source_version"]) != int(case["version"])
             and str(row["agent_status"]) in ("COMPLETED", "STALE")
         )
+
+    # ------------------------------------------------ 答辩状草稿（律师工作稿）
+
+    def _config_hash(self, case_id: str) -> str:
+        path = self._analysis_dir(case_id) / "case_config.json"
+        return _digest(path.read_text(encoding="utf-8")) if path.is_file() else ""
+
+    def _analysis_run_id(self, case_id: str) -> str:
+        with self._connect() as db:
+            row = db.execute("SELECT agent_run_id FROM analysis_runs WHERE case_id=?",
+                             (case_id,)).fetchone()
+        return str(row["agent_run_id"]) if row is not None else ""
+
+    def _brief_row(self, case_id: str):
+        with self._connect() as db:
+            return db.execute("SELECT * FROM brief_runs WHERE case_id=?", (case_id,)).fetchone()
+
+    def read_brief(self, case_id: str) -> dict[str, object]:
+        """答辩状状态 + 律师已保存的选择。上一轮上游变化后按 STALE 处理。"""
+        from case_kernel.defence_brief import BriefSelections
+
+        case = self._case(case_id)
+        row = self._brief_row(case_id)
+        if row is None:
+            return {
+                "selections": BriefSelections().to_dict(),
+                "state": {
+                    "status": "NOT_RUN", "progress": 0, "stage": "", "gate_level": "",
+                    "cost_cny": "0.000000", "calls": 0, "error": "",
+                    "engine_numbers": {}, "markdown_available": False, "stale": False,
+                    "run_id": "", "started_at": "", "generated_at": "",
+                },
+            }
+        stored_status = str(row["status"])
+        upstream_changed = (
+            int(row["source_version"] or 0) != int(case["version"])
+            or str(row["config_hash"] or "") != self._config_hash(case_id)
+            or str(row["analysis_run_id"] or "") != self._analysis_run_id(case_id)
+        )
+        # 草稿失效有两种来源：上游（材料/参数/分析）变化，或律师改了选择。
+        stale = stored_status == "STALE" or upstream_changed
+        status = "STALE" if (stale and stored_status != "RUNNING") else stored_status
+        path = Path(str(row["markdown_path"])) if row["markdown_path"] else None
+        return {
+            "selections": json.loads(str(row["selections_json"]) or "{}"),
+            "state": {
+                "status": status,
+                "progress": int(row["progress"]),
+                "stage": str(row["stage"]),
+                "gate_level": str(row["gate_level"]),
+                "cost_cny": str(row["cost_cny"]),
+                "calls": int(row["calls"]),
+                "error": str(row["error"]),
+                "engine_numbers": json.loads(str(row["engine_json"]) or "{}"),
+                "markdown_available": bool(path and path.is_file() and not stale),
+                "stale": stale,
+                "run_id": str(row["run_id"] or ""),
+                "started_at": str(row["started_at"] or ""),
+                "generated_at": str(row["generated_at"] or ""),
+            },
+        }
+
+    def save_brief_selections(self, case_id: str, selections: Mapping[str, object]) -> dict[str, object]:
+        """保存律师选择；选择变化使既有草稿失效（立场变了，文书必须重做）。"""
+        from case_kernel.defence_brief import BriefSelections
+
+        self._case(case_id)
+        normalized = BriefSelections.from_dict(selections).to_dict()
+        payload = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+        digest = _digest(payload)
+        current = self._brief_row(case_id)
+        if current is not None and str(current["selections_hash"]) == digest:
+            return normalized
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO brief_runs(case_id, selections_json, selections_hash, status)
+                   VALUES(?,?,?, 'NOT_RUN')
+                   ON CONFLICT(case_id) DO UPDATE SET
+                     selections_json=excluded.selections_json,
+                     selections_hash=excluded.selections_hash,
+                     status='STALE', markdown_path='', gate_level='', error=''""",
+                (case_id, payload, digest),
+            )
+        return normalized
+
+    def brief_markdown_path(self, case_id: str) -> Path | None:
+        row = self._brief_row(case_id)
+        if row is None or not str(row["markdown_path"]):
+            return None
+        state = self.read_brief(case_id)["state"]
+        if state["stale"] or state["status"] not in ("COMPLETED", "MODEL_NOT_CONFIGURED"):
+            return None
+        path = Path(str(row["markdown_path"]))
+        return path if path.is_file() else None
+
+    def start_brief_generation(
+        self,
+        case_id: str,
+        *,
+        case_number: str,
+        budget_cny: Decimal = Decimal("2"),
+    ) -> dict[str, object]:
+        """生成答辩状草稿（后台线程）；立即返回，不阻塞请求。"""
+        from case_kernel.defence_brief import BriefSelections
+
+        case = self._case(case_id)
+        row = self._brief_row(case_id)
+        if row is not None and str(row["status"]) == "RUNNING":
+            return {"status": "RUNNING", "message": "答辩状正在生成中。"}
+        selections = BriefSelections.from_dict(
+            json.loads(str(row["selections_json"]) or "{}") if row is not None else None)
+        run_dir = self._analysis_dir(case_id)
+        config_path = run_dir / "case_config.json"
+        report_path = self.agent_report_path(case_id)
+        analysis_run_id = self._analysis_run_id(case_id)
+        materials = [
+            {"display_name": str(item["display_name"]), "page_count": int(item["page_count"] or 0)}
+            for item in self._case_materials(case_id)
+        ]
+        env_file = self._resolve_model_env_file()
+        preflight_path = self._write_brief_preflight(
+            case_id, run_dir, case_number, selections, budget_cny, env_file)
+
+        disabled = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT", "").strip() == "1"
+        run_id = str(uuid4())
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO brief_runs(case_id, selections_json, selections_hash, status)
+                   VALUES(?,?,?, 'RUNNING')
+                   ON CONFLICT(case_id) DO UPDATE SET
+                     status='RUNNING', progress=0, stage='准备', gate_level='',
+                     markdown_path='', cost_cny='0.000000', calls=0, error='',
+                     engine_json='{}', source_version=?, config_hash=?, analysis_run_id=?,
+                     run_id=?, started_at=?, generated_at=''""",
+                (case_id, json.dumps(selections.to_dict(), ensure_ascii=False, sort_keys=True),
+                 _digest(json.dumps(selections.to_dict(), ensure_ascii=False, sort_keys=True)),
+                 int(case["version"]), self._config_hash(case_id), analysis_run_id,
+                 run_id, _iso(_now())),
+            )
+            if disabled:
+                db.execute("UPDATE brief_runs SET status='DISABLED', stage='' WHERE case_id=?",
+                           (case_id,))
+
+        def progress(stage: str, percent: int) -> None:
+            self._set_brief_state(case_id, progress=max(0, min(100, percent)), stage=stage)
+
+        def worker() -> None:
+            from case_kernel.defence_brief_service import BriefRequest, run_brief
+
+            try:
+                result = run_brief(BriefRequest(
+                    case_id=case_id,
+                    output_root=run_dir,
+                    selections=selections,
+                    case_config_path=config_path if config_path.is_file() else None,
+                    case_number=case_number,
+                    analysis_report_path=report_path,
+                    preflight_path=preflight_path,
+                    env_file=env_file,
+                    budget_cny=budget_cny,
+                    materials=materials,
+                    progress=progress,
+                ))
+                self._set_brief_state(
+                    case_id,
+                    status=result.status,
+                    progress=100 if result.status in ("COMPLETED", "MODEL_NOT_CONFIGURED") else 0,
+                    stage="完成" if result.status in ("COMPLETED", "MODEL_NOT_CONFIGURED") else "",
+                    gate_level=result.gate_level,
+                    markdown_path=str(run_dir / "答辩状草稿.md") if result.markdown else "",
+                    cost_cny=result.cost_cny,
+                    calls=result.calls,
+                    error=result.error or "",
+                    engine_json=json.dumps(result.engine_amounts, ensure_ascii=False),
+                    generated_at=_iso(_now()) if result.markdown else "",
+                )
+            except Exception as error:  # noqa: BLE001 - 后台线程边界
+                try:
+                    self._set_brief_state(case_id, status="FAILED", progress=0,
+                                          error=f"{type(error).__name__}: {error}")
+                except Exception:  # noqa: BLE001 - 不得抛出未捕获异常
+                    pass
+
+        if disabled:
+            return {"status": "DISABLED", "message": "后台生成已在当前环境禁用。"}
+        Thread(target=worker, name=f"defence-brief-{case_id[:8]}", daemon=True).start()
+        return {"status": "RUNNING", "message": "答辩状生成已开始。"}
+
+    def _set_brief_state(self, case_id: str, **fields: object) -> None:
+        if not fields:
+            return
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self._lock, self._connect() as db:
+            db.execute(f"UPDATE brief_runs SET {assignments} WHERE case_id=?",
+                       (*fields.values(), case_id))
+
+    def _write_brief_preflight(
+        self,
+        case_id: str,
+        run_dir: Path,
+        case_number: str,
+        selections,
+        budget_cny: Decimal,
+        env_file: Path | None,
+    ) -> Path | None:
+        """答辩状的数据路径记录：只发送文字，不发送材料像素；法源取律师登记。"""
+        if env_file is None:
+            return None
+        preflight = {
+            "schema": "shadow-preflight-v1",
+            "purpose": "defence_brief_local_web",
+            "case_id": case_id,
+            "case_number": case_number,
+            "role": "被告",
+            "stage": "文书起草",
+            "sent_fields": {"page_files": [], "pdf_text_layers_only": True,
+                            "analysis_report": True},
+            "provider": "aliyun-model-studio",
+            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME", "qwen3-vl-plus"),
+            "region": "cn-beijing",
+            "retention": "不保存（调用即弃，不用于训练）",
+            "budget_cap_cny": str(budget_cny),
+            "trusted_authorities": list(selections.authorities),
+            "approved_by": f"本地工作台律师点击确认（case={case_id}）",
+            "confirmed": "true",
+        }
+        path = run_dir / "brief_preflight.json"
+        path.write_text(json.dumps(preflight, ensure_ascii=False, indent=1) + "\n",
+                        encoding="utf-8")
+        return path
+
+    def _case_materials(self, case_id: str):
+        with self._connect() as db:
+            return db.execute(
+                """SELECT display_name, page_count FROM materials
+                   WHERE case_id=? AND state='COMPLETED' AND media_type IN
+                     ('application/pdf','image/jpeg','image/png')
+                   ORDER BY created_at""",
+                (case_id,),
+            ).fetchall()
 
     def start_agent_analysis(
         self,
@@ -1154,6 +1440,8 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                 "can_run_calculation": False,
                 "can_review_submission": False,
                 "can_generate_documents": False,
+                # 本机模式装配了答辩状草稿（确定性骨架 + 受门禁约束的模型文字）。
+                "can_draft_defence_brief": True,
             },
             # The browser renders the same product shell as the firm-managed
             # service.  This explicit marker prevents the offline SQLite
@@ -1386,6 +1674,71 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                 media_type=("application/vnd.openxmlformats-officedocument"
                             ".wordprocessingml.document"),
                 headers={"Content-Disposition": 'attachment; filename="case-analysis.docx"'},
+            )
+        raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
+
+    # ------------------------------------------------------ 答辩状草稿路由
+
+    @app.get("/api/local/v1/cases/{case_id}/brief")
+    async def brief(case_id: UUID, request: Request, response: Response):
+        ensure_session(request, response)
+        payload = store.read_brief(str(case_id))
+        path = store.brief_markdown_path(str(case_id))
+        return {**payload, "markdown": path.read_text(encoding="utf-8") if path else ""}
+
+    @app.put("/api/local/v1/cases/{case_id}/brief")
+    async def save_brief(case_id: UUID, request: Request, response: Response,
+                         body: BriefSelectionRequest,
+                         x_lawcase_csrf: str | None = Header(default=None)):
+        ensure_write(request, x_lawcase_csrf)
+        store.save_brief_selections(str(case_id), body.selections)
+        return store.read_brief(str(case_id))
+
+    @app.post("/api/local/v1/cases/{case_id}/brief/generate")
+    async def generate_brief(case_id: UUID, request: Request, response: Response,
+                             body: BriefGenerateRequest | None = None,
+                             x_lawcase_csrf: str | None = Header(default=None)):
+        ensure_write(request, x_lawcase_csrf)
+        payload = body or BriefGenerateRequest()
+        case = store._case(str(case_id))
+        configured_budget = os.environ.get("CASE_WORKBENCH_MODEL_BUDGET_CNY", "").strip()
+        raw_budget = payload.budget_cny if payload.budget_cny is not None else (configured_budget or "2")
+        try:
+            budget = Decimal(str(raw_budget))
+        except (InvalidOperation, TypeError):
+            raise LocalWebBlocked("预算参数不是有效数字。") from None
+        if budget <= 0 or budget > Decimal("50"):
+            raise LocalWebBlocked("预算必须在 0 与 50 元之间。")
+        store.start_brief_generation(
+            str(case_id),
+            case_number=payload.case_number or str(case["title"]),
+            budget_cny=budget,
+        )
+        return store.read_brief(str(case_id))
+
+    @app.get("/api/local/v1/cases/{case_id}/brief/export")
+    async def export_brief(case_id: UUID, request: Request, response: Response,
+                           format: str = "md"):
+        ensure_session(request, response)
+        path = store.brief_markdown_path(str(case_id))
+        if path is None:
+            state = store.read_brief(str(case_id))["state"]
+            if state.get("stale"):
+                raise LocalWebBlocked("案件材料、计算参数或分析结果已变化，原答辩状草稿已失效；请重新生成。")
+            raise LocalWebNotFound("尚无答辩状草稿，请先生成。")
+        text = path.read_text(encoding="utf-8")
+        if format == "md":
+            return Response(content=text, media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="defence-brief.md"'})
+        if format == "docx":
+            from case_api.analysis_export import render_decision_package_docx
+
+            payload = render_decision_package_docx(text)
+            return Response(
+                content=payload,
+                media_type=("application/vnd.openxmlformats-officedocument"
+                            ".wordprocessingml.document"),
+                headers={"Content-Disposition": 'attachment; filename="defence-brief.docx"'},
             )
         raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
 

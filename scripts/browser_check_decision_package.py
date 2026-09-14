@@ -51,6 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screenshot-dir", type=Path, default=None,
                         help="截图输出目录（默认不截图）")
     parser.add_argument("--json-out", type=Path, default=None, help="把自检结果写入 JSON 文件")
+    parser.add_argument("--brief", action="store_true",
+                        help="同时检查「答辩状」页面：状态、草稿与导出按钮")
     return parser.parse_args()
 
 
@@ -128,6 +130,11 @@ def main() -> int:
         if not args.run:
             page.wait_for_timeout(1500)
             passed = finish(page, args, report, step)
+            if args.brief:
+                passed = check_brief_page(page, args, report, step) and passed
+            if args.json_out is not None:
+                args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=1),
+                                         encoding="utf-8")
             browser.close()
             return passed
 
@@ -184,8 +191,38 @@ def main() -> int:
             return 1
         snapshot(page, "03-final")
         passed = finish(page, args, report, step, final=page_blob)
+        if args.brief:
+            passed = check_brief_page(page, args, report, step) and passed
+        if args.json_out is not None:
+            args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=1),
+                                     encoding="utf-8")
         browser.close()
         return passed
+
+
+def check_brief_page(page, args, report, step) -> bool:
+    """只读检查答辩状页面：状态、正文与导出按钮是否真的可用。"""
+    page.goto(f"{args.web_origin}/brief?case={args.case_id}",
+              wait_until="domcontentloaded", timeout=120_000)
+    page.get_by_role("button", name="保存并生成草稿").wait_for(timeout=180_000)
+    page.wait_for_timeout(2_000)
+    status = " | ".join(t.strip() for t in page.get_by_role("status").all_inner_texts() if t.strip())
+    state = page.evaluate("""async (caseId) => {
+      const payload = await (await fetch(`/api/local/v1/cases/${caseId}/brief`)).json();
+      return payload.state;
+    }""", args.case_id)
+    report["brief_state"] = state
+    report["brief_page_status"] = status
+    exports = [b.strip() for b in page.get_by_role("button").all_inner_texts() if "导出" in b]
+    report["brief_export_buttons"] = exports
+    step("答辩状页面", 状态=status, 服务端=state, 导出按钮=exports)
+    if state.get("markdown_available") and not exports:
+        step("检查未通过", reason="服务端有草稿但页面没有导出按钮")
+        return False
+    if state.get("stale") and exports:
+        step("检查未通过", reason="草稿已失效但页面仍显示导出按钮")
+        return False
+    return True
 
 
 def read_run_summary(page, case_id: str) -> dict:
