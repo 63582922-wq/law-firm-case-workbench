@@ -1,6 +1,6 @@
 {
   "schema_version": "official-source-discovery-registry-v1",
-  "last_discovery_verified": "2026-08-10",
+  "last_discovery_verified": "2026-09-04",
   "formal_use_policy": "Each source remains discovery-only until the exact response bytes are encrypted, SHA-256 bound, verified by an authorized human, and registered as an official_legal_source_snapshot.",
   "sources": [
     {
@@ -8,7 +8,8 @@
       "publisher": "国家法律法规数据库",
       "authority_level": "PRIMARY_LAW",
       "official_url": "https://wb.flk.npc.gov.cn/flfg/PDF/bd53dd912c1048f2aecbaa229238334b.pdf",
-      "fallback_official_url": "https://www.court.gov.cn/zixun/xiangqing/233181.html",
+      "fallback_official_url": "https://www.spp.gov.cn/zdgz/202006/t20200602_463886.shtml",
+      "fallback_publisher": "最高人民检察院",
       "provision_locator": "《中华人民共和国民法典》第六百七十九条至第六百八十条",
       "research_focus": [
         "自然人之间借款合同成立时间",
@@ -20,7 +21,8 @@
       "capture_probe": {
         "checked_at": "2026-08-10",
         "canonical_pdf": "TLS_CERTIFICATE_EXPIRED_FAIL_CLOSED",
-        "fallback_html": "LIVE_CAPTURE_AND_ARTICLE_679_680_PARSE_OK"
+        "current_fallback_html": "LIVE_TLS_VALIDATED_200_UTF8_ARTICLE_679_680_PARSE_OK",
+        "previous_spc_fallback_html": "HTTP_403_CURRENTLY_UNAVAILABLE"
       }
     },
     {

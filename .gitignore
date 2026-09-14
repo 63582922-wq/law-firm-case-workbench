@@ -43,3 +43,6 @@ tmp/
 .idea/
 .vscode/
 *.log
+
+# Run artifacts (shadow mode derived text etc.)
+outputs/
