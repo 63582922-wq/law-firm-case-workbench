@@ -121,7 +121,13 @@ class LocalWebTest(unittest.TestCase):
         )
         stale = self.client.get(f"/api/local/v1/cases/{case['case_id']}/analysis")
         self.assertEqual(stale.status_code, 200)
-        self.assertEqual(stale.json(), {"status": "STALE", "analysis": None})
+        payload = stale.json()
+        # 材料变化后确定性结果失效；agent 字段为新增契约（深度分析状态）。
+        self.assertEqual(payload["status"], "STALE")
+        self.assertIsNone(payload["analysis"])
+        self.assertIn("agent", payload)
+        # Agent 结果绑定源版本：材料变化后必须失效，不得继续被引用。
+        self.assertEqual(payload["agent"]["status"], "STALE")
 
 
 if __name__ == "__main__":

@@ -11,14 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import sqlite3
-from threading import Lock
+from threading import Lock, Thread
 from typing import AsyncIterable, Mapping
 from uuid import UUID, uuid4
 import zipfile
@@ -37,6 +39,25 @@ SESSION_COOKIE = "lawcase_local_session"
 CSRF_COOKIE = "lawcase_local_csrf"
 SESSION_TTL = timedelta(hours=8)
 IDEMPOTENCY_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{8,128}$")
+
+
+class AnalysisRunRequest(BaseModel):
+    """触发 Agent 分析的可选参数。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_number: str | None = Field(default=None, max_length=120)
+    role: str | None = Field(default=None, pattern="^(被告|原告)$")
+    stage: str | None = Field(default=None, max_length=60)
+    budget_cny: float | None = Field(default=None, gt=0, le=50)
+    case_config: dict[str, object] | None = None
+
+
+
+def _project_root() -> Path:
+    """项目根目录（backend 的上一级），用于定位默认模型环境文件。"""
+    return Path(__file__).resolve().parents[2]
+
 
 
 class LocalWebBlocked(RuntimeError):
@@ -183,7 +204,28 @@ class LocalWebStore:
                     "INSERT INTO identity(singleton, actor_id, workspace_id, created_at) VALUES(1,?,?,?)",
                     (str(uuid4()), str(uuid4()), _iso(_now())),
                 )
+            self._migrate_agent_columns(db)
         os.chmod(self.db_path, 0o600)
+
+    @staticmethod
+    def _migrate_agent_columns(db: sqlite3.Connection) -> None:
+        """为 analysis_runs 增补 Agent 分析列（幂等，兼容既有数据库）。"""
+        existing = {row["name"] for row in db.execute("PRAGMA table_info(analysis_runs)")}
+        additions = {
+            "agent_status": "TEXT NOT NULL DEFAULT 'NOT_RUN'",
+            "agent_progress": "INTEGER NOT NULL DEFAULT 0",
+            "agent_stage": "TEXT NOT NULL DEFAULT ''",
+            "agent_gate_level": "TEXT NOT NULL DEFAULT ''",
+            "agent_report_path": "TEXT NOT NULL DEFAULT ''",
+            "agent_cost_cny": "TEXT NOT NULL DEFAULT '0.000000'",
+            "agent_calls": "INTEGER NOT NULL DEFAULT 0",
+            "agent_error": "TEXT NOT NULL DEFAULT ''",
+            "agent_engine_json": "TEXT NOT NULL DEFAULT '{}'",
+            "agent_source_version": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                db.execute(f"ALTER TABLE analysis_runs ADD COLUMN {column} {definition}")
 
     @property
     def identity(self) -> LocalWebIdentity:
@@ -449,14 +491,229 @@ class LocalWebStore:
         case = self._case(case_id)
         with self._connect() as db:
             row = db.execute(
-                "SELECT source_version, result_json FROM analysis_runs WHERE case_id=?",
+                """SELECT source_version, result_json, agent_status, agent_progress,
+                          agent_stage, agent_gate_level, agent_report_path, agent_cost_cny,
+                          agent_calls, agent_error, agent_engine_json, agent_source_version
+                   FROM analysis_runs WHERE case_id=?""",
                 (case_id,),
             ).fetchone()
         if row is None:
-            return {"status": "NOT_RUN", "analysis": None}
-        if int(row["source_version"]) != int(case["version"]):
-            return {"status": "STALE", "analysis": None}
-        return {"status": "COMPLETED", "analysis": json.loads(str(row["result_json"]))}
+            return {"status": "NOT_RUN", "analysis": None, "agent": {"status": "NOT_RUN"}}
+        stale = int(row["source_version"]) != int(case["version"])
+        agent_status = str(row["agent_status"])
+        agent_stale = bool(row["agent_source_version"]) and int(row["agent_source_version"]) != int(case["version"])
+        if agent_stale:
+            agent_status = "STALE"
+        agent = {
+            "status": agent_status,
+            "progress": int(row["agent_progress"]),
+            "stage": str(row["agent_stage"]),
+            "gate_level": str(row["agent_gate_level"]),
+            "cost_cny": str(row["agent_cost_cny"]),
+            "calls": int(row["agent_calls"]),
+            "error": str(row["agent_error"]),
+            "engine_numbers": json.loads(str(row["agent_engine_json"]) or "{}"),
+            "report_available": bool(row["agent_report_path"]) and Path(str(row["agent_report_path"])).is_file(),
+        }
+        if stale:
+            return {"status": "STALE", "analysis": None, "agent": agent}
+        return {
+            "status": "COMPLETED",
+            "analysis": json.loads(str(row["result_json"])),
+            "agent": agent,
+        }
+
+    # ---------------------------------------------------------------- Agent 分析
+
+    def _analysis_dir(self, case_id: str) -> Path:
+        target = self.root / "analysis" / case_id
+        target.mkdir(parents=True, exist_ok=True)
+        os.chmod(target, 0o700)
+        return target
+
+    def _analysis_materials(self, case_id: str) -> Path:
+        """把本案已接收材料汇集到分析目录（硬链接优先，避免重复占用空间）。"""
+        target = self._analysis_dir(case_id) / "materials"
+        target.mkdir(parents=True, exist_ok=True)
+        with self._connect() as db:
+            rows = db.execute(
+                """SELECT display_name, storage_name FROM materials
+                   WHERE case_id=? AND state='COMPLETED' AND storage_name IS NOT NULL
+                   ORDER BY created_at""",
+                (case_id,),
+            ).fetchall()
+        for row in rows:
+            source = self.materials / str(row["storage_name"])
+            if not source.is_file():
+                continue
+            name = Path(str(row["display_name"])).name or f"material-{row['storage_name']}"
+            destination = target / name
+            if destination.exists():
+                continue
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+        return target
+
+    def _set_agent_state(self, case_id: str, **fields: object) -> None:
+        if not fields:
+            return
+        assignments = ", ".join(f"{key}=?" for key in fields)
+        with self._lock, self._connect() as db:
+            db.execute(
+                f"UPDATE analysis_runs SET {assignments} WHERE case_id=?",
+                (*fields.values(), case_id),
+            )
+
+    def agent_report_path(self, case_id: str) -> Path | None:
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT agent_report_path FROM analysis_runs WHERE case_id=?", (case_id,)
+            ).fetchone()
+        if row is None or not str(row["agent_report_path"]):
+            return None
+        path = Path(str(row["agent_report_path"]))
+        return path if path.is_file() else None
+
+    def start_agent_analysis(
+        self,
+        case_id: str,
+        *,
+        case_number: str,
+        role: str = "被告",
+        stage_name: str = "一审应诉",
+        budget_cny: Decimal = Decimal("2"),
+        case_config: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """启动 Agent 深度分析（后台线程）；立即返回，不阻塞请求。"""
+        case = self._case(case_id)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT agent_status FROM analysis_runs WHERE case_id=?", (case_id,)
+            ).fetchone()
+        if row is not None and str(row["agent_status"]) == "RUNNING":
+            return {"status": "RUNNING", "message": "分析已在进行中。"}
+
+        run_dir = self._analysis_dir(case_id)
+        materials_dir = self._analysis_materials(case_id)
+        config_path = run_dir / "case_config.json"
+        if case_config:
+            config_path.write_text(
+                json.dumps(case_config, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        active_config = config_path if config_path.is_file() else None
+
+        env_file = self._resolve_model_env_file()
+        preflight_path = self._write_agent_preflight(
+            case_id, run_dir, materials_dir, case_number, role, stage_name, budget_cny, env_file
+        )
+
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO analysis_runs(case_id,source_version,status,result_json,result_hash,generated_at)
+                   VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(case_id) DO UPDATE SET
+                     agent_status='RUNNING', agent_progress=0, agent_stage='准备',
+                     agent_gate_level='', agent_report_path='', agent_cost_cny='0.000000',
+                     agent_calls=0, agent_error='', agent_engine_json='{}',
+                     agent_source_version=?""",
+                (case_id, int(case["version"]), "AGENT_RUNNING", "{}", _digest("agent:running"),
+                 _iso(_now()), int(case["version"])),
+            )
+
+        def progress(stage: str, percent: int) -> None:
+            self._set_agent_state(case_id, agent_stage=stage, agent_progress=max(0, min(100, percent)))
+
+        def worker() -> None:
+            from case_kernel.case_analysis_service import AnalysisRequest, run_analysis
+
+            try:
+                result = run_analysis(AnalysisRequest(
+                    case_id=case_id,
+                    materials_dir=materials_dir,
+                    output_root=run_dir,
+                    case_number=case_number,
+                    role=role,
+                    stage=stage_name,
+                    case_config_path=active_config,
+                    preflight_path=preflight_path,
+                    env_file=env_file,
+                    budget_cny=budget_cny,
+                    progress=progress,
+                ))
+                self._set_agent_state(
+                    case_id,
+                    agent_status=result.status,
+                    agent_progress=100 if result.status == "COMPLETED" else 0,
+                    agent_stage="完成" if result.status == "COMPLETED" else "",
+                    agent_gate_level=result.gate_level,
+                    agent_report_path=str(run_dir / "决策包.md") if result.report_md else "",
+                    agent_cost_cny=result.cost_cny,
+                    agent_calls=result.calls,
+                    agent_error=result.error or "",
+                    agent_engine_json=json.dumps(result.engine_numbers, ensure_ascii=False),
+                )
+            except Exception as error:  # noqa: BLE001 - 后台线程边界
+                self._set_agent_state(
+                    case_id, agent_status="FAILED", agent_progress=0,
+                    agent_error=f"{type(error).__name__}: {error}",
+                )
+
+        if os.environ.get("CASE_WORKBENCH_DISABLE_AGENT", "").strip() == "1":
+            return {"status": "DISABLED", "message": "后台 Agent 已在当前环境禁用。"}
+        Thread(target=worker, name=f"case-analysis-{case_id[:8]}", daemon=True).start()
+        return {"status": "RUNNING", "message": "分析已开始，可在案件页查看进度。"}
+
+    def _resolve_model_env_file(self) -> Path | None:
+        """解析模型环境文件。
+
+        安全默认：**不自动使用仓库内的真实密钥**，必须显式配置其一：
+        - ``CASE_WORKBENCH_MODEL_ENV_FILE`` 指向具体 env 文件；或
+        - ``CASE_WORKBENCH_ENABLE_MODEL=1`` 才回退到仓库默认 env 文件。
+        未配置时分析走降级路径（确定性结果与正式数字仍可用），不会产生任何外部调用。
+        """
+        configured = os.environ.get("CASE_WORKBENCH_MODEL_ENV_FILE", "").strip()
+        if configured:
+            path = Path(configured).expanduser()
+            return path if path.is_file() else None
+        if os.environ.get("CASE_WORKBENCH_ENABLE_MODEL", "").strip() == "1":
+            default = (_project_root() / "deployment" / "local-managed-test"
+                       / "runtime" / "local-managed.env")
+            return default if default.is_file() else None
+        return None
+
+    def _write_agent_preflight(
+        self, case_id: str, run_dir: Path, materials_dir: Path, case_number: str,
+        role: str, stage_name: str, budget_cny: Decimal, env_file: Path | None,
+    ) -> Path | None:
+        """写入本次运行的数据路径记录（律师点击即确认；内容不发送到本文件之外）。"""
+        if env_file is None:
+            return None
+        page_files = sorted(
+            str(path.relative_to(materials_dir))
+            for path in materials_dir.rglob("*")
+            if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
+        )
+        preflight = {
+            "schema": "shadow-preflight-v1",
+            "purpose": "case_analysis_local_web",
+            "case_id": case_id,
+            "case_number": case_number,
+            "role": role,
+            "stage": stage_name,
+            "sent_fields": {"page_files": page_files, "pdf_text_layers_only": True},
+            "provider": "aliyun-model-studio",
+            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME", "qwen3-vl-plus"),
+            "region": "cn-beijing",
+            "retention": "不保存（调用即弃，不用于训练）",
+            "budget_cap_cny": str(budget_cny),
+            "trusted_authorities": [],
+            "approved_by": f"本地工作台律师点击确认（case={case_id}）",
+            "confirmed": "true",
+        }
+        path = run_dir / "preflight.json"
+        path.write_text(json.dumps(preflight, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        return path
 
     def run_analysis(self, case_id: str) -> dict[str, object]:
         case = self._case(case_id)
@@ -823,9 +1080,66 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
         return store.read_analysis(str(case_id))
 
     @app.post("/api/local/v1/cases/{case_id}/analysis")
-    async def run_analysis(case_id: UUID, request: Request, x_lawcase_csrf: str | None = Header(default=None)):
+    async def run_analysis(case_id: UUID, request: Request, response: Response,
+                           body: AnalysisRunRequest | None = None,
+                           x_lawcase_csrf: str | None = Header(default=None)):
         ensure_write(request, x_lawcase_csrf)
-        return store.run_analysis(str(case_id))
+        deterministic = store.run_analysis(str(case_id))
+        payload = body or AnalysisRunRequest()
+        case = store._case(str(case_id))
+        configured_budget = os.environ.get("CASE_WORKBENCH_MODEL_BUDGET_CNY", "").strip()
+        raw_budget = payload.budget_cny if payload.budget_cny is not None else (configured_budget or "2")
+        try:
+            budget = Decimal(str(raw_budget))
+        except (InvalidOperation, TypeError):
+            raise LocalWebBlocked("预算参数不是有效数字。") from None
+        if budget <= 0 or budget > Decimal("50"):
+            raise LocalWebBlocked("预算必须在 0 与 50 元之间。")
+        agent = store.start_agent_analysis(
+            str(case_id),
+            case_number=payload.case_number or str(case["title"]),
+            role=payload.role or "被告",
+            stage_name=payload.stage or "一审应诉",
+            budget_cny=budget,
+            case_config=payload.case_config,
+        )
+        # 顶层保持既有契约（status/analysis），新增 agent 字段承载深度分析状态。
+        return {**deterministic, "agent": agent}
+
+    @app.get("/api/local/v1/cases/{case_id}/analysis/report")
+    async def analysis_report(case_id: UUID, request: Request, response: Response):
+        ensure_session(request, response)
+        path = store.agent_report_path(str(case_id))
+        if path is None:
+            raise LocalWebNotFound("尚无分析报告，请先运行分析。")
+        return Response(content=path.read_text(encoding="utf-8"),
+                        media_type="text/markdown; charset=utf-8")
+
+    @app.get("/api/local/v1/cases/{case_id}/analysis/export")
+    async def analysis_export(case_id: UUID, request: Request, response: Response,
+                              format: str = "md"):
+        ensure_session(request, response)
+        path = store.agent_report_path(str(case_id))
+        if path is None:
+            raise LocalWebNotFound("尚无分析报告，无法导出。")
+        text = path.read_text(encoding="utf-8")
+        if format == "md":
+            return Response(
+                content=text,
+                media_type="text/markdown; charset=utf-8",
+                headers={"Content-Disposition": 'attachment; filename="case-analysis.md"'},
+            )
+        if format == "docx":
+            from case_api.analysis_export import render_decision_package_docx
+
+            payload = render_decision_package_docx(text)
+            return Response(
+                content=payload,
+                media_type=("application/vnd.openxmlformats-officedocument"
+                            ".wordprocessingml.document"),
+                headers={"Content-Disposition": 'attachment; filename="case-analysis.docx"'},
+            )
+        raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
 
     return app
 
