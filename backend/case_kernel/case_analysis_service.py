@@ -71,6 +71,9 @@ class AnalysisRequest:
     budget_cny: Decimal = Decimal("2")
     progress: ProgressCallback | None = None
     transport: object | None = None  # 可注入（测试）；缺省构造真实传输层
+    # 扫描件以图像发送，图像内的身份证号/银行卡号无法在本机自动脱敏。
+    # 默认 fail closed；律师在界面明确授权后才记为待核并继续。
+    allow_image_identifiers: bool = False
 
 
 @dataclass
@@ -211,6 +214,7 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
                          reason="未找到模型环境配置文件，Agent 分析未运行；正式数字与材料导入已完成。")
 
     # 4) OCR（仅授权图片）+ 分析调用
+    image_findings: list[dict] = []
     try:
         from case_kernel.shadow_live_transport import QwenShadowTransport
         transport = request.transport or QwenShadowTransport(
@@ -218,6 +222,7 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
             env_file=request.env_file,
             budget_cny=request.budget_cny,
             run_root=out_root,
+            allow_image_identifiers=request.allow_image_identifiers,
         )
         _emit(request, "识别扫描件（OCR）", 20)
         # 扫描版 PDF：先把页面渲染成图片，才能进入视觉 OCR。
@@ -244,6 +249,7 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
             if ocr_targets else []
         )
         ocr_by_key = {(p.file_name, p.page_number): p.text for p in ocr_pages}
+        image_findings = list(getattr(transport, "image_identifier_findings", []) or [])
 
         def surface_for(page) -> str:
             text = ocr_by_key.get((page.file_name, page.page_number)) or page.text
@@ -294,6 +300,12 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
             calls=_ok_calls(ledger),
         )
 
+    # 5b) 扫描件图像内的完整标识符：本机无法脱敏，按律师授权记为待核
+    if image_findings:
+        gate.review_items.extend(_image_identifier_review_items(image_findings))
+        if gate.level == "PASS":
+            gate.level = "MARK_FOR_REVIEW"
+
     # 6) 报告（数字由引擎段注入）
     result = PracticalResult(gate=gate, analysis=analysis,
                              engine_amounts=engine_numbers, review_queue=[])
@@ -310,6 +322,12 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
                    else "，未能进入 OCR（见上）。")
             )
         report = _inject_render_note(report, " ".join(note_parts))
+    if image_findings:
+        report = _inject_render_note(
+            report,
+            "扫描件图像原样发送（律师已在决策包页面授权）：图像内的完整标识符无法在本机自动脱敏，"
+            f"本次检出 {len(image_findings)} 处，已在下文待核清单逐项列出；下游模型文本已按标识符掩码处理。",
+        )
     report = _inject_engine_note(report, engine_note)
     out_root.joinpath("决策包.md").write_text(report, encoding="utf-8")
     _emit(request, "完成", 100)
@@ -357,6 +375,24 @@ def _render_scanned_pages(request: AnalysisRequest, pages, out_root: Path):
             overrides[key] = item.path
             rendered.append(PageText(file_name, "", item.page_number, ""))
     return rendered, "；".join(notes), overrides
+
+
+def _image_identifier_review_items(findings: list[dict]) -> list[str]:
+    """把扫描件图像内检出的标识符转成待核条目（律师逐项确认）。"""
+    items: list[str] = []
+    seen: set[tuple] = set()
+    for finding in findings:
+        key = (finding.get("pattern"), finding.get("value"),
+               finding.get("file_name"), finding.get("page_number"))
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(
+            f"扫描件图像内含 {finding.get('pattern')}：{finding.get('value')}"
+            f"（{finding.get('file_name')} p{finding.get('page_number')}）"
+            "，图像未脱敏即已发送；请核对是否为真实证件/账号，必要时人工脱敏后重跑。"
+        )
+    return items
 
 
 def _inject_render_note(report: str, note: str) -> str:

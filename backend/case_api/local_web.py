@@ -54,6 +54,17 @@ class AnalysisRunRequest(BaseModel):
     stage: str | None = Field(default=None, max_length=60)
     budget_cny: float | None = Field(default=None, gt=0, le=50)
     case_config: dict[str, object] | None = None
+    # 扫描件以图像发送时，图像内的身份证号/银行卡号无法在本机自动脱敏。
+    # 默认 false（fail closed）；律师明确授权后才继续并把检出结果记为待核。
+    allow_image_identifiers: bool = False
+
+
+class AnalysisConfigRequest(BaseModel):
+    """律师确认的案件计算参数（正式数字的唯一来源，模型不得写入）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    case_config: dict[str, object]
 
 
 
@@ -606,6 +617,57 @@ class LocalWebStore:
         os.chmod(target, 0o700)
         return target
 
+    # ------------------------------------------------- 案件计算参数（律师确认）
+
+    def read_case_config(self, case_id: str) -> dict[str, object] | None:
+        """读取律师已确认的案件计算参数（正式数字的唯一来源）。"""
+        path = self._analysis_dir(case_id) / "case_config.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def save_case_config(self, case_id: str, case_config: Mapping[str, object]) -> dict[str, object]:
+        """校验后原子写入案件计算参数；不合法参数绝不落盘。
+
+        引擎只接受 ``shadow-case-config-v1``：债务本金、放款/到期日、约定月利率，
+        以及司法保护上限（LPR 四倍月利率）与利息暂计截止日。参数由律师填写，
+        模型不得写入。
+
+        参数变化会使既有决策包失效（正式数字随之改变），因此旧报告按 STALE 处理，
+        必须重新运行分析后才能再次阅读或导出。
+        """
+        from case_kernel.shadow_mode import ShadowBlocked, load_case_config
+
+        run_dir = self._analysis_dir(case_id)
+        target = run_dir / "case_config.json"
+        payload = json.dumps(case_config, ensure_ascii=False, indent=1) + "\n"
+        previous = target.read_text(encoding="utf-8") if target.is_file() else ""
+        probe = run_dir / "case_config.probe.json"
+        probe.write_text(payload, encoding="utf-8")
+        try:
+            load_case_config(probe)
+        except ShadowBlocked as error:
+            probe.unlink(missing_ok=True)
+            raise LocalWebBlocked(f"案件计算参数不合法：{error}") from None
+        except (KeyError, ValueError, TypeError) as error:
+            probe.unlink(missing_ok=True)
+            raise LocalWebBlocked(f"案件计算参数字段缺失或格式错误：{error}") from None
+        probe.replace(target)
+        os.chmod(target, 0o600)
+        if previous != payload:
+            with self._lock, self._connect() as db:
+                db.execute(
+                    """UPDATE analysis_runs
+                          SET agent_status='STALE', agent_report_path='', agent_source_version=-1
+                        WHERE case_id=? AND agent_status IN ('COMPLETED','BLOCKED','FAILED')""",
+                    (case_id,),
+                )
+        return case_config
+
     def _analysis_materials(self, case_id: str) -> Path:
         """把本案已接收材料汇集到分析目录（硬链接优先，避免重复占用空间）。"""
         target = self._analysis_dir(case_id) / "materials"
@@ -684,6 +746,7 @@ class LocalWebStore:
         stage_name: str = "一审应诉",
         budget_cny: Decimal = Decimal("2"),
         case_config: dict[str, object] | None = None,
+        allow_image_identifiers: bool = False,
     ) -> dict[str, object]:
         """启动 Agent 深度分析（后台线程）；立即返回，不阻塞请求。"""
         case = self._case(case_id)
@@ -698,8 +761,7 @@ class LocalWebStore:
         materials_dir = self._analysis_materials(case_id)
         config_path = run_dir / "case_config.json"
         if case_config:
-            config_path.write_text(
-                json.dumps(case_config, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            self.save_case_config(case_id, case_config)
         active_config = config_path if config_path.is_file() else None
 
         env_file = self._resolve_model_env_file()
@@ -745,6 +807,7 @@ class LocalWebStore:
                     env_file=env_file,
                     budget_cny=budget_cny,
                     progress=progress,
+                    allow_image_identifiers=allow_image_identifiers,
                 ))
                 self._set_agent_state(
                     case_id,
@@ -1075,7 +1138,11 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                 "can_confirm_case_posture": False,
                 "can_review_evidence": True,
                 "can_run_material_preprocessing": True,
-                "can_run_agent": False,
+                # 本机模式确实实现了 Agent 深度分析：确定性材料核对 + 正式数字 + 可选模型
+                # 决策包（/analysis、/analysis/report、/analysis/export）。这里如实放行，
+                # 否则律师在工作台里点不开「决策包」，已实现的能力等于不存在。
+                # 事实确认、法律审阅、测算与受管成果文件仍在本机模式之外，保持 False。
+                "can_run_agent": True,
                 "can_confirm_fact": False,
                 "can_review_facts": False,
                 "can_review_legal": False,
@@ -1246,16 +1313,37 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
             raise LocalWebBlocked("预算参数不是有效数字。") from None
         if budget <= 0 or budget > Decimal("50"):
             raise LocalWebBlocked("预算必须在 0 与 50 元之间。")
-        agent = store.start_agent_analysis(
+        started = store.start_agent_analysis(
             str(case_id),
             case_number=payload.case_number or str(case["title"]),
             role=payload.role or "被告",
             stage_name=payload.stage or "一审应诉",
             budget_cny=budget,
             case_config=payload.case_config,
+            allow_image_identifiers=payload.allow_image_identifiers,
         )
-        # 顶层保持既有契约（status/analysis），新增 agent 字段承载深度分析状态。
-        return {**deterministic, "agent": agent}
+        # 顶层保持既有契约（status/analysis）。agent 必须是与 GET 完全同构的**完整状态**：
+        # 只回 {"status": "RUNNING"} 会让前端解析失败（服务端返回的文本字段格式不正确）。
+        return {
+            **deterministic,
+            "agent": store.read_analysis(str(case_id))["agent"],
+            "message": started.get("message", ""),
+        }
+
+    @app.get("/api/local/v1/cases/{case_id}/analysis/config")
+    async def analysis_config(case_id: UUID, request: Request, response: Response):
+        """读取律师已确认的案件计算参数，供界面回填。正式数字只来自这些参数。"""
+        ensure_session(request, response)
+        return {"case_config": store.read_case_config(str(case_id))}
+
+    @app.put("/api/local/v1/cases/{case_id}/analysis/config")
+    async def save_analysis_config(case_id: UUID, request: Request, response: Response,
+                                   body: AnalysisConfigRequest,
+                                   x_lawcase_csrf: str | None = Header(default=None)):
+        """只保存参数、不运行分析；参数变化会使既有决策包失效。"""
+        ensure_write(request, x_lawcase_csrf)
+        store.save_case_config(str(case_id), body.case_config)
+        return {"case_config": store.read_case_config(str(case_id))}
 
     @app.get("/api/local/v1/cases/{case_id}/analysis/report")
     async def analysis_report(case_id: UUID, request: Request, response: Response):
@@ -1263,7 +1351,7 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
         path = store.agent_report_path(str(case_id))
         if path is None:
             if store.agent_report_stale(str(case_id)):
-                raise LocalWebBlocked("材料已变化，原分析结果已失效；请重新运行分析后再查看报告。")
+                raise LocalWebBlocked("案件材料或计算参数已变化，原分析结果已失效；请重新运行分析后再查看报告。")
             raise LocalWebNotFound("尚无分析报告，请先运行分析。")
         return Response(content=path.read_text(encoding="utf-8"),
                         media_type="text/markdown; charset=utf-8")
@@ -1275,7 +1363,7 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
         path = store.agent_report_path(str(case_id))
         if path is None:
             if store.agent_report_stale(str(case_id)):
-                raise LocalWebBlocked("材料已变化，原分析结果已失效；请重新运行分析后再导出。")
+                raise LocalWebBlocked("案件材料或计算参数已变化，原分析结果已失效；请重新运行分析后再导出。")
             raise LocalWebNotFound("尚无分析报告，无法导出。")
         text = path.read_text(encoding="utf-8")
         if format == "md":

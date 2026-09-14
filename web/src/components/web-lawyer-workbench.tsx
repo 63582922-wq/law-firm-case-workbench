@@ -422,7 +422,7 @@ function AuthenticatedWebLawyerWorkbench({
   const workflowLabel = initialView === "overview" && selectedCase
     ? session.capabilities.canRunCaseAgent ? "可以继续处理" : "暂不能继续处理"
     : !canOpenCurrentView && initialView !== "overview"
-    ? `${sectionLabels[initialView]}尚未开放`
+    ? isLocalWebMode ? `本机模式未提供${sectionLabels[initialView]}` : `${sectionLabels[initialView]}尚未开放`
     : !selectedCase
     ? "01 / 建立案件"
     : initialView === "analysis" ? "决策包"
@@ -527,7 +527,7 @@ function AuthenticatedWebLawyerWorkbench({
             <CaseListUnavailable onRetry={requestCaseListRefresh} />
           ) : selectedCase ? (
             !canOpenCurrentView ? (
-              <WebLockedStage hasMaterials={hasCaseMaterials} />
+              <WebLockedStage hasMaterials={hasCaseMaterials} localMode={isLocalWebMode} />
             ) : initialView === "overview" ? (
               <WebCaseOverview
                 canCompleteCaseAgentRun={session.capabilities.canCompleteCaseAgentRun}
@@ -591,7 +591,7 @@ function AuthenticatedWebLawyerWorkbench({
                 onVersionAdvanced={advanceCaseVersion}
               />
             ) : (
-              <WebLockedStage hasMaterials={hasCaseMaterials} />
+              <WebLockedStage hasMaterials={hasCaseMaterials} localMode={isLocalWebMode} />
             )
           ) : (
             <CreateCasePanel
@@ -629,7 +629,7 @@ function WebLawyerNavigation({ capabilities, caseId, currentView, hasMaterials }
       {items.map((item) => {
         const available = canOpenWebLawyerView(capabilities, item.id, Boolean(caseId), hasMaterials);
         if (!available) {
-          return <span aria-disabled="true" className={styles.webLawyerNavigationUnavailable} key={item.id} title={caseId ? "完成前一步后可继续处理" : "请先选择案件"}>{item.label}</span>;
+          return <span aria-disabled="true" className={styles.webLawyerNavigationUnavailable} key={item.id} title={caseId ? (isLocalWebMode ? "本机模式未提供该环节；请在律所服务器模式办理" : "完成前一步后可继续处理") : "请先选择案件"}>{item.label}</span>;
         }
         return <a aria-current={item.id === currentView ? "page" : undefined} className={item.id === currentView ? styles.webLawyerNavigationActive : undefined} href={caseId ? `${item.href}?case=${encodeURIComponent(caseId)}` : item.href} key={item.id}>{item.label}</a>;
       })}
@@ -785,7 +785,17 @@ function journeyAction(key: string): string {
   return "继续办理";
 }
 
-function WebLockedStage({ hasMaterials }: { hasMaterials: boolean }) {
+function WebLockedStage({ hasMaterials, localMode }: { hasMaterials: boolean; localMode: boolean }) {
+  if (localMode) {
+    return (
+      <section className={styles.webLawyerEmptyPanel} aria-labelledby="web-locked-stage-title">
+        <p className={styles.eyebrow}>办案流程</p>
+        <h2 id="web-locked-stage-title">本机模式未提供该环节</h2>
+        <p>本机离线模式装配的是：案件首页、材料与证据、决策包（确定性核对 + 正式数字 + 可选模型分析）。确认案情、依据与测算、金额核对、成果文件需要律所服务器模式（受管案卷库、法律依据登记与文书服务），本机不会伪造这些环节的结果。</p>
+        <small>本机数据不会静默转入律所受管案卷；需要正式成果文件时请改用服务器模式办理。</small>
+      </section>
+    );
+  }
   return (
     <section className={styles.webLawyerEmptyPanel} aria-labelledby="web-locked-stage-title">
       <p className={styles.eyebrow}>办案流程</p>

@@ -29,7 +29,7 @@ from case_kernel.shadow_mode import (
     PageText,
     RequestLedger,
     ShadowBlocked,
-    scan_identifiers,
+    mask_text_identifiers,
 )
 
 MODEL = "qwen3-vl-plus"
@@ -114,6 +114,7 @@ class QwenShadowTransport:
         budget_cny: Decimal = Decimal("2"),
         model: str = MODEL,
         run_root: str | Path | None = None,
+        allow_image_identifiers: bool = False,
     ) -> None:
         self.materials_root = Path(materials_root).resolve()
         self.run_root = Path(run_root).resolve() if run_root else None
@@ -127,6 +128,10 @@ class QwenShadowTransport:
         self.model = model
         self.budget_cny = budget_cny
         self.spent_cny = Decimal("0")
+        # 扫描件页面以**图像**发送：图像内部的身份证号/银行卡号无法在本机自动脱敏。
+        # 默认 fail closed；只有律师在界面上明确授权后，才把检出结果记为待核并继续。
+        self.allow_image_identifiers = bool(allow_image_identifiers)
+        self.image_identifier_findings: list[dict] = []
 
     # ------------------------------------------------------------ provider
 
@@ -419,8 +424,20 @@ class QwenShadowTransport:
         never re-pays for completed OCR (cache is outside Git and the repo)."""
         cache_path = self.materials_root.parent / (self.materials_root.name + ".ocr_cache.json")
         if cache_path.is_file():
-            cached = json.loads(cache_path.read_text(encoding="utf-8"))
-            if set(cached.get("authorized", [])) == set(authorized):
+            cached: dict = {}
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                cached = {}  # 缓存损坏只影响省钱，不影响正确性：忽略后重新 OCR
+            if not isinstance(cached, dict):
+                cached = {}
+            # JSON 会把 (file_name, page_number) 元组还原成列表；直接 set() 会抛
+            # TypeError: unhashable type: 'list'，必须先归一化再比较。
+            cached_authorized = {
+                tuple(item) if isinstance(item, list) else item
+                for item in (cached.get("authorized") or [])
+            }
+            if cached_authorized and cached_authorized == set(authorized):
                 return [PageText(str(item["file_name"]), "", int(item["page_number"]),
                                  str(item["text"])) for item in cached.get("pages", [])]
         image_pages = [
@@ -493,13 +510,27 @@ class QwenShadowTransport:
         )
         pages: list[PageText] = []
         for item in result.get("pages", []):
-            text = str(item["text"])
-            findings = scan_identifiers(text)
+            raw_text = str(item["text"])
+            text, findings = mask_text_identifiers(raw_text)
             if findings:
-                raise ShadowBlocked(
-                    f"S1 脱敏完整性门阻断：OCR 文本检出 {findings[0]['pattern']}"
-                    f"（{item['file_name']} p{item['page_number']}），须先脱敏后重试"
-                )
+                # 图像已经发出，本机无法回溯脱敏；此处只能停止继续发送，
+                # 或按律师的明确授权记录待核后继续（下游文本已掩码）。
+                if not self.allow_image_identifiers:
+                    raise ShadowBlocked(
+                        f"S1 脱敏完整性门阻断：OCR 文本检出 {findings[0]['pattern']}"
+                        f"（{item['file_name']} p{item['page_number']}）。该页是扫描件，"
+                        "图像内的标识符无法在本机自动脱敏；请先人工脱敏后重试，"
+                        "或在决策包页面勾选「扫描件图像原样发送」后重新运行。"
+                    )
+                for finding in findings:
+                    self.image_identifier_findings.append(
+                        {
+                            "pattern": finding["pattern"],
+                            "value": finding["value"],
+                            "file_name": str(item["file_name"]),
+                            "page_number": int(item["page_number"]),
+                        }
+                    )
             pages.append(
                 PageText(str(item["file_name"]), "", int(item["page_number"]), text)
             )

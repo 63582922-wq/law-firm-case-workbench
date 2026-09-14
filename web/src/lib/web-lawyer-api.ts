@@ -1039,6 +1039,11 @@ export type WebAgentAnalysisRequest = Readonly<{
   stage?: string;
   budgetCny?: number;
   caseConfig?: Readonly<Record<string, unknown>>;
+  /**
+   * 律师确认：扫描件页面以图像原样发送，图像内的身份证号/银行卡号无法在本机自动脱敏。
+   * 默认 false（服务端 fail closed，检出即阻断并提示）。
+   */
+  allowImageIdentifiers?: boolean;
 }>;
 
 function parseAnalysisAgentState(value: unknown): WebAnalysisAgentState {
@@ -1059,11 +1064,11 @@ function parseAnalysisAgentState(value: unknown): WebAnalysisAgentState {
   return {
     status,
     progress: optionalNonNegativeInteger(record.progress, 100) ?? 0,
-    stage: optionalText(record.stage, 60) ?? "",
-    gateLevel: optionalText(record.gate_level, 40) ?? "",
+    stage: optionalTextAllowEmpty(record.stage, 60),
+    gateLevel: optionalTextAllowEmpty(record.gate_level, 40),
     costCny: optionalText(record.cost_cny, 40) ?? "0.000000",
     calls: optionalNonNegativeInteger(record.calls, 10_000) ?? 0,
-    error: optionalText(record.error, 600) ?? "",
+    error: optionalTextAllowEmpty(record.error, 2_000),
     engineNumbers,
     reportAvailable: optionalBoolean(record.report_available, false, "报告状态格式不正确"),
   };
@@ -1098,6 +1103,7 @@ export async function runWebCaseAgentAnalysis(
   if (request.stage) body.stage = request.stage;
   if (request.budgetCny !== undefined) body.budget_cny = request.budgetCny;
   if (request.caseConfig) body.case_config = request.caseConfig;
+  if (request.allowImageIdentifiers) body.allow_image_identifiers = true;
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
@@ -1111,6 +1117,96 @@ export async function readWebAnalysisReport(caseId: string, signal?: AbortSignal
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/report`, { signal });
   if (!response.ok) throw await readJsonResponse(response, "读取分析报告").then(() => new Error("读取分析报告失败"));
   return response.text();
+}
+
+/* ------------------------------------------------- 案件计算参数（律师确认，正式数字来源） */
+
+export type WebCaseParameterDebt = Readonly<{
+  debtId: string;
+  principal: string;
+  disbursedOn: string;
+  dueOn: string;
+  /** 约定月利率，小数形式（0.015 = 月利率 1.5%）。 */
+  agreedMonthlyRate: string;
+  /** 缺少出借凭证：引擎会挂起该笔，不计入正式数字。 */
+  evidencePending: boolean;
+}>;
+
+export type WebCaseParameters = Readonly<{
+  /** 司法保护上限：LPR 四倍对应的月利率（小数形式）。 */
+  lpr4xMonthlyRate: string;
+  /** 利息暂计截止日（YYYY-MM-DD）。 */
+  interestCutoff: string;
+  debts: readonly WebCaseParameterDebt[];
+}>;
+
+/** 表单参数 → 引擎 case_config（shadow-case-config-v1）。模型不得写入该结构。 */
+export function toWebCaseConfigPayload(
+  parameters: WebCaseParameters,
+): Record<string, unknown> {
+  return {
+    schema: "shadow-case-config-v1",
+    lpr_4x_monthly_rate: parameters.lpr4xMonthlyRate,
+    interest_cutoff: parameters.interestCutoff,
+    debts: parameters.debts.map((debt) => ({
+      debt_id: debt.debtId,
+      principal: debt.principal,
+      disbursed_on: debt.disbursedOn,
+      ...(debt.dueOn ? { due_on: debt.dueOn } : {}),
+      agreed_monthly_rate: debt.agreedMonthlyRate,
+      evidence_pending: debt.evidencePending,
+    })),
+  };
+}
+
+function parseWebCaseParameters(value: unknown): WebCaseParameters {
+  const record = asRecord(value, "案件计算参数格式不正确");
+  const debtsRaw = record.debts;
+  const debts: WebCaseParameterDebt[] = [];
+  if (Array.isArray(debtsRaw)) {
+    for (const item of debtsRaw) {
+      const row = asRecord(item, "债务参数格式不正确");
+      debts.push({
+        debtId: optionalText(row.debt_id, 40) ?? "",
+        principal: optionalText(row.principal, 40) ?? "",
+        disbursedOn: optionalText(row.disbursed_on, 20) ?? "",
+        dueOn: optionalText(row.due_on, 20) ?? "",
+        agreedMonthlyRate: optionalText(row.agreed_monthly_rate, 40) ?? "",
+        evidencePending: optionalBoolean(row.evidence_pending, false, "挂起标记格式不正确"),
+      });
+    }
+  }
+  return {
+    lpr4xMonthlyRate: optionalText(record.lpr_4x_monthly_rate, 40) ?? "",
+    interestCutoff: optionalText(record.interest_cutoff, 20) ?? "",
+    debts,
+  };
+}
+
+export async function readWebCaseParameters(
+  caseId: string,
+  signal?: AbortSignal,
+): Promise<WebCaseParameters | null> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/config`, { signal });
+  const payload = asRecord(await readJsonResponse(response, "读取案件计算参数"), "案件计算参数响应格式不正确");
+  if (payload.case_config === null || payload.case_config === undefined) return null;
+  return parseWebCaseParameters(payload.case_config);
+}
+
+export async function saveWebCaseParameters(
+  caseId: string,
+  parameters: WebCaseParameters,
+): Promise<WebCaseParameters | null> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/analysis/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
+    body: JSON.stringify({ case_config: toWebCaseConfigPayload(parameters) }),
+  });
+  const payload = asRecord(await readJsonResponse(response, "保存案件计算参数"), "案件计算参数响应格式不正确");
+  if (payload.case_config === null || payload.case_config === undefined) return null;
+  return parseWebCaseParameters(payload.case_config);
 }
 
 export async function exportWebAnalysis(caseId: string, format: "md" | "docx"): Promise<Blob> {
@@ -4929,6 +5025,20 @@ function requiredEvidenceExcerptText(value: unknown, message: string, maxLength:
 function optionalText(value: unknown, maxLength: number): string | null {
   if (value === null || value === undefined) return null;
   return requiredText(value, "服务端返回的文本字段格式不正确", maxLength);
+}
+
+/**
+ * 空字符串是合法缺省值：尚未分析时 stage/gate_level/error 都是空的。
+ * 这里只拒绝超长与非文本，避免把「没有值」误判成协议错误。
+ */
+function optionalTextAllowEmpty(value: unknown, maxLength: number): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value !== "string") throw protocolError("服务端返回的文本字段格式不正确");
+  const normalized = value.trim();
+  if (normalized.length > maxLength || containsControlCharacter(normalized)) {
+    throw protocolError("服务端返回的文本字段格式不正确");
+  }
+  return normalized;
 }
 
 function optionalHttpsUrl(value: unknown, message: string): string | null {

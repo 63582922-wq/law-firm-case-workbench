@@ -189,5 +189,76 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(result.engine_numbers["合计本金"], "150000.00")
 
 
+def _write_model_files(root: Path) -> tuple[Path, Path]:
+    preflight = root / "preflight.json"
+    preflight.write_text(json.dumps({
+        "purpose": "case_analysis", "sent_fields": {"page_files": []},
+        "provider": "aliyun", "model": "qwen3-vl-plus", "region": "cn-beijing",
+        "retention": "不保存", "budget_cap_cny": "2", "confirmed": "true",
+    }, ensure_ascii=False), encoding="utf-8")
+    env_file = root / "model.env"
+    env_file.write_text("LAWCASE_AGENT_WORKER_QWEN_API_KEY=x\n"
+                        "LAWCASE_AGENT_WORKER_QWEN_WORKSPACE_ID=ws-x\n", encoding="utf-8")
+    return preflight, env_file
+
+
+_CLEAN_ANALYSIS = {
+    "schema": "lawyer-practical-analysis-v1",
+    "case_posture": {"summary": "被告主张按起诉时上限计算利息。"},
+    "facts": [],
+    "issues": [],
+    "review_notes": [],
+}
+
+
+class ImageIdentifierPolicyTests(unittest.TestCase):
+    """扫描件图像内的完整标识符：默认阻断；律师授权后记为待核放行。"""
+
+    def test_authorized_image_identifiers_become_review_items(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _write_config(root)
+            materials = _make_materials(root)
+            preflight, env_file = _write_model_files(root)
+            transport = FakeTransport(analysis=_CLEAN_ANALYSIS)
+            transport.image_identifier_findings = [
+                {"pattern": "BANK_CARD", "value": "6228 **** **** 4899",
+                 "file_name": "银行卡流水.jpg", "page_number": 1},
+                {"pattern": "BANK_CARD", "value": "6228 **** **** 4899",
+                 "file_name": "银行卡流水.jpg", "page_number": 1},
+                {"pattern": "MOBILE", "value": "138****8000",
+                 "file_name": "微信凭证.jpg", "page_number": 2},
+            ]
+            result = run_analysis(AnalysisRequest(
+                case_id="c1", materials_dir=materials, output_root=root / "out",
+                case_number="（2026）测试号", case_config_path=config,
+                preflight_path=preflight, env_file=env_file, transport=transport,
+                allow_image_identifiers=True,
+            ))
+            self.assertEqual(result.status, STATUS_COMPLETED)
+            self.assertEqual(result.gate_level, "MARK_FOR_REVIEW")
+            bank = [item for item in result.review_items if "BANK_CARD" in item]
+            self.assertEqual(len(bank), 1)  # 重复检出只记一条
+            self.assertIn("6228 **** **** 4899", bank[0])
+            self.assertTrue(any("MOBILE" in item for item in result.review_items))
+            self.assertIn("扫描件图像原样发送", result.report_md)
+
+    def test_clean_run_without_findings_keeps_pass(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = _write_config(root)
+            materials = _make_materials(root)
+            preflight, env_file = _write_model_files(root)
+            transport = FakeTransport(analysis=_CLEAN_ANALYSIS)
+            transport.image_identifier_findings = []
+            result = run_analysis(AnalysisRequest(
+                case_id="c1", materials_dir=materials, output_root=root / "out",
+                case_number="（2026）测试号", case_config_path=config,
+                preflight_path=preflight, env_file=env_file, transport=transport,
+            ))
+            self.assertEqual(result.gate_level, "PASS")
+            self.assertNotIn("扫描件图像原样发送", result.report_md)
+
+
 if __name__ == "__main__":
     unittest.main()

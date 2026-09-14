@@ -88,6 +88,106 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
         self.assertIn("agent", payload)
         self.assertIn(payload["agent"]["status"], {"DISABLED", "RUNNING"})
 
+    def test_case_config_parameters_are_validated_and_round_trip(self) -> None:
+        """案件计算参数：不合法则不落盘，合法则可用于正式数字回填。"""
+        rejected = self.client.post(
+            f"/api/local/v1/cases/{self.case_id}/analysis",
+            json={"case_config": {"schema": "not-a-case-config"}},
+            headers=self._headers("agent-config-1"),
+        )
+        self.assertEqual(rejected.status_code, 422)
+        self.assertIsNone(self.store.read_case_config(self.case_id))
+        self.assertFalse((self.store._analysis_dir(self.case_id) / "case_config.json").exists())
+
+        config = {
+            "schema": "shadow-case-config-v1",
+            "lpr_4x_monthly_rate": "0.01",
+            "interest_cutoff": "2025-06-14",
+            "debts": [
+                {"debt_id": "L1", "principal": "100000.00", "disbursed_on": "2019-10-19",
+                 "agreed_monthly_rate": "0.015", "due_on": "2019-12-19"},
+                {"debt_id": "L2", "principal": "50000.00", "disbursed_on": "2020-03-19",
+                 "agreed_monthly_rate": "0.015", "due_on": "2020-09-19",
+                 "evidence_pending": True},
+            ],
+        }
+        accepted = self.client.post(
+            f"/api/local/v1/cases/{self.case_id}/analysis",
+            json={"case_config": config},
+            headers=self._headers("agent-config-2"),
+        )
+        self.assertEqual(accepted.status_code, 200)
+        listed = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis/config")
+        self.assertEqual(listed.status_code, 200)
+        stored = listed.json()["case_config"]
+        self.assertEqual([item["debt_id"] for item in stored["debts"]], ["L1", "L2"])
+        self.assertEqual(stored["interest_cutoff"], "2025-06-14")
+
+        # 引擎直接消费该文件：缺凭证的 L2 挂起，正式数字只含 L1
+        from case_kernel.case_analysis_service import compute_engine_numbers
+
+        numbers, note = compute_engine_numbers(
+            self.store._analysis_dir(self.case_id) / "case_config.json")
+        self.assertEqual(numbers["合计本金"], "100000.00")
+        self.assertIn("L2", note)
+
+    def test_parameter_change_invalidates_previous_decision_package(self) -> None:
+        """参数是正式数字的来源：改动后旧决策包必须失效，不能继续阅读或导出。"""
+        run_dir = self.store._analysis_dir(self.case_id)
+        report_path = run_dir / "决策包.md"
+        report_path.write_text("# 决策包\n", encoding="utf-8")
+        self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
+                         headers=self._headers("agent-config-base"))
+        self.store._set_agent_state(self.case_id, agent_status="COMPLETED",
+                                    agent_report_path=str(report_path))
+        self.assertEqual(
+            self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis/report").status_code, 200)
+
+        config = {
+            "schema": "shadow-case-config-v1",
+            "lpr_4x_monthly_rate": "0.01",
+            "interest_cutoff": "2025-06-14",
+            "debts": [
+                {"debt_id": "L1", "principal": "100000.00", "disbursed_on": "2019-10-19",
+                 "agreed_monthly_rate": "0.015", "due_on": "2019-12-19"},
+            ],
+        }
+        saved = self.client.put(f"/api/local/v1/cases/{self.case_id}/analysis/config",
+                                json={"case_config": config},
+                                headers=self._headers("agent-config-put-1"))
+        self.assertEqual(saved.status_code, 200)
+        state = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis").json()["agent"]
+        self.assertEqual(state["status"], "STALE")
+        self.assertFalse(state["report_available"])
+        blocked = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis/report")
+        self.assertEqual(blocked.status_code, 422)
+        self.assertIn("计算参数", blocked.json()["message"])
+
+        # 保存相同参数不重复失效（避免无意义地清空结果）
+        version = int(self.store._case(self.case_id)["version"])
+        self.store._set_agent_state(self.case_id, agent_status="COMPLETED",
+                                    agent_report_path=str(report_path),
+                                    agent_source_version=version)
+        again = self.client.put(f"/api/local/v1/cases/{self.case_id}/analysis/config",
+                                json={"case_config": config},
+                                headers=self._headers("agent-config-put-2"))
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(
+            self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis").json()["agent"]["status"],
+            "COMPLETED",
+        )
+
+    def test_start_response_carries_full_agent_state(self) -> None:
+        """POST 返回的 agent 必须与 GET 同构；只回 {"status": ...} 会让前端解析失败。"""
+        response = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
+                                    json={}, headers=self._headers("agent-run-shape-1"))
+        agent = response.json()["agent"]
+        for key in ("status", "progress", "stage", "gate_level", "cost_cny", "calls",
+                    "error", "engine_numbers", "report_available"):
+            self.assertIn(key, agent)
+        listed = self.client.get(f"/api/local/v1/cases/{self.case_id}/analysis").json()["agent"]
+        self.assertEqual(sorted(agent), sorted(listed))
+
     def test_analysis_status_exposes_agent_fields(self) -> None:
         self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
                          headers=self._headers("agent-run-2"))
@@ -119,6 +219,32 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
         response = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
                                     json={"budget_cny": 999}, headers=self._headers("agent-run-4"))
         self.assertEqual(response.status_code, 422)
+
+    def test_image_identifier_authorization_is_accepted_and_plumbed(self) -> None:
+        """律师授权字段通过请求契约进入分析服务；未提供时默认 fail closed。"""
+        seen: list[bool] = []
+        original = self.store.start_agent_analysis
+
+        def spy(case_id, **kwargs):
+            seen.append(bool(kwargs.get("allow_image_identifiers", False)))
+            return {"status": "RUNNING"}
+
+        self.addCleanup(setattr, self.store, "start_agent_analysis", original)
+        self.store.start_agent_analysis = spy  # type: ignore[assignment]
+        self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
+                         headers=self._headers("agent-run-policy-1"))
+        self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
+                         json={"allow_image_identifiers": True},
+                         headers=self._headers("agent-run-policy-2"))
+        self.assertEqual(seen, [False, True])
+
+        # 未知字段仍然被严格拒绝（契约不被放宽）
+        rejected = self.client.post(
+            f"/api/local/v1/cases/{self.case_id}/analysis",
+            json={"allow_unmasked_everything": True},
+            headers=self._headers("agent-run-policy-3"),
+        )
+        self.assertEqual(rejected.status_code, 422)
 
     def test_export_md_and_docx_when_report_exists(self) -> None:
         # 直接放置一份报告文件并把路径写入运行记录，验证导出通道。

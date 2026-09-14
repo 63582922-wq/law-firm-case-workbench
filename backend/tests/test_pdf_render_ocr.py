@@ -115,5 +115,124 @@ class _Ledger:
         self.rows.append(kwargs)
 
 
+class OcrCacheTests(unittest.TestCase):
+    """第二次运行必须能读回缓存：JSON 会把授权键的元组还原成列表。"""
+
+    def test_second_run_reads_cache_without_type_error(self) -> None:
+        from case_kernel.shadow_live_transport import QwenShadowTransport
+        from case_kernel.shadow_mode import PageText
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materials = root / "materials"
+            materials.mkdir()
+            from PIL import Image
+
+            Image.new("RGB", (300, 400), "white").save(materials / "银行流水.jpg", format="JPEG")
+
+            transport = QwenShadowTransport.__new__(QwenShadowTransport)
+            transport.materials_root = materials
+            calls: list[int] = []
+
+            def fake_call(*, instruction, images, max_output_tokens, purpose, ledger,
+                          expected_schema, strict_schema=True, image_paths=None):
+                calls.append(len(images))
+                return {"schema": "shadow-ocr-v1",
+                        "pages": [{"file_name": name, "page_number": page, "text": "第一页文字"}
+                                  for name, page in images]}
+
+            transport._call = fake_call  # type: ignore[assignment]
+            pages = [PageText("银行流水.jpg", "", 1, "")]
+            authorized = {"银行流水.jpg", ("法院材料.pdf", 3)}
+
+            first = transport._ocr_batches(pages, authorized, ledger=_Ledger())
+            self.assertEqual(len(first), 1)
+            self.assertEqual(len(calls), 1)
+            self.assertTrue((root / "materials.ocr_cache.json").is_file())
+
+            # 第二遍：命中缓存，不再调用模型，且不得抛 TypeError
+            second = transport._ocr_batches(pages, authorized, ledger=_Ledger())
+            self.assertEqual([page.text for page in second], ["第一页文字"])
+            self.assertEqual(len(calls), 1)
+
+    def test_corrupt_cache_is_ignored(self) -> None:
+        from case_kernel.shadow_live_transport import QwenShadowTransport
+        from case_kernel.shadow_mode import PageText
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materials = root / "materials"
+            materials.mkdir()
+            from PIL import Image
+
+            Image.new("RGB", (300, 400), "white").save(materials / "a.jpg", format="JPEG")
+            (root / "materials.ocr_cache.json").write_text("{ 不是 JSON", encoding="utf-8")
+
+            transport = QwenShadowTransport.__new__(QwenShadowTransport)
+            transport.materials_root = materials
+            transport._call = lambda **kwargs: {  # type: ignore[assignment]
+                "schema": "shadow-ocr-v1",
+                "pages": [{"file_name": "a.jpg", "page_number": 1, "text": "重新识别"}],
+            }
+            pages = transport._ocr_batches([PageText("a.jpg", "", 1, "")], {"a.jpg"},
+                                           ledger=_Ledger())
+            self.assertEqual(pages[0].text, "重新识别")
+
+
+class ImageIdentifierGateTests(unittest.TestCase):
+    """扫描件图像无法脱敏：默认 fail closed；律师授权后掩码文本并记录检出。"""
+
+    _CARD = "6228000000000003"  # 合成号码（Luhn 有效），非真实账户
+
+    def _transport(self, *, allow: bool):
+        from case_kernel.shadow_live_transport import QwenShadowTransport
+
+        transport = QwenShadowTransport.__new__(QwenShadowTransport)
+        transport.allow_image_identifiers = allow
+        transport.image_identifier_findings = []
+        return transport
+
+    def _batch(self, transport, text: str):
+        def fake_call(*, instruction, images, max_output_tokens, purpose, ledger,
+                      expected_schema, strict_schema=True, image_paths=None):
+            return {"schema": "shadow-ocr-v1",
+                    "pages": [{"file_name": name, "page_number": page, "text": text}
+                              for name, page in images]}
+
+        transport._call = fake_call  # type: ignore[assignment]
+        from case_kernel.shadow_mode import PageText
+
+        return transport._ocr_batch([PageText("银行流水.jpg", "", 1, "")], _Ledger())
+
+    def test_default_blocks_with_actionable_message(self) -> None:
+        from case_kernel.shadow_mode import ShadowBlocked
+
+        transport = self._transport(allow=False)
+        with self.assertRaises(ShadowBlocked) as caught:
+            self._batch(transport, f"账号 {self._CARD} 转入 100000 元")
+        self.assertIn("BANK_CARD", str(caught.exception))
+        self.assertIn("扫描件", str(caught.exception))
+        self.assertIn("勾选", str(caught.exception))
+
+    def test_authorized_masks_text_and_records_findings(self) -> None:
+        transport = self._transport(allow=True)
+        pages = self._batch(transport, f"账号 {self._CARD} 转入 100000 元")
+        self.assertEqual(len(pages), 1)
+        self.assertNotIn(self._CARD, pages[0].text)
+        self.assertIn("6228 **** **** 0003", pages[0].text)
+        self.assertEqual(len(transport.image_identifier_findings), 1)
+        finding = transport.image_identifier_findings[0]
+        self.assertEqual(finding["pattern"], "BANK_CARD")
+        self.assertEqual(finding["file_name"], "银行流水.jpg")
+        self.assertEqual(finding["page_number"], 1)
+
+    def test_luhn_invalid_long_number_is_not_an_identifier(self) -> None:
+        transport = self._transport(allow=False)
+        text = "交易单号 1000050001202601310127877735780 金额 2250.00 元"
+        pages = self._batch(transport, text)
+        self.assertEqual(pages[0].text, text)
+        self.assertEqual(transport.image_identifier_findings, [])
+
+
 if __name__ == "__main__":
     unittest.main()

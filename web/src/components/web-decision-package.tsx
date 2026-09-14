@@ -5,12 +5,117 @@ import {
   exportWebAnalysis,
   readWebAnalysisReport,
   readWebCaseAnalysisState,
+  readWebCaseParameters,
   runWebCaseAgentAnalysis,
+  saveWebCaseParameters,
+  toWebCaseConfigPayload,
   isWebLoginRequired,
   type WebAnalysisAgentState,
   type WebCaseAnalysisState,
+  type WebCaseParameters,
 } from "@/lib/web-lawyer-api";
 import styles from "./case-workbench.module.css";
+
+/* ------------------------------------------------ 案件计算参数（界面用百分比，契约用小数） */
+
+type ParameterDebtDraft = {
+  debtId: string;
+  principal: string;
+  disbursedOn: string;
+  dueOn: string;
+  ratePercent: string;
+  evidencePending: boolean;
+};
+
+type ParameterDraft = {
+  capPercent: string;
+  interestCutoff: string;
+  debts: ParameterDebtDraft[];
+};
+
+function emptyParameterDraft(): ParameterDraft {
+  return {
+    capPercent: "",
+    interestCutoff: "",
+    debts: [{ debtId: "L1", principal: "", disbursedOn: "", dueOn: "",
+              ratePercent: "", evidencePending: false }],
+  };
+}
+
+function percentFromDecimal(value: string): string {
+  const numeric = Number(value);
+  if (!value.trim() || !Number.isFinite(numeric)) return "";
+  return String(numeric * 100);
+}
+
+function decimalFromPercent(value: string): string {
+  const numeric = Number(value);
+  if (!value.trim() || !Number.isFinite(numeric) || numeric <= 0) return "";
+  return String(numeric / 100);
+}
+
+function draftFromParameters(parameters: WebCaseParameters): ParameterDraft {
+  return {
+    capPercent: percentFromDecimal(parameters.lpr4xMonthlyRate),
+    interestCutoff: parameters.interestCutoff,
+    debts: parameters.debts.map((debt) => ({
+      debtId: debt.debtId,
+      principal: debt.principal,
+      disbursedOn: debt.disbursedOn,
+      dueOn: debt.dueOn,
+      ratePercent: percentFromDecimal(debt.agreedMonthlyRate),
+      evidencePending: debt.evidencePending,
+    })),
+  };
+}
+
+function parametersFromDraft(draft: ParameterDraft): WebCaseParameters {
+  return {
+    lpr4xMonthlyRate: decimalFromPercent(draft.capPercent),
+    interestCutoff: draft.interestCutoff.trim(),
+    debts: draft.debts.map((debt) => ({
+      debtId: debt.debtId.trim(),
+      principal: debt.principal.trim(),
+      disbursedOn: debt.disbursedOn.trim(),
+      dueOn: debt.dueOn.trim(),
+      agreedMonthlyRate: decimalFromPercent(debt.ratePercent),
+      evidencePending: debt.evidencePending,
+    })),
+  };
+}
+
+const _DATE_INPUT = /^\d{4}-\d{2}-\d{2}$/;
+const _MONEY_INPUT = /^\d+(?:\.\d{1,2})?$/;
+const _PERCENT_INPUT = /^\d+(?:\.\d+)?$/;
+
+/** 前端只做格式校验；法律口径与金额一律由律师填写的参数和确定性引擎决定。 */
+function validateParameterDraft(draft: ParameterDraft): string {
+  if (!_PERCENT_INPUT.test(draft.capPercent.trim()) || Number(draft.capPercent) <= 0) {
+    return "请填写司法保护上限月利率（按百分比填，例如月利率 1% 填 1）。";
+  }
+  if (!_DATE_INPUT.test(draft.interestCutoff.trim())) {
+    return "请填写利息暂计截止日（YYYY-MM-DD）。";
+  }
+  if (draft.debts.length === 0) return "至少填写一笔借款。";
+  const seen = new Set<string>();
+  for (const debt of draft.debts) {
+    const id = debt.debtId.trim() || "（未编号）";
+    if (!debt.debtId.trim()) return "每笔借款都要有编号，例如 L1、L2。";
+    if (seen.has(id)) return `借款编号重复：${id}`;
+    seen.add(id);
+    if (!_MONEY_INPUT.test(debt.principal.trim()) || Number(debt.principal) <= 0) {
+      return `${id}：本金请填数字（元），例如 100000 或 100000.00。`;
+    }
+    if (!_DATE_INPUT.test(debt.disbursedOn.trim())) return `${id}：放款日请填 YYYY-MM-DD。`;
+    if (debt.dueOn.trim() && !_DATE_INPUT.test(debt.dueOn.trim())) {
+      return `${id}：到期日请填 YYYY-MM-DD，或留空。`;
+    }
+    if (!_PERCENT_INPUT.test(debt.ratePercent.trim()) || Number(debt.ratePercent) <= 0) {
+      return `${id}：约定月利率按百分比填，例如月利率 1.5% 填 1.5。`;
+    }
+  }
+  return "";
+}
 
 const STATUS_LABEL: Record<WebAnalysisAgentState["status"], string> = {
   NOT_RUN: "尚未分析",
@@ -83,6 +188,9 @@ export function WebDecisionPackage({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [allowImageIdentifiers, setAllowImageIdentifiers] = useState(false);
+  const [draft, setDraft] = useState<ParameterDraft>(emptyParameterDraft());
+  const [parametersLoaded, setParametersLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -108,6 +216,22 @@ export function WebDecisionPackage({
     void refresh();
   }, [refresh]);
 
+  // 回填律师已确认的计算参数（正式数字的唯一来源）
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const stored = await readWebCaseParameters(caseId);
+        if (!cancelled && stored) setDraft(draftFromParameters(stored));
+      } catch {
+        // 读取失败时保持空白表单，由律师重新填写；不静默编造参数。
+      } finally {
+        if (!cancelled) setParametersLoaded(true);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [caseId]);
+
   // 运行中自动轮询进度（不阻塞界面）
   useEffect(() => {
     if (state?.agent.status !== "RUNNING") return;
@@ -116,21 +240,70 @@ export function WebDecisionPackage({
   }, [state?.agent.status, refresh]);
 
   const start = async () => {
+    const invalid = validateParameterDraft(draft);
+    const touched = Boolean(
+      draft.capPercent.trim() || draft.interestCutoff.trim()
+      || draft.debts.some((debt) => (
+        debt.principal.trim() || debt.disbursedOn.trim() || debt.dueOn.trim() || debt.ratePercent.trim()
+      )),
+    );
     setBusy(true);
     setError("");
     setNotice("");
     try {
-      const next = await runWebCaseAgentAnalysis(caseId, { caseNumber });
+      if (invalid && touched) {
+        // 已经填了一部分：绝不静默丢弃律师输入的数字。
+        setError(`案件计算参数未填完整：${invalid}`);
+        return;
+      }
+      let caseConfig: Record<string, unknown> | undefined;
+      if (!invalid) {
+        const saved = await saveWebCaseParameters(caseId, parametersFromDraft(draft));
+        if (saved) setDraft(draftFromParameters(saved));
+        caseConfig = toWebCaseConfigPayload(parametersFromDraft(draft));
+      }
+      const next = await runWebCaseAgentAnalysis(caseId, {
+        caseNumber,
+        allowImageIdentifiers,
+        ...(caseConfig ? { caseConfig } : {}),
+      });
       setState(next);
       setNotice(next.agent.status === "MODEL_NOT_CONFIGURED"
         ? "未配置模型：已产出确定性结果与正式数字；配置模型后可获得深度分析。"
-        : "分析已开始，进度会自动刷新。");
+        : invalid
+          ? "未填写案件计算参数：本次只做材料核对与争点分析，不产出正式数字；补齐参数后重新运行即可。"
+          : "分析已开始，进度会自动刷新。");
     } catch (caught) {
       if (isWebLoginRequired(caught)) {
         onSessionExpired();
         return;
       }
       setError(caught instanceof Error ? caught.message : "启动分析失败。");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveParameters = async () => {
+    const invalid = validateParameterDraft(draft);
+    setError("");
+    setNotice("");
+    if (invalid) {
+      setError(`案件计算参数未填完整：${invalid}`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const saved = await saveWebCaseParameters(caseId, parametersFromDraft(draft));
+      if (saved) setDraft(draftFromParameters(saved));
+      setNotice("计算参数已保存。参数变化会使既有决策包失效，请重新运行分析以刷新正式数字。");
+      await refresh();
+    } catch (caught) {
+      if (isWebLoginRequired(caught)) {
+        onSessionExpired();
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : "保存计算参数失败。");
     } finally {
       setBusy(false);
     }
@@ -187,6 +360,112 @@ export function WebDecisionPackage({
           </>
         ) : null}
       </div>
+
+      <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13 }}>
+        <input
+          type="checkbox"
+          checked={allowImageIdentifiers}
+          disabled={agent?.status === "RUNNING"}
+          onChange={(event) => setAllowImageIdentifiers(event.target.checked)}
+        />
+        <span>
+          扫描件页面以图像原样发送（勾选后：图像内的身份证号/银行卡号无法在本机自动脱敏，检出后逐项记为待核，不阻断整份分析）。
+          不勾选时，一旦在扫描件文字里检出完整证件号/账号，分析会 fail closed 并提示先人工脱敏。
+        </span>
+      </label>
+
+      <section aria-label="案件计算参数" style={{ maxWidth: 900, marginTop: 12 }}>
+        <h3>案件计算参数（律师确认，正式数字的唯一来源）</h3>
+        <p style={{ fontSize: 13, opacity: 0.85 }}>
+          正式数字由确定性引擎按这里的参数计算，模型不参与任何计算。参数变化会使既有决策包失效，
+          需重新运行分析。缺少出借凭证的借款请勾选「缺凭证挂起」，该笔不计入合计。
+        </p>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            司法保护上限月利率（%，例：1 表示月利率 1%）
+            <input
+              type="text"
+              inputMode="decimal"
+              value={draft.capPercent}
+              placeholder="例如 1"
+              onChange={(event) => setDraft({ ...draft, capPercent: event.target.value })}
+            />
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            利息暂计截止日
+            <input
+              type="date"
+              value={draft.interestCutoff}
+              onChange={(event) => setDraft({ ...draft, interestCutoff: event.target.value })}
+            />
+          </label>
+        </div>
+
+        <table style={{ width: "100%", fontSize: 13, marginTop: 8, borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>编号</th>
+              <th style={{ textAlign: "left" }}>本金（元）</th>
+              <th style={{ textAlign: "left" }}>放款日</th>
+              <th style={{ textAlign: "left" }}>到期日（可空）</th>
+              <th style={{ textAlign: "left" }}>约定月利率（%）</th>
+              <th style={{ textAlign: "left" }}>缺凭证挂起</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {draft.debts.map((debt, index) => {
+              const update = (patch: Partial<ParameterDebtDraft>) => {
+                const debts = draft.debts.map((item, itemIndex) =>
+                  itemIndex === index ? { ...item, ...patch } : item);
+                setDraft({ ...draft, debts });
+              };
+              return (
+                <tr key={`debt-${index}`}>
+                  <td><input type="text" style={{ width: 70 }} value={debt.debtId}
+                             onChange={(event) => update({ debtId: event.target.value })} /></td>
+                  <td><input type="text" inputMode="decimal" style={{ width: 110 }} value={debt.principal}
+                             placeholder="100000"
+                             onChange={(event) => update({ principal: event.target.value })} /></td>
+                  <td><input type="date" value={debt.disbursedOn}
+                             onChange={(event) => update({ disbursedOn: event.target.value })} /></td>
+                  <td><input type="date" value={debt.dueOn}
+                             onChange={(event) => update({ dueOn: event.target.value })} /></td>
+                  <td><input type="text" inputMode="decimal" style={{ width: 80 }} value={debt.ratePercent}
+                             placeholder="1.5"
+                             onChange={(event) => update({ ratePercent: event.target.value })} /></td>
+                  <td style={{ textAlign: "center" }}>
+                    <input type="checkbox" checked={debt.evidencePending}
+                           aria-label={`${debt.debtId || "该笔"}缺凭证挂起`}
+                           onChange={(event) => update({ evidencePending: event.target.checked })} />
+                  </td>
+                  <td>
+                    <button type="button" disabled={draft.debts.length <= 1}
+                            onClick={() => setDraft({ ...draft,
+                              debts: draft.debts.filter((_, itemIndex) => itemIndex !== index) })}>
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+          <button type="button" disabled={busy} onClick={() => setDraft({
+            ...draft,
+            debts: [...draft.debts, {
+              debtId: `L${draft.debts.length + 1}`, principal: "", disbursedOn: "", dueOn: "",
+              ratePercent: draft.debts[0]?.ratePercent ?? "", evidencePending: false,
+            }],
+          })}>新增一笔借款</button>
+          <button type="button" disabled={busy || !parametersLoaded}
+                  onClick={() => void saveParameters()}>仅保存参数</button>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>
+            {parametersLoaded ? "参数保存在本机案卷内，重新打开页面会自动回填。" : "正在读取已保存参数…"}
+          </span>
+        </div>
+      </section>
 
       {agent?.status === "RUNNING" ? (
         <p role="status">
