@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+import re
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -62,6 +63,38 @@ def _price_cny(prompt_tokens: int, completion_tokens: int) -> Decimal:
         Decimal(prompt_tokens) * input_rate
         + Decimal(completion_tokens) * output_rate
     ) / Decimal(1_000_000)
+
+
+def _parse_model_json(content: str) -> tuple[dict | None, str]:
+    """解析模型返回的 JSON；容忍代码块围栏与前后说明文字。
+
+    返回 (对象或 None, 修复说明)。完全解析不出对象时返回 (None, "")，
+    由调用方走 fail-closed 留证路径——绝不把猜出来的内容当结果。
+    """
+    text = content.strip()
+    try:
+        value = json.loads(text)
+        return (value, "") if isinstance(value, dict) else (None, "")
+    except json.JSONDecodeError:
+        pass
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+    if fenced:
+        try:
+            value = json.loads(fenced.group(1))
+            if isinstance(value, dict):
+                return value, "模型返回带代码块围栏，已提取其中的 JSON"
+        except json.JSONDecodeError:
+            pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            value = json.loads(text[start:end + 1])
+            if isinstance(value, dict):
+                return value, "模型返回夹带说明文字，已提取其中的 JSON 对象"
+        except json.JSONDecodeError:
+            pass
+    return None, ""
 
 
 def _image_path(root, name, overrides, page_number: int | None = None) -> Path:
@@ -289,15 +322,12 @@ class QwenShadowTransport:
         content = (choices[0].get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise ShadowBlocked("Qwen 返回内容为空")
-        try:
-            parsed = json.loads(content)
-            parsed_ok = True
-        except json.JSONDecodeError:
-            parsed_ok = False
-        schema_ok = (
+        parsed, repair_note = _parse_model_json(content)
+        parsed_ok = parsed is not None
+        schema_ok = bool(
             parsed.get("schema") == expected_schema if strict_schema
             else isinstance(parsed, dict)
-        )
+        ) if parsed_ok else False
         if not parsed_ok or not isinstance(parsed, dict) or not schema_ok:
             # 内容不完整或 schema 不符：现场留证（仅存运行目录，不进入任何报告），
             # 按实际用量记账后 fail closed，不自动重试。
@@ -378,6 +408,7 @@ class QwenShadowTransport:
                    "total_tokens": prompt_tokens + completion_tokens},
             cost_cny=format(cost.quantize(Decimal("0.000001")), "f"),
             status="ok",
+            **({"note": repair_note} if repair_note else {}),
         )
         return parsed
 

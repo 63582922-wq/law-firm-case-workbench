@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -393,6 +394,23 @@ def run_analysis(request: AnalysisRequest) -> AnalysisResult:
     )
 
 
+def _max_rendered_pages() -> int:
+    """扫描页渲染上限：大案卷（几十页微信/流水证据）可用环境变量放宽。
+
+    默认 24 页以控制单次成本；``CASE_WORKBENCH_MAX_RENDERED_PAGES`` 可在需要
+    完整读取证据时提高上限（例如 60）。非法值回退默认，不静默放大成本。
+    """
+    raw = os.environ.get("CASE_WORKBENCH_MAX_RENDERED_PAGES", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if 1 <= value <= 500:
+            return value
+    return MAX_RENDERED_PAGES_DEFAULT
+
+
 def _render_scanned_pages(request: AnalysisRequest, pages, out_root: Path):
     """把无文本层的 PDF 页渲染为图片；返回 (PageText 列表, 说明, 路径覆盖表)。
 
@@ -415,7 +433,7 @@ def _render_scanned_pages(request: AnalysisRequest, pages, out_root: Path):
         source = Path(request.materials_dir) / file_name
         rendered_file_pages, note = render_pdf_pages(
             source, render_dir,
-            pages=sorted(page_numbers)[:MAX_RENDERED_PAGES_DEFAULT],
+            pages=sorted(page_numbers)[:_max_rendered_pages()],
         )
         notes.append(f"{Path(file_name).name}: {note}")
         for item in rendered_file_pages:

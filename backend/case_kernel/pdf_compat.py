@@ -79,18 +79,41 @@ def pdf_page_count(path: str | Path) -> tuple[int, str]:
     return count, "poppler"
 
 
-def pdf_page_texts(path: str | Path) -> tuple[list[str] | None, str]:
-    """按页返回文本层；pypdf 打不开时返回 (None, 原因)，由调用方按扫描件处理。"""
-    try:
-        from pypdf import PdfReader
+def pdf_page_texts(path: str | Path, *, page_count: int | None = None) -> tuple[list[str] | None, str]:
+    """按页返回文本层。
 
-        with open(path, "rb") as handle:
+    真实案卷里常见「页树可读、个别页内容流损坏」的 PDF：整份丢弃会让律师
+    白丢几十页证据。因此逐页提取——坏页记为空文本（下游按扫描页进入 OCR），
+    其余页保留文本，并在说明里写明坏了几页。
+
+    pypdf 连页树都读不动时返回 ``(None, 原因)``，由调用方按整份无文本层处理。
+    """
+    from pypdf import PdfReader
+
+    texts: list[str] = []
+    failed = 0
+    try:
+        with open(path, "rb") as handle:  # 句柄必须在提取期间保持打开：内容流是惰性读取的
             reader = PdfReader(handle, strict=True)
-            texts = [" ".join((page.extract_text() or "").split()) for page in reader.pages]
-        return texts, "pypdf"
-    except Exception as error:  # noqa: BLE001 - 退化到「无文本层」
-        count, backend = pdf_page_count(path)  # 页数仍要拿到，否则整份材料无法入卷
+            total = len(reader.pages)
+            for index in range(total):
+                try:
+                    text = reader.pages[index].extract_text() or ""
+                except Exception:  # noqa: BLE001 - 单页内容流损坏不影响其余页
+                    text = ""
+                    failed += 1
+                texts.append(" ".join(text.split()))
+    except Exception as error:  # noqa: BLE001 - 页树都读不动：整份按无文本层
+        count = page_count
+        backend = "pypdf"
+        if count is None:
+            count, backend = pdf_page_count(path)
         return None, f"{type(error).__name__}（已用 {backend} 读出 {count} 页，按无文本层进入 OCR）"
+
+    note = "pypdf"
+    if failed:
+        note = f"pypdf（{failed}/{total} 页文本层无法解析，已按扫描页进入 OCR）"
+    return texts, note
 
 
 def render_single_page_png(path: str | Path, page_number: int, *, dpi: int = 120) -> bytes | None:

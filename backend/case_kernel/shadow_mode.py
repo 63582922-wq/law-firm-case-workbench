@@ -134,6 +134,9 @@ class ManifestEntry:
     sha256: str
     page_count: int
     import_order: int
+    # 读取说明（例如「43 页中 5 页文本层无法解析，已按扫描页进入 OCR」）；
+    # 空字符串表示无异常，随 import_manifest.json 留档。
+    notes: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -189,6 +192,7 @@ def build_import_manifest(
     entries: list[ManifestEntry] = []
     pages: list[PageText] = []
     identifier_findings: list[dict] = []
+    notes_by_file: dict[str, str] = {}
     files = sorted(
         (path for path in root.rglob("*")
          if path.is_file() and path.suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png"}),
@@ -202,14 +206,21 @@ def build_import_manifest(
         suffix = path.suffix.lower()
         if suffix == ".pdf":
             media_type = "application/pdf"
-            reader = PdfReader(path)
-            page_count = len(reader.pages)
-            text_by_page: list[str] = []
-            for page_number, page in enumerate(reader.pages, start=1):
-                text = page.extract_text() or ""
-                text_by_page.append(text)
+            # 真实案卷的 PDF 常有个别页内容流损坏：用兼容层逐页提取，
+            # 坏页记为空文本（下游按扫描页渲染 + OCR），其余页照常入卷。
+            from case_kernel.pdf_compat import pdf_page_count, pdf_page_texts
+
+            page_count, _backend = pdf_page_count(path)
+            text_by_page, text_note = pdf_page_texts(path, page_count=page_count)
+            if text_by_page is None:
+                text_by_page = [""] * page_count
+            elif len(text_by_page) < page_count:
+                text_by_page = list(text_by_page) + [""] * (page_count - len(text_by_page))
+            for page_number, text in enumerate(text_by_page[:page_count], start=1):
                 pages.append(PageText(str(path.relative_to(root)), digest, page_number, text))
             local_text = "\n".join(text_by_page)
+            if text_note and "无法解析" in text_note:
+                notes_by_file[str(path.relative_to(root))] = text_note
         else:
             media_type = "image/" + ("jpeg" if suffix in {".jpg", ".jpeg"} else "png")
             page_count = 1
@@ -223,7 +234,8 @@ def build_import_manifest(
                 local_text = ""
             pages.append(PageText(str(path.relative_to(root)), digest, 1, local_text))
         relative_name = str(path.relative_to(root))
-        entries.append(ManifestEntry(relative_name, media_type, digest, page_count, order))
+        entries.append(ManifestEntry(relative_name, media_type, digest, page_count, order,
+                                     notes_by_file.get(relative_name, "")))
         if scan_gate:
             combined = f"{local_text}\n{path.name}"
             findings = scan_identifiers(combined)
