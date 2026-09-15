@@ -160,6 +160,7 @@ export type WebLawyerSession = Readonly<{
     canReviewSubmission: boolean;
     canRunAgent: boolean;
     canDraftDefenceBrief: boolean;
+    canManageDeliverables: boolean;
     canRunCaseAgent: boolean;
     canExecuteActivePlan: boolean;
     canCompleteCaseAgentRun: boolean;
@@ -962,6 +963,8 @@ export async function readWebLawyerSession(signal?: AbortSignal): Promise<WebLaw
       canRunAgent: optionalBoolean(capabilities.can_run_agent, false, "登录状态中的 Agent 能力格式不正确"),
       canDraftDefenceBrief: optionalBoolean(capabilities.can_draft_defence_brief, false,
         "登录状态中的答辩状能力格式不正确"),
+      canManageDeliverables: optionalBoolean(capabilities.can_manage_deliverables, false,
+        "登录状态中的交付清单能力格式不正确"),
       canRunCaseAgent: optionalBoolean(capabilities.can_run_case_agent, false, "登录状态中的统一办案 Agent 能力格式不正确"),
       canExecuteActivePlan: optionalBoolean(capabilities.can_execute_active_plan, false, "登录状态中的已激活计划执行能力格式不正确"),
       canCompleteCaseAgentRun: optionalBoolean(capabilities.can_complete_case_agent_run, false, "登录状态中的 Agent 终审能力格式不正确"),
@@ -1406,6 +1409,148 @@ function toWebBriefPayload(selections: WebBriefSelections): Record<string, unkno
     authorities: selections.authorities,
     notes: selections.notes,
   };
+}
+
+/* ------------------------------------------------------ 交付清单与应诉材料包 */
+
+export const WEB_DELIVERABLE_STATES: readonly string[] = [
+  "未开始", "起草中", "待当事人签字", "已签字", "已提交", "不适用",
+];
+
+export type WebDeliverableItem = Readonly<{
+  itemId: string;
+  name: string;
+  destination: string;
+  signer: string;
+  needsClientSignature: boolean;
+  note: string;
+  source: string;
+}>;
+
+export type WebDeliverableParties = Readonly<{
+  respondent: string;
+  respondentId: string;
+  respondentAddress: string;
+  respondentPhone: string;
+  claimant: string;
+  court: string;
+  caseNumber: string;
+  cause: string;
+  lawyer: string;
+  lawFirm: string;
+  notes: string;
+}>;
+
+export type WebDeliverableState = Readonly<{
+  catalogue: readonly WebDeliverableItem[];
+  parties: WebDeliverableParties;
+  states: Readonly<Record<string, string>>;
+  updatedAt: string;
+}>;
+
+export function emptyWebDeliverableParties(): WebDeliverableParties {
+  return {
+    respondent: "", respondentId: "", respondentAddress: "", respondentPhone: "",
+    claimant: "", court: "", caseNumber: "", cause: "", lawyer: "", lawFirm: "", notes: "",
+  };
+}
+
+function parseWebDeliverableState(payload: unknown, operation: string): WebDeliverableState {
+  const record = asRecord(payload, `${operation}响应格式不正确`);
+  const catalogueRaw = record.catalogue;
+  const catalogue: WebDeliverableItem[] = [];
+  if (Array.isArray(catalogueRaw)) {
+    for (const item of catalogueRaw) {
+      const row = asRecord(item, "交付清单条目格式不正确");
+      catalogue.push({
+        itemId: optionalTextAllowEmpty(row.item_id, 60),
+        name: optionalTextAllowEmpty(row.name, 120),
+        destination: optionalTextAllowEmpty(row.destination, 20),
+        signer: optionalTextAllowEmpty(row.signer, 60),
+        needsClientSignature: optionalBoolean(row.needs_client_signature, false,
+          "签字标记格式不正确"),
+        note: optionalTextAllowEmpty(row.note, 300),
+        source: optionalTextAllowEmpty(row.source, 20),
+      });
+    }
+  }
+  const partiesRaw = asRecord(record.parties ?? {}, "案件主体信息格式不正确");
+  const partiesAllowed = WEB_DELIVERABLE_STATES;
+  void partiesAllowed;
+  const parties: WebDeliverableParties = {
+    respondent: optionalTextAllowEmpty(partiesRaw.respondent, 200),
+    respondentId: optionalTextAllowEmpty(partiesRaw.respondent_id, 200),
+    respondentAddress: optionalTextAllowEmpty(partiesRaw.respondent_address, 200),
+    respondentPhone: optionalTextAllowEmpty(partiesRaw.respondent_phone, 200),
+    claimant: optionalTextAllowEmpty(partiesRaw.claimant, 200),
+    court: optionalTextAllowEmpty(partiesRaw.court, 200),
+    caseNumber: optionalTextAllowEmpty(partiesRaw.case_number, 200),
+    cause: optionalTextAllowEmpty(partiesRaw.cause, 200),
+    lawyer: optionalTextAllowEmpty(partiesRaw.lawyer, 200),
+    lawFirm: optionalTextAllowEmpty(partiesRaw.law_firm, 200),
+    notes: optionalTextAllowEmpty(partiesRaw.notes, 200),
+  };
+  const statesRaw = asRecord(record.states ?? {}, "交付状态格式不正确");
+  const states: Record<string, string> = {};
+  for (const [key, value] of Object.entries(statesRaw)) {
+    const text = typeof value === "string" ? value : "";
+    states[key] = WEB_DELIVERABLE_STATES.includes(text) ? text : "未开始";
+  }
+  return {
+    catalogue,
+    parties,
+    states,
+    updatedAt: optionalTextAllowEmpty(record.updated_at, 60),
+  };
+}
+
+export async function readWebDeliverables(caseId: string, signal?: AbortSignal): Promise<WebDeliverableState> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/deliverables`, { signal });
+  return parseWebDeliverableState(await readJsonResponse(response, "读取交付清单"), "读取交付清单");
+}
+
+export async function saveWebDeliverables(
+  caseId: string,
+  parties: WebDeliverableParties,
+  states: Readonly<Record<string, string>>,
+): Promise<WebDeliverableState> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/deliverables`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": createWebCaseIdempotencyKey() },
+    body: JSON.stringify({
+      parties: {
+        respondent: parties.respondent, respondent_id: parties.respondentId,
+        respondent_address: parties.respondentAddress, respondent_phone: parties.respondentPhone,
+        claimant: parties.claimant, court: parties.court, case_number: parties.caseNumber,
+        cause: parties.cause, lawyer: parties.lawyer, law_firm: parties.lawFirm,
+        notes: parties.notes,
+      },
+      states,
+    }),
+  });
+  return parseWebDeliverableState(await readJsonResponse(response, "保存交付清单"), "保存交付清单");
+}
+
+export async function readWebDeliverableTemplate(caseId: string, itemId: string): Promise<string> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(
+    `/api/v1/cases/${normalizedCaseId}/deliverables/template/${encodeURIComponent(itemId)}`, {});
+  const payload = asRecord(await readJsonResponse(response, "读取交付物模板"), "交付物模板格式不正确");
+  return optionalMultilineText(payload.markdown, 200_000);
+}
+
+export async function exportWebDeliverables(caseId: string, format: "md" | "docx"): Promise<Blob> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(
+    `/api/v1/cases/${normalizedCaseId}/deliverables/export?format=${format}`, {});
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const message = payload && typeof payload.message === "string" ? payload.message : "导出材料包失败";
+    throw new WebLawyerApiError(message, { status: response.status, requestId: null });
+  }
+  return response.blob();
 }
 
 export async function readWebBrief(caseId: string, signal?: AbortSignal): Promise<WebBriefPayload> {

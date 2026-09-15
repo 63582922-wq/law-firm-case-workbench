@@ -6,6 +6,7 @@ export type WebLawyerInitialView =
   | "calculation"
   | "analysis"
   | "brief"
+  | "deliverables"
   | "bundle"
   | "security";
 
@@ -23,6 +24,8 @@ export type WebLawyerViewCapabilities = Readonly<{
   canRunAgent: boolean;
   /** 答辩状草稿（文书起草）是否已装配。 */
   canDraftDefenceBrief: boolean;
+  /** 交付清单与应诉材料包是否已装配。 */
+  canManageDeliverables: boolean;
 }>;
 
 /**
@@ -52,6 +55,7 @@ export function canOpenWebLawyerView(
   if (view === "calculation") return capabilities.canReviewLegal && capabilities.canRunCalculation;
   if (view === "analysis") return capabilities.canRunAgent;
   if (view === "brief") return capabilities.canDraftDefenceBrief;
+  if (view === "deliverables") return capabilities.canManageDeliverables;
   if (view === "bundle") return capabilities.canReviewSubmission;
   return false;
 }

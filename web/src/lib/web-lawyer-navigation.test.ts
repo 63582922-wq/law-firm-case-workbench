@@ -15,6 +15,7 @@ const capabilities: WebLawyerViewCapabilities = {
   canReviewSubmission: true,
   canRunAgent: true,
   canDraftDefenceBrief: true,
+  canManageDeliverables: true,
 };
 
 test("server-projected material count keeps downstream views reachable after reload", () => {
@@ -64,4 +65,14 @@ test("答辩状视图要求有案件与材料，且文书起草已装配", () =>
   assert.equal(canOpenWebLawyerView(localMode, "brief", true, true), true);
   const withoutBrief: WebLawyerViewCapabilities = { ...capabilities, canDraftDefenceBrief: false };
   assert.equal(canOpenWebLawyerView(withoutBrief, "brief", true, true), false);
+});
+
+test("交付清单视图要求有案件与材料，且交付管理已装配", () => {
+  assert.equal(canOpenWebLawyerView(capabilities, "deliverables", false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "deliverables", true, false), false);
+  assert.equal(canOpenWebLawyerView(capabilities, "deliverables", true, true), true);
+  const withoutDeliverables: WebLawyerViewCapabilities = {
+    ...capabilities, canManageDeliverables: false,
+  };
+  assert.equal(canOpenWebLawyerView(withoutDeliverables, "deliverables", true, true), false);
 });

@@ -66,6 +66,15 @@ class AnalysisRunRequest(BaseModel):
     allow_image_identifiers: bool = False
 
 
+class DeliverableStateRequest(BaseModel):
+    """交付清单：案件主体信息 + 各项交付物状态（律师维护）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parties: dict[str, object]
+    states: dict[str, object]
+
+
 class BriefSelectionRequest(BaseModel):
     """律师在答辩状页面做出的选择（唯一立场来源）。"""
 
@@ -234,6 +243,12 @@ class LocalWebStore:
                     result_json TEXT NOT NULL,
                     result_hash TEXT NOT NULL,
                     generated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS deliverable_states (
+                    case_id TEXT PRIMARY KEY REFERENCES cases(case_id),
+                    parties_json TEXT NOT NULL DEFAULT '{}',
+                    states_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS brief_runs (
                     case_id TEXT PRIMARY KEY REFERENCES cases(case_id),
@@ -808,6 +823,89 @@ class LocalWebStore:
             bool(int(row["agent_source_version"]))
             and int(row["agent_source_version"]) != int(case["version"])
             and str(row["agent_status"]) in ("COMPLETED", "STALE")
+        )
+
+    # ------------------------------------------------ 交付清单与应诉材料包
+
+    def _deliverable_row(self, case_id: str):
+        with self._connect() as db:
+            return db.execute("SELECT * FROM deliverable_states WHERE case_id=?",
+                              (case_id,)).fetchone()
+
+    def read_deliverables(self, case_id: str) -> dict[str, object]:
+        """交付清单状态 + 案件主体信息（律师维护；签字文件与答辩状共用）。"""
+        from case_kernel.matter_deliverables import MatterParties, catalogue_payload
+
+        self._case(case_id)
+        row = self._deliverable_row(case_id)
+        parties = json.loads(str(row["parties_json"]) or "{}") if row is not None else {}
+        states = json.loads(str(row["states_json"]) or "{}") if row is not None else {}
+        if not parties:
+            # 首次进入时用答辩状页面已填的主体信息回填，避免重复录入。
+            brief = self.read_brief(case_id)
+            selections = brief.get("selections") or {}
+            if isinstance(selections, dict):
+                parties = {
+                    key: selections.get(source) or ""
+                    for key, source in (("respondent", "respondent"), ("claimant", "claimant"),
+                                        ("court", "court"), ("case_number", "caseNumber"))
+                }
+        return {
+            "catalogue": catalogue_payload(),
+            "parties": MatterParties.from_dict(parties).to_dict(),
+            "states": {str(key): str(value) for key, value in dict(states).items()},
+            "updated_at": str(row["updated_at"]) if row is not None else "",
+        }
+
+    def save_deliverables(self, case_id: str, parties: Mapping[str, object],
+                          states: Mapping[str, object]) -> dict[str, object]:
+        from case_kernel.matter_deliverables import (
+            CATALOGUE_BY_ID,
+            DELIVERABLE_STATES,
+            MatterParties,
+        )
+
+        self._case(case_id)
+        normalized_parties = MatterParties.from_dict(parties).to_dict()
+        normalized_states = {
+            str(item_id): (str(status) if str(status) in DELIVERABLE_STATES else "未开始")
+            for item_id, status in dict(states).items()
+            if str(item_id) in CATALOGUE_BY_ID
+        }
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO deliverable_states(case_id, parties_json, states_json, updated_at)
+                   VALUES(?,?,?,?)
+                   ON CONFLICT(case_id) DO UPDATE SET
+                     parties_json=excluded.parties_json,
+                     states_json=excluded.states_json,
+                     updated_at=excluded.updated_at""",
+                (case_id, json.dumps(normalized_parties, ensure_ascii=False),
+                 json.dumps(normalized_states, ensure_ascii=False), _iso(_now())),
+            )
+        return self.read_deliverables(case_id)
+
+    def deliverable_materials(self, case_id: str) -> list[dict[str, object]]:
+        return [
+            {"display_name": str(item["display_name"]),
+             "page_count": int(item["page_count"] or 0)}
+            for item in self._case_materials(case_id)
+        ]
+
+    def deliverable_package_markdown(self, case_id: str) -> str:
+        """整套应诉材料包：清单 + 签字文件 + 证据目录 + 已有答辩状草稿。"""
+        from case_kernel.matter_deliverables import MatterParties, render_package
+
+        state = self.read_deliverables(case_id)
+        parties = MatterParties.from_dict(state.get("parties"))
+        answer_path = self.brief_markdown_path(case_id)
+        answer = answer_path.read_text(encoding="utf-8") if answer_path else ""
+        return render_package(
+            parties=parties,
+            states=state.get("states") or {},
+            materials=self.deliverable_materials(case_id),
+            answer_draft=answer,
+            generated_at=_iso(_now()),
         )
 
     # ------------------------------------------------ 答辩状草稿（律师工作稿）
@@ -1480,6 +1578,8 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                 "can_generate_documents": False,
                 # 本机模式装配了答辩状草稿（确定性骨架 + 受门禁约束的模型文字）。
                 "can_draft_defence_brief": True,
+                # 本机模式装配了交付清单与应诉材料包（含当事人签字文件模板）。
+                "can_manage_deliverables": True,
             },
             # The browser renders the same product shell as the firm-managed
             # service.  This explicit marker prevents the offline SQLite
@@ -1712,6 +1812,53 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                 media_type=("application/vnd.openxmlformats-officedocument"
                             ".wordprocessingml.document"),
                 headers={"Content-Disposition": 'attachment; filename="case-analysis.docx"'},
+            )
+        raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
+
+    # ------------------------------------------------ 交付清单与应诉材料包路由
+
+    @app.get("/api/local/v1/cases/{case_id}/deliverables")
+    async def deliverables(case_id: UUID, request: Request, response: Response):
+        ensure_session(request, response)
+        return store.read_deliverables(str(case_id))
+
+    @app.put("/api/local/v1/cases/{case_id}/deliverables")
+    async def save_deliverables(case_id: UUID, request: Request, response: Response,
+                                body: DeliverableStateRequest,
+                                x_lawcase_csrf: str | None = Header(default=None)):
+        ensure_write(request, x_lawcase_csrf)
+        return store.save_deliverables(str(case_id), body.parties, body.states)
+
+    @app.get("/api/local/v1/cases/{case_id}/deliverables/template/{item_id}")
+    async def deliverable_template(case_id: UUID, item_id: str, request: Request,
+                                   response: Response):
+        ensure_session(request, response)
+        from case_kernel.matter_deliverables import MatterParties, render_template
+
+        state = store.read_deliverables(str(case_id))
+        text = render_template(item_id, MatterParties.from_dict(state.get("parties")),
+                               store.deliverable_materials(str(case_id)))
+        if text is None:
+            raise LocalWebNotFound("该交付物没有可用模板。")
+        return {"item_id": item_id, "markdown": text}
+
+    @app.get("/api/local/v1/cases/{case_id}/deliverables/export")
+    async def deliverable_export(case_id: UUID, request: Request, response: Response,
+                                 format: str = "md"):
+        ensure_session(request, response)
+        text = store.deliverable_package_markdown(str(case_id))
+        if format == "md":
+            return Response(content=text, media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="defence-package.md"'})
+        if format == "docx":
+            from case_api.analysis_export import render_decision_package_docx
+
+            payload = render_decision_package_docx(text)
+            return Response(
+                content=payload,
+                media_type=("application/vnd.openxmlformats-officedocument"
+                            ".wordprocessingml.document"),
+                headers={"Content-Disposition": 'attachment; filename="defence-package.docx"'},
             )
         raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
 
