@@ -77,6 +77,14 @@ class LoadTests(unittest.TestCase):
             load_sales_claim({**BASE_BLOCK, "overdue_from": "2026-01-01",
                               "cutoff": "2025-01-01"})
 
+    def test_empty_confirmed_principal_means_claim_amount(self) -> None:
+        """界面上留空的「确认应付货款」= 与主张金额一致，不是错误。"""
+        claim = load_sales_claim({**BASE_BLOCK, "confirmed_principal": ""})
+        self.assertEqual(claim.confirmed_principal, claim.claim_amount)
+        claim = load_sales_claim({k: v for k, v in BASE_BLOCK.items()
+                                  if k != "confirmed_principal"})
+        self.assertEqual(claim.confirmed_principal, claim.claim_amount)
+
     def test_bad_payment_classification_is_rejected(self) -> None:
         with self.assertRaises(SalesClaimError):
             load_sales_claim({

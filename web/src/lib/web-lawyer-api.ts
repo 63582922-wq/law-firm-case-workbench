@@ -1211,7 +1211,8 @@ export function toWebCaseConfigPayload(
       sales_claim: {
         kind: "GOODS_PAYMENT",
         claim_amount: parameters.salesClaim.claimAmount,
-        confirmed_principal: parameters.salesClaim.confirmedPrincipal,
+        ...(parameters.salesClaim.confirmedPrincipal.trim()
+          ? { confirmed_principal: parameters.salesClaim.confirmedPrincipal } : {}),
         overdue_from: parameters.salesClaim.overdueFrom,
         cutoff: parameters.salesClaim.cutoff,
         loss_basis: parameters.salesClaim.lossBasis,
@@ -1232,11 +1233,11 @@ function parseWebCaseParameters(value: unknown): WebCaseParameters {
     for (const item of debtsRaw) {
       const row = asRecord(item, "债务参数格式不正确");
       debts.push({
-        debtId: optionalText(row.debt_id, 40) ?? "",
-        principal: optionalText(row.principal, 40) ?? "",
-        disbursedOn: optionalText(row.disbursed_on, 20) ?? "",
-        dueOn: optionalText(row.due_on, 20) ?? "",
-        agreedMonthlyRate: optionalText(row.agreed_monthly_rate, 40) ?? "",
+        debtId: optionalTextAllowEmpty(row.debt_id, 40),
+        principal: optionalTextAllowEmpty(row.principal, 40),
+        disbursedOn: optionalTextAllowEmpty(row.disbursed_on, 20),
+        dueOn: optionalTextAllowEmpty(row.due_on, 20),
+        agreedMonthlyRate: optionalTextAllowEmpty(row.agreed_monthly_rate, 40),
         evidencePending: optionalBoolean(row.evidence_pending, false, "挂起标记格式不正确"),
       });
     }
@@ -1246,14 +1247,14 @@ function parseWebCaseParameters(value: unknown): WebCaseParameters {
   if (Array.isArray(paymentsRaw)) {
     for (const item of paymentsRaw) {
       const row = asRecord(item, "付款参数格式不正确");
-      const classification = optionalText(row.classification, 20) ?? "";
+      const classification = optionalTextAllowEmpty(row.classification, 20);
       payments.push({
-        paymentId: optionalText(row.payment_id, 40) ?? "",
-        paidOn: optionalText(row.paid_on, 20) ?? "",
-        amount: optionalText(row.amount, 40) ?? "",
+        paymentId: optionalTextAllowEmpty(row.payment_id, 40),
+        paidOn: optionalTextAllowEmpty(row.paid_on, 20),
+        amount: optionalTextAllowEmpty(row.amount, 40),
         classification: WEB_PAYMENT_CLASSES.includes(classification) ? classification : "争议",
-        debtId: optionalText(row.debt_id, 40) ?? "",
-        memo: optionalText(row.memo, 200) ?? "",
+        debtId: optionalTextAllowEmpty(row.debt_id, 40),
+        memo: optionalTextAllowEmpty(row.memo, 200),
       });
     }
   }
@@ -1263,17 +1264,17 @@ function parseWebCaseParameters(value: unknown): WebCaseParameters {
     : null;
   const salesClaim: WebSalesClaim = {
     enabled: sales !== null,
-    claimAmount: sales ? (optionalText(sales.claim_amount, 40) ?? "") : "",
-    confirmedPrincipal: sales ? (optionalText(sales.confirmed_principal, 40) ?? "") : "",
-    overdueFrom: sales ? (optionalText(sales.overdue_from, 20) ?? "") : "",
-    cutoff: sales ? (optionalText(sales.cutoff, 20) ?? "") : "",
-    lossBasis: sales ? (optionalText(sales.loss_basis, 20) ?? "LPR") : "LPR",
-    lprAnnualPercent: sales ? (optionalText(sales.lpr_annual, 20) ?? "") : "",
-    agreedAnnualPercent: sales ? (optionalText(sales.agreed_annual, 20) ?? "") : "",
+    claimAmount: sales ? optionalTextAllowEmpty(sales.claim_amount, 40) : "",
+    confirmedPrincipal: sales ? optionalTextAllowEmpty(sales.confirmed_principal, 40) : "",
+    overdueFrom: sales ? optionalTextAllowEmpty(sales.overdue_from, 20) : "",
+    cutoff: sales ? optionalTextAllowEmpty(sales.cutoff, 20) : "",
+    lossBasis: sales ? (optionalTextAllowEmpty(sales.loss_basis, 20) || "LPR") : "LPR",
+    lprAnnualPercent: sales ? optionalTextAllowEmpty(sales.lpr_annual, 20) : "",
+    agreedAnnualPercent: sales ? optionalTextAllowEmpty(sales.agreed_annual, 20) : "",
   };
   return {
-    lpr4xMonthlyRate: optionalText(record.lpr_4x_monthly_rate, 40) ?? "",
-    interestCutoff: optionalText(record.interest_cutoff, 20) ?? "",
+    lpr4xMonthlyRate: optionalTextAllowEmpty(record.lpr_4x_monthly_rate, 40),
+    interestCutoff: optionalTextAllowEmpty(record.interest_cutoff, 20),
     debts,
     payments,
     salesClaim,

@@ -147,8 +147,12 @@ def load_sales_claim(value: Mapping | None) -> SalesClaim | None:
             f"逾期损失口径必须为 {'/'.join(LOSS_BASE_IDS)} 之一，当前为「{block.get('loss_basis')}」")
 
     claim_amount = _money(block.get("claim_amount"), "原告主张货款")
-    confirmed_principal = _money(
-        block.get("confirmed_principal", claim_amount), "律师确认应付货款")
+    raw_confirmed = block.get("confirmed_principal")
+    # 界面上「确认应付货款」可以是空的：空值表示与主张金额一致，不是错误
+    confirmed_principal = (
+        _money(raw_confirmed, "律师确认应付货款")
+        if str(raw_confirmed or "").strip() else claim_amount
+    )
     overdue_from = _day(block.get("overdue_from"), "逾期起算日")
     cutoff = _day(block.get("cutoff"), "暂计截止日")
     if cutoff < overdue_from:
