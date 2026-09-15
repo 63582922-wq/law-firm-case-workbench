@@ -31,6 +31,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
+from case_kernel.pdf_compat import (
+    PdfUnreadable,
+    pdf_page_count,
+    pdf_page_texts,
+    render_single_page_png,
+)
+
 
 MAX_PDF_BYTES = 256 * 1024 * 1024
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
@@ -385,11 +392,14 @@ class LocalWebStore:
                     output.write(chunk)
             if size == 0:
                 raise LocalWebBlocked("不能接收空文件。")
-            with staging.open("rb") as source:
-                reader = PdfReader(source, strict=True)
-                page_count = len(reader.pages)
-                if page_count < 1 or page_count > 100_000:
-                    raise LocalWebBlocked("PDF 页数不符合本机模式限制。")
+            try:
+                # 法院/当事人导出的 PDF 常让 pypdf 直接抛错；这里用 Poppler 兜底读页数，
+                # 否则整整一份证据材料会被挡在门外（内容仍按无文本层进入 OCR）。
+                page_count, _backend = pdf_page_count(staging)
+            except PdfUnreadable as error:
+                raise LocalWebBlocked(f"PDF 无法解析：{error}") from None
+            if page_count < 1 or page_count > 100_000:
+                raise LocalWebBlocked("PDF 页数不符合本机模式限制。")
             content_hash = digest.hexdigest()
             storage_name = f"{content_hash}.pdf"
             stored = self.materials / storage_name
@@ -601,12 +611,18 @@ class LocalWebStore:
             with Image.open(storage) as image:
                 image.convert("RGB").save(output, format="PDF", resolution=150)
             return output.getvalue()
-        reader = PdfReader(storage, strict=True)
-        writer = PdfWriter()
-        writer.add_page(reader.pages[int(row["page_number"]) - 1])
-        output = BytesIO()
-        writer.write(output)
-        return output.getvalue()
+        try:
+            reader = PdfReader(storage, strict=True)
+            writer = PdfWriter()
+            writer.add_page(reader.pages[int(row["page_number"]) - 1])
+            output = BytesIO()
+            writer.write(output)
+            return output.getvalue()
+        except Exception:  # noqa: BLE001 - 退化为渲染该页为 PNG
+            png = render_single_page_png(storage, int(row["page_number"]))
+            if png is None:
+                raise LocalWebBlocked("该页无法预览：PDF 无法解析且缺少页面渲染组件。") from None
+            return png
 
     def read_analysis(self, case_id: str) -> dict[str, object]:
         case = self._case(case_id)
@@ -1233,10 +1249,26 @@ class LocalWebStore:
                               "display_name": str(material["display_name"]), "page_count": 1,
                               "text_layer_pages": 0, "candidate_page_count": 1})
                 continue
+            page_texts, _backend = pdf_page_texts(storage)
+            if page_texts is None:
+                # 无法提取文本层：按扫描件处理，逐页进入 OCR 候选，绝不当成"已读过"。
+                count, _ = pdf_page_count(storage)
+                for page_number in range(1, count + 1):
+                    scanned_pages += 1
+                    candidates.append({
+                        "kind": "OCR_REQUIRED", "page_number": page_number,
+                        "signals": [], "amounts": [], "dates": [],
+                        "snippet": "本页没有可提取文字（PDF 文本层无法解析），需要视觉/OCR 服务复核。",
+                        "source_file": str(material["display_name"]),
+                        "source_sha256": str(material["sha256"] or ""),
+                    })
+                files.append({"material_id": str(material["material_id"]),
+                              "display_name": str(material["display_name"]),
+                              "page_count": count, "text_layer_pages": 0,
+                              "candidate_page_count": count})
+                continue
             try:
-                reader = PdfReader(storage, strict=True)
-                for page_number, page in enumerate(reader.pages, start=1):
-                    text = " ".join((page.extract_text() or "").split())
+                for page_number, text in enumerate(page_texts, start=1):
                     if text:
                         file_text_pages += 1
                         text_pages += 1
