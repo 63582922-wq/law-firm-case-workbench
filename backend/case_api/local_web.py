@@ -723,6 +723,7 @@ class LocalWebStore:
         必须重新运行分析后才能再次阅读或导出。
         """
         from case_kernel.case_payments import PaymentError, load_payments
+        from case_kernel.case_sales_claim import SalesClaimError, load_sales_claim
         from case_kernel.shadow_mode import ShadowBlocked, load_case_config
 
         run_dir = self._analysis_dir(case_id)
@@ -731,19 +732,32 @@ class LocalWebStore:
         previous = target.read_text(encoding="utf-8") if target.is_file() else ""
         probe = run_dir / "case_config.probe.json"
         probe.write_text(payload, encoding="utf-8")
-        try:
-            load_case_config(probe)
-        except ShadowBlocked as error:
+        debts = case_config.get("debts") or []
+        sales_claim = case_config.get("sales_claim")
+        if debts:
+            try:
+                load_case_config(probe)
+            except ShadowBlocked as error:
+                probe.unlink(missing_ok=True)
+                raise LocalWebBlocked(f"案件计算参数不合法：{error}") from None
+            except (KeyError, ValueError, TypeError) as error:
+                probe.unlink(missing_ok=True)
+                raise LocalWebBlocked(f"案件计算参数字段缺失或格式错误：{error}") from None
+        elif not isinstance(sales_claim, Mapping):
+            # 买卖合同案由不需要借贷参数，但必须至少有一套口径，否则算不出正式数字
             probe.unlink(missing_ok=True)
-            raise LocalWebBlocked(f"案件计算参数不合法：{error}") from None
-        except (KeyError, ValueError, TypeError) as error:
-            probe.unlink(missing_ok=True)
-            raise LocalWebBlocked(f"案件计算参数字段缺失或格式错误：{error}") from None
+            raise LocalWebBlocked(
+                "案件计算参数没有内容：请填写借款参数，或勾选买卖合同货款口径并填写金额与日期。")
         try:  # 付款性质必须逐笔合法，绝不静默丢弃律师填写的付款
             load_payments(case_config)
         except PaymentError as error:
             probe.unlink(missing_ok=True)
             raise LocalWebBlocked(f"付款记录不合法：{error}") from None
+        try:  # 货款口径（买卖合同）同样必须合法，否则不落盘
+            load_sales_claim(case_config if isinstance(case_config, dict) else None)
+        except SalesClaimError as error:
+            probe.unlink(missing_ok=True)
+            raise LocalWebBlocked(f"货款口径参数不合法：{error}") from None
         probe.replace(target)
         os.chmod(target, 0o600)
         if previous != payload:

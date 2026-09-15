@@ -42,6 +42,11 @@ from case_kernel.shadow_engine import (
     canonical_amount,
     run_engine,
 )
+from case_kernel.case_sales_claim import (
+    SalesClaimError,
+    compute_sales_numbers,
+    load_sales_claim,
+)
 from case_kernel.case_payments import (
     PaymentError,
     load_payments,
@@ -134,6 +139,20 @@ def compute_engine_numbers(
         return {}, "未提供案件计算参数（case_config），正式数字待补充参数后计算。"
     try:
         raw_config = json.loads(Path(case_config_path).read_text(encoding="utf-8"))
+    except Exception as error:  # noqa: BLE001 - 参数问题不阻断分析
+        return {}, f"案件计算参数无法解析：{type(error).__name__}；正式数字待修正参数后计算。"
+
+    # 买卖合同（货款）口径：与民间借贷是两套规则，按律师配置的口径分流，
+    # 绝不把货款硬套进借贷的 LPR×4 与先息后本模型。货款案由不需要借贷的 debts，
+    # 因此必须先判断口径，再决定是否要求借贷参数。
+    try:
+        sales_claim = load_sales_claim(raw_config if isinstance(raw_config, dict) else None)
+    except SalesClaimError as error:
+        return {}, f"货款口径参数不合法（{error}）；正式数字待修正参数后计算。"
+    if sales_claim is not None:
+        return compute_sales_numbers(sales_claim)
+
+    try:
         cfg = load_case_config(case_config_path)
     except Exception as error:  # noqa: BLE001 - 参数问题不阻断分析
         return {}, f"案件计算参数无法解析：{type(error).__name__}；正式数字待修正参数后计算。"

@@ -12,6 +12,7 @@ import {
   isWebLoginRequired,
   type WebAnalysisAgentState,
   type WebCaseAnalysisState,
+  WEB_LOSS_BASES,
   WEB_PAYMENT_CLASSES,
   type WebCaseParameterPayment,
   type WebCaseParameters,
@@ -39,11 +40,24 @@ type ParameterPaymentDraft = {
   memo: string;
 };
 
+type SalesClaimDraft = {
+  enabled: boolean;
+  claimAmount: string;
+  confirmedPrincipal: string;
+  overdueFrom: string;
+  cutoff: string;
+  lossBasis: string;
+  /** 百分数形式（3 表示年化 3%） */
+  lprAnnualPercent: string;
+  agreedAnnualPercent: string;
+};
+
 type ParameterDraft = {
   capPercent: string;
   interestCutoff: string;
   debts: ParameterDebtDraft[];
   payments: ParameterPaymentDraft[];
+  salesClaim: SalesClaimDraft;
 };
 
 function emptyParameterDraft(): ParameterDraft {
@@ -53,6 +67,10 @@ function emptyParameterDraft(): ParameterDraft {
     debts: [{ debtId: "L1", principal: "", disbursedOn: "", dueOn: "",
               ratePercent: "", evidencePending: false }],
     payments: [],
+    salesClaim: {
+      enabled: false, claimAmount: "", confirmedPrincipal: "", overdueFrom: "",
+      cutoff: "", lossBasis: "LPR", lprAnnualPercent: "", agreedAnnualPercent: "",
+    },
   };
 }
 
@@ -88,6 +106,16 @@ function draftFromParameters(parameters: WebCaseParameters): ParameterDraft {
       debtId: payment.debtId,
       memo: payment.memo,
     })),
+    salesClaim: {
+      enabled: parameters.salesClaim.enabled,
+      claimAmount: parameters.salesClaim.claimAmount,
+      confirmedPrincipal: parameters.salesClaim.confirmedPrincipal,
+      overdueFrom: parameters.salesClaim.overdueFrom,
+      cutoff: parameters.salesClaim.cutoff,
+      lossBasis: parameters.salesClaim.lossBasis,
+      lprAnnualPercent: percentFromDecimal(parameters.salesClaim.lprAnnualPercent),
+      agreedAnnualPercent: percentFromDecimal(parameters.salesClaim.agreedAnnualPercent),
+    },
   };
 }
 
@@ -111,6 +139,16 @@ function parametersFromDraft(draft: ParameterDraft): WebCaseParameters {
       debtId: payment.debtId.trim(),
       memo: payment.memo.trim(),
     })),
+    salesClaim: {
+      enabled: draft.salesClaim.enabled,
+      claimAmount: draft.salesClaim.claimAmount.trim(),
+      confirmedPrincipal: draft.salesClaim.confirmedPrincipal.trim(),
+      overdueFrom: draft.salesClaim.overdueFrom.trim(),
+      cutoff: draft.salesClaim.cutoff.trim(),
+      lossBasis: draft.salesClaim.lossBasis,
+      lprAnnualPercent: decimalFromPercent(draft.salesClaim.lprAnnualPercent),
+      agreedAnnualPercent: decimalFromPercent(draft.salesClaim.agreedAnnualPercent),
+    },
   };
 }
 
@@ -120,15 +158,17 @@ const _PERCENT_INPUT = /^\d+(?:\.\d+)?$/;
 
 /** 前端只做格式校验；法律口径与金额一律由律师填写的参数和确定性引擎决定。 */
 function validateParameterDraft(draft: ParameterDraft): string {
-  if (!_PERCENT_INPUT.test(draft.capPercent.trim()) || Number(draft.capPercent) <= 0) {
-    return "请填写司法保护上限月利率（按百分比填，例如月利率 1% 填 1）。";
+  if (!draft.salesClaim.enabled) {
+    if (!_PERCENT_INPUT.test(draft.capPercent.trim()) || Number(draft.capPercent) <= 0) {
+      return "请填写司法保护上限月利率（按百分比填，例如月利率 1% 填 1）。";
+    }
+    if (!_DATE_INPUT.test(draft.interestCutoff.trim())) {
+      return "请填写利息暂计截止日（YYYY-MM-DD）。";
+    }
+    if (draft.debts.length === 0) return "至少填写一笔借款。";
   }
-  if (!_DATE_INPUT.test(draft.interestCutoff.trim())) {
-    return "请填写利息暂计截止日（YYYY-MM-DD）。";
-  }
-  if (draft.debts.length === 0) return "至少填写一笔借款。";
   const seen = new Set<string>();
-  for (const debt of draft.debts) {
+  for (const debt of draft.salesClaim.enabled ? [] : draft.debts) {
     const id = debt.debtId.trim() || "（未编号）";
     if (!debt.debtId.trim()) return "每笔借款都要有编号，例如 L1、L2。";
     if (seen.has(id)) return `借款编号重复：${id}`;
@@ -142,6 +182,36 @@ function validateParameterDraft(draft: ParameterDraft): string {
     }
     if (!_PERCENT_INPUT.test(debt.ratePercent.trim()) || Number(debt.ratePercent) <= 0) {
       return `${id}：约定月利率按百分比填，例如月利率 1.5% 填 1.5。`;
+    }
+  }
+  if (draft.salesClaim.enabled) {
+    const sales = draft.salesClaim;
+    if (!_MONEY_INPUT.test(sales.claimAmount.trim()) || Number(sales.claimAmount) <= 0) {
+      return "买卖合同：请填写原告主张的货款金额（元）。";
+    }
+    if (sales.confirmedPrincipal.trim()
+        && (!_MONEY_INPUT.test(sales.confirmedPrincipal.trim())
+            || Number(sales.confirmedPrincipal) <= 0)) {
+      return "买卖合同：律师确认应付货款请填数字（元），或留空表示与主张金额一致。";
+    }
+    if (!_DATE_INPUT.test(sales.overdueFrom.trim())) {
+      return "买卖合同：请填写逾期起算日（YYYY-MM-DD）。";
+    }
+    if (!_DATE_INPUT.test(sales.cutoff.trim())) {
+      return "买卖合同：请填写暂计截止日（YYYY-MM-DD）。";
+    }
+    if (!WEB_LOSS_BASES.some((item) => item.id === sales.lossBasis)) {
+      return "买卖合同：请选择逾期损失口径。";
+    }
+    if (["LPR", "LPR_1_5"].includes(sales.lossBasis)
+        && (!_PERCENT_INPUT.test(sales.lprAnnualPercent.trim())
+            || Number(sales.lprAnnualPercent) <= 0)) {
+      return "买卖合同：请填写逾期起算时的一年期 LPR（按百分比填，3 表示 3%）。";
+    }
+    if (sales.lossBasis === "AGREED"
+        && (!_PERCENT_INPUT.test(sales.agreedAnnualPercent.trim())
+            || Number(sales.agreedAnnualPercent) <= 0)) {
+      return "买卖合同：请填写约定的年化违约金率（按百分比填，18 表示年化 18%）。";
     }
   }
   const paymentIds = new Set<string>();
@@ -286,7 +356,11 @@ export function WebDecisionPackage({
       draft.capPercent.trim() || draft.interestCutoff.trim()
       || draft.debts.some((debt) => (
         debt.principal.trim() || debt.disbursedOn.trim() || debt.dueOn.trim() || debt.ratePercent.trim()
-      )),
+      ))
+      || draft.payments.length > 0
+      || draft.salesClaim.enabled
+      || draft.salesClaim.claimAmount.trim() || draft.salesClaim.overdueFrom.trim()
+      || draft.salesClaim.cutoff.trim(),
     );
     setBusy(true);
     setError("");
@@ -313,7 +387,7 @@ export function WebDecisionPackage({
         ? "未配置模型：已产出确定性结果与正式数字；配置模型后可获得深度分析。"
         : invalid
           ? "未填写案件计算参数：本次只做材料核对与争点分析，不产出正式数字；补齐参数后重新运行即可。"
-          : "分析已开始，进度会自动刷新。");
+          : `分析已开始，进度会自动刷新。（当前口径：${draft.salesClaim.enabled ? "买卖合同货款" : "民间借贷"}）`);
     } catch (caught) {
       if (isWebLoginRequired(caught)) {
         onSessionExpired();
@@ -513,6 +587,102 @@ export function WebDecisionPackage({
             {parametersLoaded ? "参数保存在本机案卷内，重新打开页面会自动回填。" : "正在读取已保存参数…"}
           </span>
         </div>
+
+        <h4 style={{ marginTop: 16 }}>案由口径</h4>
+        <p style={{ fontSize: 13, opacity: 0.85 }}>
+          民间借贷按司法保护上限（LPR 四倍）计算；买卖合同货款按下面的口径计算。
+          两套规则不混用——引擎只按你选的口径算。
+        </p>
+        <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+          <input type="checkbox" checked={draft.salesClaim.enabled}
+                 aria-label="按买卖合同货款口径计算"
+                 onChange={(event) => setDraft({
+                   ...draft,
+                   salesClaim: { ...draft.salesClaim, enabled: event.target.checked },
+                 })} />
+          <span>按买卖合同货款口径计算（勾选后不再使用借贷的 LPR 四倍口径）</span>
+        </label>
+        {draft.salesClaim.enabled ? (
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 13, marginTop: 8 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              原告主张货款（元）
+              <input type="text" inputMode="decimal" value={draft.salesClaim.claimAmount}
+                     placeholder="10000"
+                     aria-label="原告主张货款"
+                     onChange={(event) => setDraft({
+                       ...draft,
+                       salesClaim: { ...draft.salesClaim, claimAmount: event.target.value },
+                     })} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              律师确认应付货款（元，留空=与主张一致）
+              <input type="text" inputMode="decimal" value={draft.salesClaim.confirmedPrincipal}
+                     placeholder="留空表示与主张金额一致"
+                     aria-label="律师确认应付货款"
+                     onChange={(event) => setDraft({
+                       ...draft,
+                       salesClaim: { ...draft.salesClaim,
+                                     confirmedPrincipal: event.target.value },
+                     })} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              逾期起算日
+              <input type="date" value={draft.salesClaim.overdueFrom}
+                     aria-label="逾期起算日"
+                     onChange={(event) => setDraft({
+                       ...draft,
+                       salesClaim: { ...draft.salesClaim, overdueFrom: event.target.value },
+                     })} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              暂计截止日
+              <input type="date" value={draft.salesClaim.cutoff}
+                     aria-label="暂计截止日"
+                     onChange={(event) => setDraft({
+                       ...draft,
+                       salesClaim: { ...draft.salesClaim, cutoff: event.target.value },
+                     })} />
+            </label>
+            <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              逾期损失口径
+              <select value={draft.salesClaim.lossBasis} aria-label="逾期损失口径"
+                      onChange={(event) => setDraft({
+                        ...draft,
+                        salesClaim: { ...draft.salesClaim, lossBasis: event.target.value },
+                      })}>
+                {WEB_LOSS_BASES.map((item) => (
+                  <option key={item.id} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            {["LPR", "LPR_1_5"].includes(draft.salesClaim.lossBasis) ? (
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                逾期起算时一年期 LPR（%，3 表示 3%）
+                <input type="text" inputMode="decimal" value={draft.salesClaim.lprAnnualPercent}
+                       placeholder="3"
+                       aria-label="一年期LPR"
+                       onChange={(event) => setDraft({
+                         ...draft,
+                         salesClaim: { ...draft.salesClaim,
+                                       lprAnnualPercent: event.target.value },
+                       })} />
+              </label>
+            ) : null}
+            {draft.salesClaim.lossBasis === "AGREED" ? (
+              <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                约定年化违约金率（%，18 表示年化 18%）
+                <input type="text" inputMode="decimal"
+                       value={draft.salesClaim.agreedAnnualPercent} placeholder="18"
+                       aria-label="约定年化违约金率"
+                       onChange={(event) => setDraft({
+                         ...draft,
+                         salesClaim: { ...draft.salesClaim,
+                                       agreedAnnualPercent: event.target.value },
+                       })} />
+              </label>
+            ) : null}
+          </div>
+        ) : null}
 
         <h4 style={{ marginTop: 16 }}>已付款项性质确认（律师逐笔确认后才进入计算）</h4>
         <p style={{ fontSize: 13, opacity: 0.85 }}>

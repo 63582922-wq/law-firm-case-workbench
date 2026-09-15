@@ -351,6 +351,30 @@ def build_request_paragraphs(
             f"请求依法认定被告应返还的借款本金为 {engine_amounts['合计本金']} 元"
             "（以计算表逐笔核定为准），驳回原告超出该数额的本金请求。"
         )
+    # 买卖合同（货款）口径：数字键名不同，按引擎实际给出的键引用
+    if "未付货款本金" in engine_amounts:
+        if stances.get("principal") in ("不认可", "部分认可"):
+            requests.append(
+                f"请求依法认定被告应付货款本金为 {engine_amounts['未付货款本金']} 元"
+                "（以计算表逐笔核定为准），驳回原告超出该数额的货款请求。"
+            )
+        if stances.get("interest") in ("不认可", "部分认可"):
+            loss = engine_amounts.get("逾期付款损失（净额）")
+            basis = engine_amounts.get("损失口径")
+            cutoff = engine_amounts.get("暂计截止日")
+            if loss:
+                detail = []
+                if basis:
+                    detail.append(f"按{basis}")
+                if cutoff:
+                    detail.append(f"暂计至 {cutoff}")
+                suffix = f"（{'，'.join(detail)}，以计算表为准）" if detail else "（以计算表为准）"
+                requests.append(
+                    f"请求依法将原告主张的逾期付款损失核减至 {loss} 元{suffix}，"
+                    "驳回原告超出的损失请求。"
+                )
+        return requests
+
     if stances.get("interest") in ("不认可", "部分认可"):
         amount = engine_amounts.get("合计未付利息挂账")
         cutoff = engine_amounts.get("利息暂计截止日")

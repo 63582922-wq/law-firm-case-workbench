@@ -166,6 +166,55 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
         self.assertIn("冲抵后合计未付利息挂账", numbers)
         self.assertIn("1 笔付款标记为争议/排除", note)
 
+    def test_sales_claim_config_without_loan_parameters(self) -> None:
+        """买卖合同案由：不需要借贷参数，只有货款口径也要能保存并算出数字。"""
+        config = {
+            "schema": "shadow-case-config-v1",
+            "lpr_4x_monthly_rate": "",
+            "interest_cutoff": "",
+            "debts": [],
+            "payments": [],
+            "sales_claim": {
+                "kind": "GOODS_PAYMENT", "claim_amount": "10000",
+                "overdue_from": "2025-10-25", "cutoff": "2026-06-22",
+                "loss_basis": "LPR", "lpr_annual": "3",
+            },
+        }
+        saved = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
+                                 json={"case_config": config},
+                                 headers=self._headers("agent-sales-1"))
+        self.assertEqual(saved.status_code, 200)
+
+        from case_kernel.case_analysis_service import compute_engine_numbers
+
+        numbers, note = compute_engine_numbers(
+            self.store._analysis_dir(self.case_id) / "case_config.json")
+        self.assertEqual(numbers["未付货款本金"], "10000.00")
+        self.assertIn("逾期付款损失（净额）", numbers)
+        self.assertIn("÷365", note)
+        self.assertNotIn("合计本金", numbers)      # 不套用借贷口径
+
+    def test_empty_config_is_rejected(self) -> None:
+        rejected = self.client.post(
+            f"/api/local/v1/cases/{self.case_id}/analysis",
+            json={"case_config": {"schema": "shadow-case-config-v1", "debts": [],
+                                  "payments": []}},
+            headers=self._headers("agent-empty-1"))
+        self.assertEqual(rejected.status_code, 422)
+        self.assertIn("没有内容", rejected.json()["message"])
+
+    def test_invalid_sales_basis_is_rejected(self) -> None:
+        rejected = self.client.post(
+            f"/api/local/v1/cases/{self.case_id}/analysis",
+            json={"case_config": {
+                "schema": "shadow-case-config-v1", "debts": [], "payments": [],
+                "sales_claim": {"kind": "GOODS_PAYMENT", "claim_amount": "10000",
+                                "overdue_from": "2025-10-25", "cutoff": "2026-06-22",
+                                "loss_basis": "LPR_4"}}},
+            headers=self._headers("agent-sales-2"))
+        self.assertEqual(rejected.status_code, 422)
+        self.assertIn("货款口径参数不合法", rejected.json()["message"])
+
     def test_invalid_payment_is_rejected_and_not_written(self) -> None:
         config = {
             "schema": "shadow-case-config-v1",

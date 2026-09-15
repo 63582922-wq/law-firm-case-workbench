@@ -130,6 +130,29 @@ class RenderTests(unittest.TestCase):
         self.assertIn("150000.00", joined)
         self.assertIn("律师费", joined)
 
+    def test_goods_payment_case_uses_sales_numbers(self) -> None:
+        """买卖合同口径：答辩请求引用货款本金与逾期损失净额，不套用借贷数字。"""
+        selections = _selections()
+        numbers = {
+            "原告主张货款": "10000.00",
+            "律师确认应付货款": "10000.00",
+            "已确认还本合计": "4000.00",
+            "未付货款本金": "6000.00",
+            "逾期付款损失（毛额）": "120.00",
+            "已确认付息合计": "20.00",
+            "逾期付款损失（净额）": "100.00",
+            "本金与损失合计": "6100.00",
+            "逾期起算日": "2025-10-25",
+            "暂计截止日": "2026-06-22",
+            "损失口径": "按一年期 LPR",
+        }
+        requests = build_request_paragraphs(selections=selections, engine_amounts=numbers)
+        joined = " ".join(requests)
+        self.assertIn("货款本金为 6000.00 元", joined)
+        self.assertIn("逾期付款损失核减至 100.00 元", joined)
+        self.assertIn("按一年期 LPR", joined)
+        self.assertNotIn("合计本金", joined)
+
     def test_offset_request_quotes_net_numbers_when_confirmed(self) -> None:
         selections = _selections(grounds={"cap": True, "offset": True})
         numbers = {

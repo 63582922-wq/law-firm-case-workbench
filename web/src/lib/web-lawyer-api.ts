@@ -1150,6 +1150,25 @@ export type WebCaseParameterPayment = Readonly<{
 
 export const WEB_PAYMENT_CLASSES: readonly string[] = ["还本", "付息", "代付", "争议", "排除"];
 
+export const WEB_LOSS_BASES: ReadonlyArray<Readonly<{ id: string; label: string }>> = [
+  { id: "LPR", label: "按一年期 LPR" },
+  { id: "LPR_1_5", label: "按一年期 LPR 的 1.5 倍" },
+  { id: "AGREED", label: "按约定年化违约金率" },
+  { id: "NONE", label: "不主张逾期损失" },
+];
+
+/** 买卖合同（货款）口径：与民间借贷是两套规则，由律师选择。 */
+export type WebSalesClaim = Readonly<{
+  enabled: boolean;
+  claimAmount: string;
+  confirmedPrincipal: string;
+  overdueFrom: string;
+  cutoff: string;
+  lossBasis: string;
+  lprAnnualPercent: string;
+  agreedAnnualPercent: string;
+}>;
+
 export type WebCaseParameters = Readonly<{
   /** 司法保护上限：LPR 四倍对应的月利率（小数形式）。 */
   lpr4xMonthlyRate: string;
@@ -1158,6 +1177,8 @@ export type WebCaseParameters = Readonly<{
   debts: readonly WebCaseParameterDebt[];
   /** 律师逐笔确认性质的付款；未确认的付款不进入正式数字。 */
   payments: readonly WebCaseParameterPayment[];
+  /** 买卖合同货款口径（enabled=false 时按民间借贷口径） */
+  salesClaim: WebSalesClaim;
 }>;
 
 /** 表单参数 → 引擎 case_config（shadow-case-config-v1）。模型不得写入该结构。 */
@@ -1168,14 +1189,16 @@ export function toWebCaseConfigPayload(
     schema: "shadow-case-config-v1",
     lpr_4x_monthly_rate: parameters.lpr4xMonthlyRate,
     interest_cutoff: parameters.interestCutoff,
-    debts: parameters.debts.map((debt) => ({
-      debt_id: debt.debtId,
-      principal: debt.principal,
-      disbursed_on: debt.disbursedOn,
-      ...(debt.dueOn ? { due_on: debt.dueOn } : {}),
-      agreed_monthly_rate: debt.agreedMonthlyRate,
-      evidence_pending: debt.evidencePending,
-    })),
+    debts: parameters.debts
+      .filter((debt) => debt.debtId.trim() && debt.principal.trim())
+      .map((debt) => ({
+        debt_id: debt.debtId,
+        principal: debt.principal,
+        disbursed_on: debt.disbursedOn,
+        ...(debt.dueOn ? { due_on: debt.dueOn } : {}),
+        agreed_monthly_rate: debt.agreedMonthlyRate,
+        evidence_pending: debt.evidencePending,
+      })),
     payments: parameters.payments.map((payment, index) => ({
       payment_id: payment.paymentId || `P${index + 1}`,
       paid_on: payment.paidOn,
@@ -1184,6 +1207,20 @@ export function toWebCaseConfigPayload(
       ...(payment.debtId ? { debt_id: payment.debtId } : {}),
       ...(payment.memo ? { memo: payment.memo } : {}),
     })),
+    ...(parameters.salesClaim.enabled ? {
+      sales_claim: {
+        kind: "GOODS_PAYMENT",
+        claim_amount: parameters.salesClaim.claimAmount,
+        confirmed_principal: parameters.salesClaim.confirmedPrincipal,
+        overdue_from: parameters.salesClaim.overdueFrom,
+        cutoff: parameters.salesClaim.cutoff,
+        loss_basis: parameters.salesClaim.lossBasis,
+        ...(["LPR", "LPR_1_5"].includes(parameters.salesClaim.lossBasis)
+          ? { lpr_annual: parameters.salesClaim.lprAnnualPercent } : {}),
+        ...(parameters.salesClaim.lossBasis === "AGREED"
+          ? { agreed_annual: parameters.salesClaim.agreedAnnualPercent } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -1220,11 +1257,26 @@ function parseWebCaseParameters(value: unknown): WebCaseParameters {
       });
     }
   }
+  const salesRaw = record.sales_claim;
+  const sales = salesRaw !== null && salesRaw !== undefined
+    ? asRecord(salesRaw, "货款口径格式不正确")
+    : null;
+  const salesClaim: WebSalesClaim = {
+    enabled: sales !== null,
+    claimAmount: sales ? (optionalText(sales.claim_amount, 40) ?? "") : "",
+    confirmedPrincipal: sales ? (optionalText(sales.confirmed_principal, 40) ?? "") : "",
+    overdueFrom: sales ? (optionalText(sales.overdue_from, 20) ?? "") : "",
+    cutoff: sales ? (optionalText(sales.cutoff, 20) ?? "") : "",
+    lossBasis: sales ? (optionalText(sales.loss_basis, 20) ?? "LPR") : "LPR",
+    lprAnnualPercent: sales ? (optionalText(sales.lpr_annual, 20) ?? "") : "",
+    agreedAnnualPercent: sales ? (optionalText(sales.agreed_annual, 20) ?? "") : "",
+  };
   return {
     lpr4xMonthlyRate: optionalText(record.lpr_4x_monthly_rate, 40) ?? "",
     interestCutoff: optionalText(record.interest_cutoff, 20) ?? "",
     debts,
     payments,
+    salesClaim,
   };
 }
 
