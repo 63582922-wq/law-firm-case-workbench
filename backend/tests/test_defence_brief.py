@@ -93,6 +93,21 @@ class GateTests(unittest.TestCase):
         self.assertEqual(removed, [])
         self.assertIn(authority, text)
 
+    def test_model_titles_and_notes_are_scrubbed_too(self) -> None:
+        raw = {
+            "sections": [{"ground_id": "cap", "title": "应按 99999.99 元核减",
+                          "paragraphs": ["论证段落。"]}],
+            "review_notes": ["模型认为应付 88888.88 元（依据《中华人民共和国合同法》第二百条）"],
+        }
+        payload, gate = normalize_brief_output(raw, selections=_selections(), engine_amounts=ENGINE)
+        title = payload["sections"][0]["title"]
+        self.assertEqual(title, "利息按司法保护上限核减")   # 标题取确定性文案
+        self.assertNotIn("99999.99", title)
+        note = payload["review_notes"][0]
+        self.assertNotIn("88888.88", note)
+        self.assertNotIn("《中华人民共和国合同法》", note)
+        self.assertTrue(any("待核清单" in repair for repair in gate.repairs))
+
     def test_hard_redline_blocks_whole_draft(self) -> None:
         payload, gate = normalize_brief_output(
             {"sections": [{"ground_id": "cap", "paragraphs": ["我已批准提交。"]}]},
@@ -114,6 +129,26 @@ class RenderTests(unittest.TestCase):
         self.assertIn("2026-04-15", joined)
         self.assertIn("150000.00", joined)
         self.assertIn("律师费", joined)
+
+    def test_offset_request_quotes_net_numbers_when_confirmed(self) -> None:
+        selections = _selections(grounds={"cap": True, "offset": True})
+        numbers = {
+            **ENGINE,
+            "已确认付款合计": "12250.00",
+            "冲抵后合计本金": "90000.00",
+            "冲抵后合计未付利息挂账": "110000.00",
+        }
+        requests = build_request_paragraphs(selections=selections, engine_amounts=numbers)
+        joined = " ".join(requests)
+        self.assertIn("已支付的 12250.00 元", joined)
+        self.assertIn("本金 90000.00 元", joined)
+        self.assertIn("利息 110000.00 元", joined)
+
+    def test_offset_request_without_confirmed_payments_stays_principle_level(self) -> None:
+        selections = _selections(grounds={"cap": True, "offset": True})
+        requests = build_request_paragraphs(selections=selections, engine_amounts=ENGINE)
+        joined = " ".join(requests)
+        self.assertIn("经律师确认后由计算表计算净额", joined)
 
     def test_requests_pending_when_nothing_selected(self) -> None:
         empty = BriefSelections()

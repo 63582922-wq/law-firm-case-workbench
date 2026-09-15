@@ -12,6 +12,8 @@ import {
   isWebLoginRequired,
   type WebAnalysisAgentState,
   type WebCaseAnalysisState,
+  WEB_PAYMENT_CLASSES,
+  type WebCaseParameterPayment,
   type WebCaseParameters,
 } from "@/lib/web-lawyer-api";
 import styles from "./case-workbench.module.css";
@@ -28,10 +30,20 @@ type ParameterDebtDraft = {
   evidencePending: boolean;
 };
 
+type ParameterPaymentDraft = {
+  paymentId: string;
+  paidOn: string;
+  amount: string;
+  classification: string;
+  debtId: string;
+  memo: string;
+};
+
 type ParameterDraft = {
   capPercent: string;
   interestCutoff: string;
   debts: ParameterDebtDraft[];
+  payments: ParameterPaymentDraft[];
 };
 
 function emptyParameterDraft(): ParameterDraft {
@@ -40,6 +52,7 @@ function emptyParameterDraft(): ParameterDraft {
     interestCutoff: "",
     debts: [{ debtId: "L1", principal: "", disbursedOn: "", dueOn: "",
               ratePercent: "", evidencePending: false }],
+    payments: [],
   };
 }
 
@@ -67,6 +80,14 @@ function draftFromParameters(parameters: WebCaseParameters): ParameterDraft {
       ratePercent: percentFromDecimal(debt.agreedMonthlyRate),
       evidencePending: debt.evidencePending,
     })),
+    payments: parameters.payments.map((payment) => ({
+      paymentId: payment.paymentId,
+      paidOn: payment.paidOn,
+      amount: payment.amount,
+      classification: payment.classification,
+      debtId: payment.debtId,
+      memo: payment.memo,
+    })),
   };
 }
 
@@ -81,6 +102,14 @@ function parametersFromDraft(draft: ParameterDraft): WebCaseParameters {
       dueOn: debt.dueOn.trim(),
       agreedMonthlyRate: decimalFromPercent(debt.ratePercent),
       evidencePending: debt.evidencePending,
+    })),
+    payments: draft.payments.map((payment, index) => ({
+      paymentId: payment.paymentId.trim() || `P${index + 1}`,
+      paidOn: payment.paidOn.trim(),
+      amount: payment.amount.trim(),
+      classification: payment.classification,
+      debtId: payment.debtId.trim(),
+      memo: payment.memo.trim(),
     })),
   };
 }
@@ -113,6 +142,21 @@ function validateParameterDraft(draft: ParameterDraft): string {
     }
     if (!_PERCENT_INPUT.test(debt.ratePercent.trim()) || Number(debt.ratePercent) <= 0) {
       return `${id}：约定月利率按百分比填，例如月利率 1.5% 填 1.5。`;
+    }
+  }
+  const paymentIds = new Set<string>();
+  for (const [index, payment] of draft.payments.entries()) {
+    const label = `第 ${index + 1} 笔付款`;
+    const paymentId = payment.paymentId.trim();
+    if (!paymentId) return `${label}：请填付款编号，例如 P1。`;
+    if (paymentIds.has(paymentId)) return `付款编号重复：${paymentId}`;
+    paymentIds.add(paymentId);
+    if (!_DATE_INPUT.test(payment.paidOn.trim())) return `${label}：付款日请填 YYYY-MM-DD。`;
+    if (!_MONEY_INPUT.test(payment.amount.trim()) || Number(payment.amount) <= 0) {
+      return `${label}：金额请填数字（元）。`;
+    }
+    if (!WEB_PAYMENT_CLASSES.includes(payment.classification)) {
+      return `${label}：性质必须为 ${WEB_PAYMENT_CLASSES.join(" / ")}。`;
     }
   }
   return "";
@@ -456,12 +500,98 @@ export function WebDecisionPackage({
               ratePercent: draft.debts[0]?.ratePercent ?? "", evidencePending: false,
             }],
           })}>新增一笔借款</button>
+          <button type="button" disabled={busy} onClick={() => setDraft({
+            ...draft,
+            payments: [...draft.payments, {
+              paymentId: `P${draft.payments.length + 1}`, paidOn: "", amount: "",
+              classification: "付息", debtId: draft.debts[0]?.debtId ?? "", memo: "",
+            }],
+          })}>新增一笔已付款项</button>
           <button type="button" disabled={busy || !parametersLoaded}
                   onClick={() => void saveParameters()}>仅保存参数</button>
           <span style={{ fontSize: 12, opacity: 0.7 }}>
             {parametersLoaded ? "参数保存在本机案卷内，重新打开页面会自动回填。" : "正在读取已保存参数…"}
           </span>
         </div>
+
+        <h4 style={{ marginTop: 16 }}>已付款项性质确认（律师逐笔确认后才进入计算）</h4>
+        <p style={{ fontSize: 13, opacity: 0.85 }}>
+          只有「还本 / 付息 / 代付」进入确定性计算，按法定顺序先冲利息、后冲本金；
+          「争议 / 排除」仅登记，不进入正式数字。未确认性质的付款一律不进计算。
+        </p>
+        <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left" }}>编号</th>
+              <th style={{ textAlign: "left" }}>付款日</th>
+              <th style={{ textAlign: "left" }}>金额（元）</th>
+              <th style={{ textAlign: "left" }}>性质</th>
+              <th style={{ textAlign: "left" }}>归属借款</th>
+              <th style={{ textAlign: "left" }}>备注</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {draft.payments.map((payment, index) => {
+              const update = (patch: Partial<WebCaseParameterPayment>) => {
+                const payments = draft.payments.map((item, itemIndex) =>
+                  itemIndex === index
+                    ? {
+                        paymentId: patch.paymentId ?? item.paymentId,
+                        paidOn: patch.paidOn ?? item.paidOn,
+                        amount: patch.amount ?? item.amount,
+                        classification: patch.classification ?? item.classification,
+                        debtId: patch.debtId ?? item.debtId,
+                        memo: patch.memo ?? item.memo,
+                      }
+                    : item);
+                setDraft({ ...draft, payments });
+              };
+              return (
+                <tr key={`payment-${index}`}>
+                  <td><input type="text" style={{ width: 60 }} value={payment.paymentId}
+                             aria-label={`第 ${index + 1} 笔付款编号`}
+                             onChange={(event) => update({ paymentId: event.target.value })} /></td>
+                  <td><input type="date" value={payment.paidOn}
+                             aria-label={`第 ${index + 1} 笔付款日`}
+                             onChange={(event) => update({ paidOn: event.target.value })} /></td>
+                  <td><input type="text" inputMode="decimal" style={{ width: 100 }}
+                             value={payment.amount} placeholder="2250.00"
+                             aria-label={`第 ${index + 1} 笔付款金额`}
+                             onChange={(event) => update({ amount: event.target.value })} /></td>
+                  <td>
+                    <select value={payment.classification}
+                            aria-label={`第 ${index + 1} 笔付款性质`}
+                            onChange={(event) => update({ classification: event.target.value })}>
+                      {WEB_PAYMENT_CLASSES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select value={payment.debtId}
+                            aria-label={`第 ${index + 1} 笔付款归属借款`}
+                            onChange={(event) => update({ debtId: event.target.value })}>
+                      <option value="">（不指定）</option>
+                      {draft.debts.map((debt) => (
+                        <option key={debt.debtId} value={debt.debtId}>{debt.debtId}</option>
+                      ))}
+                    </select>
+                  </td>
+                  <td><input type="text" style={{ width: 140 }} value={payment.memo}
+                             aria-label={`第 ${index + 1} 笔付款备注`}
+                             onChange={(event) => update({ memo: event.target.value })} /></td>
+                  <td>
+                    <button type="button" onClick={() => setDraft({
+                      ...draft,
+                      payments: draft.payments.filter((_, itemIndex) => itemIndex !== index),
+                    })}>删除</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </section>
 
       {agent?.status === "RUNNING" ? (

@@ -41,6 +41,12 @@ from case_kernel.shadow_engine import (
     canonical_amount,
     run_engine,
 )
+from case_kernel.case_payments import (
+    PaymentError,
+    load_payments,
+    payment_rows,
+    payment_summary,
+)
 from case_kernel.shadow_mode import (
     RequestLedger,
     ShadowBlocked,
@@ -115,24 +121,38 @@ def _emit(request: AnalysisRequest, stage: str, percent: int) -> None:
 def compute_engine_numbers(
     case_config_path: Path | None,
 ) -> tuple[dict[str, str], str]:
-    """按已确认参数计算毛额（不含未确认的付款冲抵）。
+    """按已确认参数计算正式数字。
+
+    - 无付款记录时给出**毛额**（不含冲抵）；
+    - 律师确认了付款性质时，追加**冲抵后净额**（同一引擎、同一冻结规则）；
+    - 争议/排除的付款永不进入计算，只在说明里计数。
 
     返回 (数字字典, 口径说明)。缺参数时返回空字典与原因说明。
     """
     if case_config_path is None or not Path(case_config_path).is_file():
         return {}, "未提供案件计算参数（case_config），正式数字待补充参数后计算。"
     try:
+        raw_config = json.loads(Path(case_config_path).read_text(encoding="utf-8"))
         cfg = load_case_config(case_config_path)
     except Exception as error:  # noqa: BLE001 - 参数问题不阻断分析
         return {}, f"案件计算参数无法解析：{type(error).__name__}；正式数字待修正参数后计算。"
 
+    payment_problem = ""
+    try:
+        payments = load_payments(raw_config if isinstance(raw_config, dict) else None)
+    except PaymentError as error:
+        # 付款记录坏了不影响毛额（毛额只由债务参数决定），但绝不静默忽略：
+        # 报告里明确写出问题，并且不给任何冲抵后净额。
+        payments = []
+        payment_problem = f"付款记录不合法（{error}），本次未计算冲抵后净额。"
+
     debts: dict[str, ShadowDebt] = cfg["debts"]
     active = {k: v for k, v in debts.items() if not v.evidence_pending}
-    pending = [k for k, v in debts.items() if v.evidence_pending]
+    pending = [k for k in debts.keys() if k not in active]
     if not active:
         return {}, "全部债务均缺少出借凭证（evidence_pending），正式数字暂不可计算。"
 
-    rows = [
+    borrow_rows = [
         ShadowRow(
             row_id=f"DISBURSE-{debt_id}",
             occurred_on=debt.disbursed_on,
@@ -148,31 +168,59 @@ def compute_engine_numbers(
     ]
     config = ShadowEngineConfig(final_date=cfg["final_date"], new_cap=cfg["new_cap"])
     try:
-        result = run_engine(rows, active, config)
+        gross = run_engine(borrow_rows, active, config)
     except ShadowEngineBlocked as error:
         return {}, f"参数不完整，正式数字待补充：{error}"
 
+    numbers = _loan_numbers(gross, prefix="")
+    numbers["利息暂计截止日"] = str(cfg["final_date"])
+
+    summary = payment_summary(payments)
+    entered = [item for item in payments if item.enters_calculation]
+    note = (
+        "以上数字由确定性引擎按律师确认的债务参数与司法保护上限计算至截止日，"
+        "毛额部分不含付款冲抵；模型未参与任何计算。"
+    )
+    if payment_problem:
+        note += f" {payment_problem}"
+    elif not entered:
+        note += "付款冲抵后的净额须待律师确认各笔付款性质后另行计算。"
+    else:
+        try:
+            net = run_engine(borrow_rows + payment_rows(payments), active, config)
+        except ShadowEngineBlocked as error:
+            note += f" 付款冲抵无法计算（{error}），净额待修正付款参数后计算。"
+        else:
+            numbers.update(_loan_numbers(net, prefix="冲抵后"))
+            numbers["已确认付款合计"] = summary["confirmed_total"]
+            numbers["已确认付款笔数"] = str(summary["confirmed_count"])
+            note += (
+                f" 已计入律师确认的 {summary['confirmed_count']} 笔付款（合计 "
+                f"{summary['confirmed_total']} 元），按法定顺序先冲利息、后冲本金，"
+                "冲抵后净额见「冲抵后」各项；毛额各项同时保留以便逐项核对。"
+            )
+    if summary["pending_count"]:
+        note += (f" 另有 {summary['pending_count']} 笔付款标记为争议/排除，未进入计算。")
+    if pending:
+        note += f" 债务 {', '.join(sorted(pending))} 因缺少出借凭证已挂起，未计入合计。"
+    return numbers, note
+
+
+def _loan_numbers(result, *, prefix: str) -> dict[str, str]:
+    """把引擎结果整理成报告用数字；``prefix`` 非空时给出冲抵后口径。"""
     numbers: dict[str, str] = {}
     total_principal = Decimal("0")
     total_interest = Decimal("0")
     for debt_id in sorted(result.loans):
         loan = result.loan(debt_id)
-        numbers[f"{debt_id} 未偿本金"] = canonical_amount(loan.principal)
-        numbers[f"{debt_id} 未付利息挂账"] = canonical_amount(loan.interest_arrears)
+        numbers[f"{debt_id} {prefix}未偿本金".replace("  ", " ")] = canonical_amount(loan.principal)
+        numbers[f"{debt_id} {prefix}未付利息挂账".replace("  ", " ")] = canonical_amount(
+            loan.interest_arrears)
         total_principal += loan.principal
         total_interest += loan.interest_arrears
-    numbers["合计本金"] = canonical_amount(total_principal)
-    numbers["合计未付利息挂账"] = canonical_amount(total_interest)
-    numbers["利息暂计截止日"] = str(cfg["final_date"])
-
-    note = (
-        "以上数字由确定性引擎按律师确认的债务参数与司法保护上限计算至截止日，"
-        "为不含付款冲抵的毛额；模型未参与任何计算。"
-        "付款冲抵后的净额须待律师确认各笔付款性质后另行计算。"
-    )
-    if pending:
-        note += f" 债务 {', '.join(sorted(pending))} 因缺少出借凭证已挂起，未计入合计。"
-    return numbers, note
+    numbers[f"{prefix}合计本金".replace("  ", " ")] = canonical_amount(total_principal)
+    numbers[f"{prefix}合计未付利息挂账".replace("  ", " ")] = canonical_amount(total_interest)
+    return numbers
 
 
 def run_analysis(request: AnalysisRequest) -> AnalysisResult:

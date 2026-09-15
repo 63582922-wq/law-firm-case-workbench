@@ -308,9 +308,11 @@ def normalize_brief_output(
             paragraphs.append(text)
         if not paragraphs:
             continue
+        # 小节标题一律用确定性标题：模型写的标题也可能带数字或法条，
+        # 标题不经过下面的段落清洗，所以不允许模型决定标题文字。
         sections.append({
             "ground_id": ground_id,
-            "title": str(item.get("title") or titles.get(ground_id, ground_id))[:80],
+            "title": titles.get(ground_id, ground_id),
             "paragraphs": paragraphs,
         })
 
@@ -318,8 +320,17 @@ def normalize_brief_output(
         if ground_id not in seen:
             gate.review_items.append(f"{titles.get(ground_id, ground_id)}：模型未产出该节文字，需律师补写")
 
-    notes = [str(note).strip()[:200] for note in (payload.get("review_notes") or [])
-             if str(note).strip()]
+    notes: list[str] = []
+    for raw_note in (payload.get("review_notes") or []):
+        note = str(raw_note).strip()
+        if not note:
+            continue
+        note, note_numbers = scrub_figures(note, allowed)
+        note, note_citations = scrub_citations(note, selections.authorities)
+        if note_numbers or note_citations:
+            gate.repairs.append("待核清单中的模型数字/未登记法条已改写："
+                                + ", ".join([*note_numbers, *note_citations])[:120])
+        notes.append(note[:200])
     gate.review_items.extend(notes)
     if gate.review_items and gate.level == "PASS":
         gate.level = "MARK_FOR_REVIEW"
@@ -352,10 +363,24 @@ def build_request_paragraphs(
         else:
             requests.append("请求依法核减原告主张的利息（数额以计算表为准）。")
     if selections.grounds.get("offset"):
-        requests.append(
-            "请求将被告已支付款项在应付本金、利息中依法冲抵"
-            "（每笔付款性质经律师确认后由计算表计算净额）。"
-        )
+        paid_total = engine_amounts.get("已确认付款合计")
+        net_principal = engine_amounts.get("冲抵后合计本金")
+        net_interest = engine_amounts.get("冲抵后合计未付利息挂账")
+        if paid_total and (net_principal or net_interest):
+            parts = []
+            if net_principal:
+                parts.append(f"本金 {net_principal} 元")
+            if net_interest:
+                parts.append(f"利息 {net_interest} 元")
+            requests.append(
+                f"请求将被告已支付的 {paid_total} 元在应付利息、本金中依法冲抵，"
+                f"冲抵后被告应付{'、'.join(parts)}（以计算表为准）。"
+            )
+        else:
+            requests.append(
+                "请求将被告已支付款项在应付利息、本金中依法冲抵"
+                "（每笔付款性质经律师确认后由计算表计算净额）。"
+            )
     if selections.grounds.get("lawyer_fee") or stances.get("lawyer_fee") == "不认可":
         requests.append("请求驳回原告要求被告承担律师费的请求。")
     if stances.get("costs") == "不认可":

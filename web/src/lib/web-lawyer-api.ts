@@ -1135,12 +1135,26 @@ export type WebCaseParameterDebt = Readonly<{
   evidencePending: boolean;
 }>;
 
+export type WebCaseParameterPayment = Readonly<{
+  paymentId: string;
+  paidOn: string;
+  amount: string;
+  /** 还本 / 付息 / 代付 进入计算；争议 / 排除 只登记不计算。 */
+  classification: string;
+  debtId: string;
+  memo: string;
+}>;
+
+export const WEB_PAYMENT_CLASSES: readonly string[] = ["还本", "付息", "代付", "争议", "排除"];
+
 export type WebCaseParameters = Readonly<{
   /** 司法保护上限：LPR 四倍对应的月利率（小数形式）。 */
   lpr4xMonthlyRate: string;
   /** 利息暂计截止日（YYYY-MM-DD）。 */
   interestCutoff: string;
   debts: readonly WebCaseParameterDebt[];
+  /** 律师逐笔确认性质的付款；未确认的付款不进入正式数字。 */
+  payments: readonly WebCaseParameterPayment[];
 }>;
 
 /** 表单参数 → 引擎 case_config（shadow-case-config-v1）。模型不得写入该结构。 */
@@ -1158,6 +1172,14 @@ export function toWebCaseConfigPayload(
       ...(debt.dueOn ? { due_on: debt.dueOn } : {}),
       agreed_monthly_rate: debt.agreedMonthlyRate,
       evidence_pending: debt.evidencePending,
+    })),
+    payments: parameters.payments.map((payment, index) => ({
+      payment_id: payment.paymentId || `P${index + 1}`,
+      paid_on: payment.paidOn,
+      amount: payment.amount,
+      classification: payment.classification,
+      ...(payment.debtId ? { debt_id: payment.debtId } : {}),
+      ...(payment.memo ? { memo: payment.memo } : {}),
     })),
   };
 }
@@ -1179,10 +1201,27 @@ function parseWebCaseParameters(value: unknown): WebCaseParameters {
       });
     }
   }
+  const paymentsRaw = record.payments;
+  const payments: WebCaseParameterPayment[] = [];
+  if (Array.isArray(paymentsRaw)) {
+    for (const item of paymentsRaw) {
+      const row = asRecord(item, "付款参数格式不正确");
+      const classification = optionalText(row.classification, 20) ?? "";
+      payments.push({
+        paymentId: optionalText(row.payment_id, 40) ?? "",
+        paidOn: optionalText(row.paid_on, 20) ?? "",
+        amount: optionalText(row.amount, 40) ?? "",
+        classification: WEB_PAYMENT_CLASSES.includes(classification) ? classification : "争议",
+        debtId: optionalText(row.debt_id, 40) ?? "",
+        memo: optionalText(row.memo, 200) ?? "",
+      });
+    }
+  }
   return {
     lpr4xMonthlyRate: optionalText(record.lpr_4x_monthly_rate, 40) ?? "",
     interestCutoff: optionalText(record.interest_cutoff, 20) ?? "",
     debts,
+    payments,
   };
 }
 

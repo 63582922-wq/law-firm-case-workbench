@@ -691,6 +691,7 @@ class LocalWebStore:
         参数变化会使既有决策包失效（正式数字随之改变），因此旧报告按 STALE 处理，
         必须重新运行分析后才能再次阅读或导出。
         """
+        from case_kernel.case_payments import PaymentError, load_payments
         from case_kernel.shadow_mode import ShadowBlocked, load_case_config
 
         run_dir = self._analysis_dir(case_id)
@@ -707,6 +708,11 @@ class LocalWebStore:
         except (KeyError, ValueError, TypeError) as error:
             probe.unlink(missing_ok=True)
             raise LocalWebBlocked(f"案件计算参数字段缺失或格式错误：{error}") from None
+        try:  # 付款性质必须逐笔合法，绝不静默丢弃律师填写的付款
+            load_payments(case_config)
+        except PaymentError as error:
+            probe.unlink(missing_ok=True)
+            raise LocalWebBlocked(f"付款记录不合法：{error}") from None
         probe.replace(target)
         os.chmod(target, 0o600)
         if previous != payload:

@@ -131,6 +131,58 @@ class LocalWebAgentAnalysisTest(unittest.TestCase):
         self.assertEqual(numbers["合计本金"], "100000.00")
         self.assertIn("L2", note)
 
+    def test_payment_confirmations_round_trip_and_feed_the_engine(self) -> None:
+        """律师确认的付款性质随参数保存，并直接进入引擎净额计算。"""
+        config = {
+            "schema": "shadow-case-config-v1",
+            "lpr_4x_monthly_rate": "0.01",
+            "interest_cutoff": "2025-06-14",
+            "debts": [{"debt_id": "L1", "principal": "100000.00",
+                       "disbursed_on": "2019-10-19", "agreed_monthly_rate": "0.015",
+                       "due_on": "2019-12-19"}],
+            "payments": [
+                {"payment_id": "P1", "paid_on": "2020-01-20", "amount": "2250.00",
+                 "classification": "付息", "debt_id": "L1"},
+                {"payment_id": "P2", "paid_on": "2020-02-20", "amount": "2250.00",
+                 "classification": "还本", "debt_id": "L1"},
+                {"payment_id": "P3", "paid_on": "2020-03-20", "amount": "2250.00",
+                 "classification": "争议", "debt_id": "L1"},
+            ],
+        }
+        saved = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
+                                 json={"case_config": config},
+                                 headers=self._headers("agent-pay-1"))
+        self.assertEqual(saved.status_code, 200)
+        stored = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/analysis/config").json()["case_config"]
+        self.assertEqual(len(stored["payments"]), 3)
+
+        from case_kernel.case_analysis_service import compute_engine_numbers
+
+        numbers, note = compute_engine_numbers(
+            self.store._analysis_dir(self.case_id) / "case_config.json")
+        self.assertEqual(numbers["已确认付款合计"], "4500.00")   # 争议那笔不进
+        self.assertEqual(numbers["已确认付款笔数"], "2")
+        self.assertIn("冲抵后合计未付利息挂账", numbers)
+        self.assertIn("1 笔付款标记为争议/排除", note)
+
+    def test_invalid_payment_is_rejected_and_not_written(self) -> None:
+        config = {
+            "schema": "shadow-case-config-v1",
+            "lpr_4x_monthly_rate": "0.01",
+            "interest_cutoff": "2025-06-14",
+            "debts": [{"debt_id": "L1", "principal": "100000.00",
+                       "disbursed_on": "2019-10-19", "agreed_monthly_rate": "0.015"}],
+            "payments": [{"payment_id": "P1", "paid_on": "2020-01-20", "amount": "2250.00",
+                          "classification": "还款"}],
+        }
+        rejected = self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis",
+                                    json={"case_config": config},
+                                    headers=self._headers("agent-pay-2"))
+        self.assertEqual(rejected.status_code, 422)
+        self.assertIn("付款记录不合法", rejected.json()["message"])
+        self.assertIsNone(self.store.read_case_config(self.case_id))
+
     def test_parameter_change_invalidates_previous_decision_package(self) -> None:
         """参数是正式数字的来源：改动后旧决策包必须失效，不能继续阅读或导出。"""
         run_dir = self.store._analysis_dir(self.case_id)
