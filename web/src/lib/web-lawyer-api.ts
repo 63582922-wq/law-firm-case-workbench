@@ -3551,6 +3551,129 @@ export async function uploadWebCommonMaterial(
   return parseCommonMaterialAdmissionReceipt(record.receipt ?? record);
 }
 
+/** 分片大小：4 MiB。留足余量，任何反向代理的超时窗口内都能传完一片。 */
+export const WEB_UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024;
+
+async function readUploadOffset(caseId: string, uploadId: string): Promise<number> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const normalizedUploadId = normalizeOpaqueId(uploadId, "材料接收编号");
+  const response = await webApiFetch(
+    `/api/v1/cases/${normalizedCaseId}/material-uploads/${normalizedUploadId}/offset`, {});
+  const payload = asRecord(await readJsonResponse(response, "读取上传进度"), "上传进度格式不正确");
+  const offset = payload.offset;
+  if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) {
+    throw protocolError("上传进度格式不正确");
+  }
+  return offset;
+}
+
+/**
+ * 分片上传材料内容（PDF / 图片）。
+ *
+ * 为什么不用整份 PUT：实测 27 MB / 43 页的证据 PDF 经 `next dev` 的 rewrite 代理
+ * 会在 30 秒被截断（HTTP 500），而直连 API 只需 0.15 秒。分片让每片都在超时窗口内
+ * 完成；中断后从服务端报告的偏移续传，偏移不符会被服务端拒绝，不会拼接错位数据。
+ */
+export async function uploadWebMaterialInChunks(
+  caseId: string,
+  uploadId: string,
+  file: File,
+  chunkBytes: number = WEB_UPLOAD_CHUNK_BYTES,
+): Promise<WebVerifiedUpload> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const normalizedUploadId = normalizeOpaqueId(uploadId, "材料接收编号");
+  let offset = 0;
+  try {
+    offset = await readUploadOffset(caseId, uploadId);
+  } catch {
+    offset = 0;   // 读不到进度就从 0 开始：服务端会以偏移校验兜底
+  }
+  let retried = false;
+  let adopted = false;
+  const size = file.size;
+  while (offset < size) {
+    const slice = file.slice(offset, Math.min(offset + chunkBytes, size));
+    const body = await slice.arrayBuffer();
+    try {
+      const response = await webApiFetch(
+        `/api/v1/cases/${normalizedCaseId}/material-uploads/${normalizedUploadId}/chunks`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": webMaterialContentType(file), "X-Chunk-Offset": String(offset) },
+          body,
+        },
+      );
+      const payload = asRecord(await readJsonResponse(response, "上传材料分片"), "分片回执格式不正确");
+      const next = payload.offset;
+      if (typeof next !== "number" || next <= offset) throw protocolError("分片回执缺少有效偏移");
+      offset = next;
+    } catch (error) {
+      if (isWebLoginRequired(error)) throw error;
+      // 一片失败：先问服务端到底收到了多少，再决定从哪里继续；不盲目重发整份
+      const serverOffset = await readUploadOffset(caseId, uploadId).catch(() => offset);
+      if (serverOffset > offset) {
+        retried = true;
+        offset = serverOffset;
+        continue;
+      }
+      throw error;
+    }
+  }
+  const finalized = await webApiFetch(
+    `/api/v1/cases/${normalizedCaseId}/material-uploads/${normalizedUploadId}/finalize`,
+    { method: "POST", headers: { "Content-Type": "application/json" } },
+  );
+  const payload = asRecord(await readJsonResponse(finalized, "确认材料接收"), "材料接收回执格式不正确");
+  const record = asRecord(payload.receipt ?? payload, "材料接收回执格式不正确");
+  return { receipt: parseMaterialReceipt(record), retried, adopted };
+}
+
+export type WebVerifiedUpload = Readonly<{
+  receipt: WebMaterialReceipt;
+  /** 传输中断后核验服务端未收到内容，本次为重传 */
+  retried: boolean;
+  /** 传输中断但服务端已收到，采用核验到的回执 */
+  adopted: boolean;
+}>;
+
+/**
+ * 上传材料内容，并在传输中断时**先核验服务端状态再决定**：
+ * - 服务端已完成 → 采用核验到的回执，不重传；
+ * - 服务端仍在等待内容（PROCESSING 且无回执）→ 安全重传一次（内容幂等）；
+ * - 核验也失败 → 抛出原错误，交给页面的「核验接收状态」人工路径。
+ *
+ * 这样既不盲目重传（可能重复入卷），也不把"其实已经收到"的材料报成失败。
+ */
+export async function uploadWebMaterialPdfVerified(
+  caseId: string,
+  uploadId: string,
+  file: File,
+): Promise<WebVerifiedUpload> {
+  try {
+    return { receipt: await uploadWebMaterialPdf(caseId, uploadId, file), retried: false, adopted: false };
+  } catch (error) {
+    if (isWebLoginRequired(error)) throw error;
+    let status: WebMaterialUploadStatus | null = null;
+    try {
+      status = await readWebMaterialUploadStatus(caseId, uploadId);
+    } catch {
+      status = null;
+    }
+    if (status && status.kind === "PDF" && status.receipt && status.state === "COMPLETED") {
+      return { receipt: status.receipt as WebMaterialReceipt, retried: false, adopted: true };
+    }
+    if (status && status.state === "PROCESSING" && status.receipt === null) {
+      try {
+        const receipt = await uploadWebMaterialPdf(caseId, uploadId, file);
+        return { receipt, retried: true, adopted: false };
+      } catch {
+        // 重传仍失败：保持原错误，交由人工核验
+      }
+    }
+    throw error;
+  }
+}
+
 export async function readWebMaterialUploadStatus(caseId: string, uploadId: string): Promise<WebMaterialUploadStatus> {
   const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
   const normalizedUploadId = normalizeOpaqueId(uploadId, "材料接收编号");

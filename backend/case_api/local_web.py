@@ -361,6 +361,143 @@ class LocalWebStore:
             db.execute("INSERT INTO commands(command_name,idempotency_key,payload_hash,object_id) VALUES('CREATE_CASE',?,?,?)", (key, payload, case_id))
             return self._case_projection(db.execute("SELECT * FROM cases WHERE case_id=?", (case_id,)).fetchone())
 
+    # ------------------------------------------------ 分片上传（大文件必需）
+
+    def _staging_path(self, material_id: str) -> Path:
+        return self.materials / f".{material_id}.upload"
+
+    def staged_size(self, case_id: str, material_id: str) -> int:
+        """已接收的分片字节数：客户端据此续传，服务端据此校验偏移。"""
+        material = self._material(case_id, material_id)
+        if str(material["state"]) == "COMPLETED":
+            return int(material["byte_size"] or 0)
+        staging = self._staging_path(material_id)
+        return staging.stat().st_size if staging.is_file() else 0
+
+    def append_chunk(self, case_id: str, material_id: str, offset: int, data: bytes) -> int:
+        """把一片内容追加到暂存文件；偏移不符即拒绝，绝不拼接错位数据。"""
+        material = self._material(case_id, material_id)
+        if str(material["state"]) == "COMPLETED":
+            raise LocalWebBlocked("该材料已接收完成，无需再传分片。")
+        if not data:
+            raise LocalWebBlocked("分片内容为空。")
+        media_type = str(material["media_type"])
+        limit = MAX_IMAGE_BYTES if media_type in IMAGE_MEDIA_TYPES else MAX_PDF_BYTES
+        staging = self._staging_path(material_id)
+        current = staging.stat().st_size if staging.is_file() else 0
+        if offset != current:
+            raise LocalWebConflict(
+                f"分片偏移不符：服务端已有 {current} 字节，本次从 {offset} 开始。")
+        if current + len(data) > limit:
+            raise LocalWebBlocked("材料超过本机模式的单份大小限制。")
+        with staging.open("ab") as output:
+            output.write(data)
+        os.chmod(staging, 0o600)
+        return current + len(data)
+
+    def finalize_upload(self, case_id: str, material_id: str) -> dict[str, object]:
+        """收尾：校验整份文件、入库并出回执（与整份 PUT 同一套校验）。"""
+        material = self._material(case_id, material_id)
+        media_type = str(material["media_type"])
+        staging = self._staging_path(material_id)
+        if str(material["state"]) == "COMPLETED":
+            with self._connect() as db:
+                return self._receipt(db, case_id, material_id)
+        if not staging.is_file():
+            raise LocalWebBlocked("尚未收到任何内容，不能收尾。")
+        payload = staging.read_bytes()
+        if media_type == "application/pdf":
+            return self._store_pdf(case_id, material_id, payload)
+        if media_type in IMAGE_MEDIA_TYPES:
+            return self._store_image(case_id, material_id, payload)
+        raise LocalWebBlocked("该材料类型不支持分片上传。")
+
+    def _store_pdf(self, case_id: str, material_id: str, payload: bytes) -> dict[str, object]:
+        staging = self._staging_path(material_id)
+        try:
+            if len(payload) == 0:
+                raise LocalWebBlocked("不能接收空文件。")
+            if len(payload) > MAX_PDF_BYTES:
+                raise LocalWebBlocked("PDF 超过本机模式的 256 MiB 限制。")
+            staging.write_bytes(payload)
+            return self._finish_pdf(case_id, material_id, staging)
+        finally:
+            staging.unlink(missing_ok=True)
+
+    def _store_image(self, case_id: str, material_id: str, payload: bytes) -> dict[str, object]:
+        suffix = IMAGE_MEDIA_TYPES[str(self._material(case_id, material_id)["media_type"])]
+        staging = self._staging_path(material_id)
+        try:
+            if len(payload) == 0:
+                raise LocalWebBlocked("不能接收空文件。")
+            if len(payload) > MAX_IMAGE_BYTES:
+                raise LocalWebBlocked("图片超过本机模式的 64 MiB 限制。")
+            staging.write_bytes(payload)
+            with Image.open(staging) as probe:
+                probe.verify()
+            with Image.open(staging) as probe:
+                width, height = probe.size
+            if width < 1 or height < 1 or width > 20_000 or height > 20_000:
+                raise LocalWebBlocked("图片尺寸不符合本机模式限制。")
+            content_hash = sha256(payload).hexdigest()
+            storage_name = f"{content_hash}{suffix}"
+            stored = self.materials / storage_name
+            if stored.exists() and stored.is_symlink():
+                raise LocalWebBlocked("本机材料对象不能是符号链接。")
+            if not stored.exists():
+                staging.replace(stored)
+                os.chmod(stored, 0o600)
+            with self._lock, self._connect() as db:
+                row = db.execute("SELECT state FROM materials WHERE material_id=? AND case_id=?",
+                                 (material_id, case_id)).fetchone()
+                if row is None:
+                    raise LocalWebNotFound("材料接收位不存在。")
+                if str(row["state"]) == "COMPLETED":
+                    return self._receipt(db, case_id, material_id)
+                db.execute(
+                    "UPDATE materials SET sha256=?, byte_size=?, page_count=1, state='COMPLETED', storage_name=?, completed_at=? WHERE material_id=?",
+                    (content_hash, len(payload), storage_name, _iso(_now()), material_id))
+                db.execute("INSERT INTO pages(page_id,material_id,page_number) VALUES(?,?,1)",
+                           (str(uuid4()), material_id))
+                db.execute("UPDATE cases SET version=version+1, updated_at=? WHERE case_id=?",
+                           (_iso(_now()), case_id))
+                return self._receipt(db, case_id, material_id)
+        finally:
+            staging.unlink(missing_ok=True)
+
+    def _finish_pdf(self, case_id: str, material_id: str, staging: Path) -> dict[str, object]:
+        size = staging.stat().st_size
+        try:
+            page_count, _backend = pdf_page_count(staging)
+        except PdfUnreadable as error:
+            raise LocalWebBlocked(f"PDF 无法解析：{error}") from None
+        if page_count < 1 or page_count > 100_000:
+            raise LocalWebBlocked("PDF 页数不符合本机模式限制。")
+        content_hash = sha256(staging.read_bytes()).hexdigest()
+        storage_name = f"{content_hash}.pdf"
+        stored = self.materials / storage_name
+        if stored.exists() and stored.is_symlink():
+            raise LocalWebBlocked("本机材料对象不能是符号链接。")
+        if not stored.exists():
+            staging.replace(stored)
+            os.chmod(stored, 0o600)
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT state FROM materials WHERE material_id=? AND case_id=?",
+                             (material_id, case_id)).fetchone()
+            if row is None:
+                raise LocalWebNotFound("材料接收位不存在。")
+            if str(row["state"]) == "COMPLETED":
+                return self._receipt(db, case_id, material_id)
+            db.execute(
+                "UPDATE materials SET sha256=?, byte_size=?, page_count=?, state='COMPLETED', storage_name=?, completed_at=? WHERE material_id=?",
+                (content_hash, size, page_count, storage_name, _iso(_now()), material_id))
+            for number in range(1, page_count + 1):
+                db.execute("INSERT INTO pages(page_id,material_id,page_number) VALUES(?,?,?)",
+                           (str(uuid4()), material_id, number))
+            db.execute("UPDATE cases SET version=version+1, updated_at=? WHERE case_id=?",
+                       (_iso(_now()), case_id))
+            return self._receipt(db, case_id, material_id)
+
     def create_upload(self, case_id: str, name: str, expected_version: int, key: str, kind: str) -> dict[str, object]:
         case = self._case(case_id)
         if case["version"] != expected_version:
@@ -1663,6 +1800,33 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
     async def archive_status(case_id: UUID, archive_id: UUID, request: Request, response: Response):
         ensure_session(request, response)
         return {"status": store.status(str(case_id), str(archive_id))}
+
+    @app.get("/api/local/v1/cases/{case_id}/material-uploads/{upload_id}/offset")
+    async def upload_offset(case_id: UUID, upload_id: UUID, request: Request, response: Response):
+        ensure_session(request, response)
+        return {"upload_id": str(upload_id), "offset": store.staged_size(str(case_id), str(upload_id))}
+
+    @app.put("/api/local/v1/cases/{case_id}/material-uploads/{upload_id}/chunks")
+    async def accept_chunk(case_id: UUID, upload_id: UUID, request: Request,
+                           x_lawcase_csrf: str | None = Header(default=None),
+                           x_chunk_offset: str | None = Header(default=None)):
+        """分片追加：大文件经反向代理也不会被 30 秒超时截断。"""
+        ensure_write(request, x_lawcase_csrf)
+        try:
+            offset = int(x_chunk_offset or "")
+        except ValueError:
+            raise LocalWebBlocked("缺少有效的分片偏移（X-Chunk-Offset）。") from None
+        if offset < 0:
+            raise LocalWebBlocked("分片偏移不能为负。")
+        data = await request.body()
+        offset = store.append_chunk(str(case_id), str(upload_id), offset, data)
+        return {"upload_id": str(upload_id), "offset": offset}
+
+    @app.post("/api/local/v1/cases/{case_id}/material-uploads/{upload_id}/finalize")
+    async def finalize_upload(case_id: UUID, upload_id: UUID, request: Request,
+                              x_lawcase_csrf: str | None = Header(default=None)):
+        ensure_write(request, x_lawcase_csrf)
+        return {"receipt": store.finalize_upload(str(case_id), str(upload_id))}
 
     @app.get("/api/local/v1/cases/{case_id}/material-uploads/{upload_id}")
     async def upload_status(case_id: UUID, upload_id: UUID, request: Request, response: Response):

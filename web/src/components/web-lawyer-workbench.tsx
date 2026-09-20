@@ -36,7 +36,7 @@ import {
   listWebLawyerCases,
   normalizeCaseTitle,
   readWebLawyerSession,
-  uploadWebMaterialPdf,
+  uploadWebMaterialInChunks,
   uploadWebCommonMaterial,
   uploadWebMaterialArchive,
   type WebLawyerCase,
@@ -986,6 +986,8 @@ function MaterialIntake({
     setUploading(true);
     setNotice(null);
     let receivedInThisRun = 0;
+    let retriedUploads = 0;
+    let adoptedUploads = 0;
     let interruptedBySession = false;
     let expectedVersion = caseItem.version;
 
@@ -1021,15 +1023,22 @@ function MaterialIntake({
             state: "UPLOADING",
             message: "正在接收材料并进行安全检查…",
           }));
-          const receipt = await uploadWebMaterialPdf(caseItem.caseId, slot.uploadId, file);
+          const uploaded = await uploadWebMaterialInChunks(caseItem.caseId, slot.uploadId, file);
+          const receipt = uploaded.receipt;
           receivedInThisRun += 1;
+          if (uploaded.retried) retriedUploads += 1;
+          if (uploaded.adopted) adoptedUploads += 1;
           onMaterialsReceived();
           expectedVersion = receipt.matterVersion;
           onCaseVersionAdvanced(caseItem.caseId, receipt.matterVersion);
           setItems((current) => updateUploadItem(current, queuedItem.id, {
             file: null,
             state: "RECEIVED",
-            message: "材料已接收并归入本案。",
+            message: uploaded.adopted
+              ? "传输结果未确认，核验服务端后确认已收到并归入本案。"
+              : uploaded.retried
+                ? "传输曾中断，核验服务端未收到内容后重传成功，已归入本案。"
+                : "材料已接收并归入本案。",
             receipt,
           }));
         } else if (canUploadCommon) {
@@ -1085,7 +1094,15 @@ function MaterialIntake({
     setUploading(false);
     if (interruptedBySession) return;
     if (receivedInThisRun > 0) {
-      setNotice(`本次已接收 ${receivedInThisRun} 份材料${archiveStoredCount > 0 ? "；材料包已保存，仍需逐份入卷" : ""}。材料入卷后仍需要核对，才会用于分析或文件。`);
+      const recovery = [
+        retriedUploads > 0 ? `${retriedUploads} 份传输中断后核验并重传成功` : "",
+        adoptedUploads > 0 ? `${adoptedUploads} 份传输中断但服务端已收到（核验确认）` : "",
+      ].filter(Boolean).join("；");
+      setNotice(
+        `本次已接收 ${receivedInThisRun} 份材料${recovery ? `（${recovery}）` : ""}`
+        + `${archiveStoredCount > 0 ? "；材料包已保存，仍需逐份入卷" : ""}。`
+        + "材料入卷后仍需要核对，才会用于分析或文件。",
+      );
     }
   }
 
