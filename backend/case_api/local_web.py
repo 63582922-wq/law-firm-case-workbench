@@ -101,6 +101,23 @@ class AnalysisConfigRequest(BaseModel):
 
 
 
+def _resolve_provider_info(env_file: Path | None) -> dict[str, str]:
+    """按模型环境文件解析实际供应商（用于预检与报告，密钥不落盘）。"""
+    from case_kernel.model_providers import resolve_provider
+    from case_kernel.shadow_live_transport import load_env_file
+
+    fallback = {"label": "aliyun-model-studio", "model": "qwen3-vl-plus",
+                "region": "cn-beijing", "retention": "不保存（调用即弃，不用于训练）"}
+    if env_file is None or not Path(env_file).is_file():
+        return fallback
+    try:
+        provider, _key = resolve_provider(load_env_file(env_file))
+    except Exception:  # noqa: BLE001 - 预检不因解析失败而阻断，回退默认说明
+        return fallback
+    return {"label": provider.label, "model": provider.model,
+            "region": provider.region, "retention": provider.retention}
+
+
 def _project_root() -> Path:
     """项目根目录（backend 的上一级），用于定位默认模型环境文件。"""
     return Path(__file__).resolve().parents[2]
@@ -1211,9 +1228,13 @@ class LocalWebStore:
         disabled = os.environ.get("CASE_WORKBENCH_DISABLE_AGENT", "").strip() == "1"
         run_id = str(uuid4())
         with self._lock, self._connect() as db:
+            # 首次生成（没有 PUT 保存过选择）时也必须写入绑定信息，否则新草稿
+            # 会被立即判为「已失效」——真实踩过：连 INSERT 分支漏了这三列。
             db.execute(
-                """INSERT INTO brief_runs(case_id, selections_json, selections_hash, status)
-                   VALUES(?,?,?, 'RUNNING')
+                """INSERT INTO brief_runs(case_id, selections_json, selections_hash, status,
+                                           source_version, config_hash, analysis_run_id,
+                                           run_id, started_at)
+                   VALUES(?,?,?, 'RUNNING', ?,?,?,?,?)
                    ON CONFLICT(case_id) DO UPDATE SET
                      status='RUNNING', progress=0, stage='准备', gate_level='',
                      markdown_path='', cost_cny='0.000000', calls=0, error='',
@@ -1221,6 +1242,8 @@ class LocalWebStore:
                      run_id=?, started_at=?, generated_at=''""",
                 (case_id, json.dumps(selections.to_dict(), ensure_ascii=False, sort_keys=True),
                  _digest(json.dumps(selections.to_dict(), ensure_ascii=False, sort_keys=True)),
+                 int(case["version"]), self._config_hash(case_id), analysis_run_id,
+                 run_id, _iso(_now()),
                  int(case["version"]), self._config_hash(case_id), analysis_run_id,
                  run_id, _iso(_now())),
             )
@@ -1293,6 +1316,7 @@ class LocalWebStore:
         """答辩状的数据路径记录：只发送文字，不发送材料像素；法源取律师登记。"""
         if env_file is None:
             return None
+        provider_info = _resolve_provider_info(env_file)
         preflight = {
             "schema": "shadow-preflight-v1",
             "purpose": "defence_brief_local_web",
@@ -1302,10 +1326,10 @@ class LocalWebStore:
             "stage": "文书起草",
             "sent_fields": {"page_files": [], "pdf_text_layers_only": True,
                             "analysis_report": True},
-            "provider": "aliyun-model-studio",
-            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME", "qwen3-vl-plus"),
-            "region": "cn-beijing",
-            "retention": "不保存（调用即弃，不用于训练）",
+            "provider": provider_info["label"],
+            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME") or provider_info["model"],
+            "region": provider_info["region"],
+            "retention": provider_info["retention"],
             "budget_cap_cny": str(budget_cny),
             "trusted_authorities": list(selections.authorities),
             "approved_by": f"本地工作台律师点击确认（case={case_id}）",
@@ -1455,6 +1479,7 @@ class LocalWebStore:
             for path in materials_dir.rglob("*")
             if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png"}
         )
+        provider_info = _resolve_provider_info(env_file)
         preflight = {
             "schema": "shadow-preflight-v1",
             "purpose": "case_analysis_local_web",
@@ -1463,10 +1488,10 @@ class LocalWebStore:
             "role": role,
             "stage": stage_name,
             "sent_fields": {"page_files": page_files, "pdf_text_layers_only": True},
-            "provider": "aliyun-model-studio",
-            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME", "qwen3-vl-plus"),
-            "region": "cn-beijing",
-            "retention": "不保存（调用即弃，不用于训练）",
+            "provider": provider_info["label"],
+            "model": os.environ.get("CASE_WORKBENCH_MODEL_NAME") or provider_info["model"],
+            "region": provider_info["region"],
+            "retention": provider_info["retention"],
             "budget_cap_cny": str(budget_cny),
             "trusted_authorities": [],
             "approved_by": f"本地工作台律师点击确认（case={case_id}）",

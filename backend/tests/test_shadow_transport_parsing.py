@@ -49,11 +49,16 @@ class _FakeOpener:
 
 
 def _transport(root: Path) -> QwenShadowTransport:
+    from case_kernel.model_providers import ALIYUN
+
     transport = QwenShadowTransport.__new__(QwenShadowTransport)
     transport.materials_root = root
     transport.run_root = root
+    transport.provider = ALIYUN
+    transport.env = {"LAWCASE_AGENT_WORKER_QWEN_API_KEY": "x",
+                     "LAWCASE_AGENT_WORKER_QWEN_WORKSPACE_ID": "ws-x"}
     transport.api_key = "x"
-    transport.workspace_id = "ws-x"
+    transport.endpoint = "https://ws-x.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
     transport.model = "qwen3-vl-plus"
     transport.budget_cny = Decimal("2")
     transport.spent_cny = Decimal("0")

@@ -26,6 +26,13 @@ _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 from PIL import Image
 
+from case_kernel.model_providers import (
+    Provider,
+    ProviderError,
+    endpoint_for,
+    image_tokens,
+    resolve_provider,
+)
 from case_kernel.shadow_mode import (
     PageText,
     RequestLedger,
@@ -33,7 +40,9 @@ from case_kernel.shadow_mode import (
     mask_text_identifiers,
 )
 
-MODEL = "qwen3-vl-plus"
+# 缺省模型由供应商决定（见 model_providers）；这里不再硬编码某一家的模型名，
+# 否则切换供应商时会把旧模型名发过去（真实踩过：HTTP 400 invalid model name）。
+MODEL = ""
 HOST_SUFFIX = ".cn-beijing.maas.aliyuncs.com"
 SCHEMA_OCR = "shadow-ocr-v1"
 SCHEMA_PROPOSAL = "shadow-proposal-v1"
@@ -145,20 +154,24 @@ class QwenShadowTransport:
         materials_root: str | Path,
         env_file: str | Path,
         budget_cny: Decimal = Decimal("2"),
-        model: str = MODEL,
+        model: str = "",
         run_root: str | Path | None = None,
         allow_image_identifiers: bool = False,
     ) -> None:
         self.materials_root = Path(materials_root).resolve()
         self.run_root = Path(run_root).resolve() if run_root else None
         env = load_env_file(env_file)
-        self.api_key = env.get("LAWCASE_AGENT_WORKER_QWEN_API_KEY", "")
-        self.workspace_id = env.get("LAWCASE_AGENT_WORKER_QWEN_WORKSPACE_ID", "")
-        if not self.api_key or not self.workspace_id.startswith("ws-"):
-            raise ShadowBlocked(
-                "S5 数据路径门：环境文件中缺少有效 Qwen API 密钥或业务空间"
-            )
-        self.model = model
+        try:
+            provider, api_key = resolve_provider(env)
+            endpoint = endpoint_for(provider, env)
+        except ProviderError as error:
+            raise ShadowBlocked(f"S5 数据路径门：{error}") from None
+        # 一把 key、一个模型覆盖 OCR 与分析：deepseek-flash 原生支持图片输入。
+        self.provider: Provider = provider
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.env = env
+        self.model = model or provider.model
         self.budget_cny = budget_cny
         self.spent_cny = Decimal("0")
         # 扫描件页面以**图像**发送：图像内部的身份证号/银行卡号无法在本机自动脱敏。
@@ -194,7 +207,10 @@ class QwenShadowTransport:
             redacted_content.append(
                 {"type": "image_url", "image_url": {"url": f"sha256:{sha256(payload).hexdigest()}"}}
             )
-            visual_tokens += _visual_tokens(width, height)
+            if len(payload) > self.provider.image_bytes_limit:
+                raise ShadowBlocked(
+                    f"S5 数据路径门：单张图片 {len(payload)} 字节超过供应商上限")
+            visual_tokens += image_tokens(self.provider, width, height)
         body = {
             "model": self.model,
             "messages": [
@@ -212,28 +228,34 @@ class QwenShadowTransport:
                 },
                 {"role": "user", "content": user_content},
             ],
-            "temperature": 0.1,
             "max_tokens": max_output_tokens,
-            "enable_thinking": False,
-            "response_format": {"type": "json_object"},
         }
+        if self.provider.disable_thinking_field == "thinking":
+            # DeepSeek 的思考模式默认开启且会忽略 temperature；本流水线只要结构化
+            # 结果，显式关闭思考模式。
+            body["thinking"] = {"type": "disabled"}
+        else:
+            body["temperature"] = 0.1
+            body["enable_thinking"] = False
+        if self.provider.supports_json_mode:
+            body["response_format"] = {"type": "json_object"}
         encoded = _canonical_bytes(body)
         estimate = int(len(instruction) * 0.7) + visual_tokens
         if estimate > _MAX_INPUT_ESTIMATE:
             raise ShadowBlocked(
                 f"S5 数据路径门：单次调用输入预估 {estimate} token 超限，须减小批次"
             )
+        _cached_rate, input_rate, output_rate = self.provider.rates()
         worst_case = (
-            Decimal(estimate) + Decimal(max_output_tokens) * Decimal("10")
+            Decimal(estimate) * input_rate + Decimal(max_output_tokens) * output_rate
         ) / Decimal(1_000_000)
         if worst_case > self.budget_cny - self.spent_cny:
             raise ShadowBlocked(
                 f"S5 数据路径门：调用预估费用 {worst_case:.6f} 元超出剩余预算 "
                 f"{self.budget_cny - self.spent_cny:.6f} 元，fail closed"
             )
-        endpoint = f"https://{self.workspace_id}{HOST_SUFFIX}/compatible-mode/v1/chat/completions"
         request = urllib.request.Request(
-            endpoint,
+            self.endpoint,
             data=encoded,
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"},
@@ -245,7 +267,22 @@ class QwenShadowTransport:
                 response_payload = json.loads(response.read())
                 http_status = response.status
         except urllib.error.HTTPError as error:
-            raise ShadowBlocked(f"Qwen 请求被拒（HTTP {error.code}），已记账不重试") from error
+            # 供应商的拒绝原因必须带回给律师，否则只看到"被拒"无法排查
+            detail = ""
+            try:
+                detail = error.read().decode("utf-8", "replace")[:600]
+            except Exception:  # noqa: BLE001 - 读取失败不影响阻断语义
+                detail = ""
+            ledger.append(
+                purpose=purpose, provider=self.provider.label, model=self.model,
+                region=self.provider.region, retention=self.provider.retention,
+                payload_sha256=sha256(encoded).hexdigest(), status=f"http-{error.code}",
+                cost_cny="0.000000", note=detail or "供应商未返回原因",
+            )
+            raise ShadowBlocked(
+                f"{self.provider.label} 拒绝请求（HTTP {error.code}）："
+                f"{detail[:300] or '供应商未返回原因'}；已记账不重试"
+            ) from error
         except urllib.error.URLError as error:
             reason_name = type(error.reason).__name__
             if reason_name in self._RETRYABLE_CONNECT_ERRORS:
@@ -267,15 +304,15 @@ class QwenShadowTransport:
                         reason_name = type(retry_error.reason).__name__
                         if reason_name not in self._RETRYABLE_CONNECT_ERRORS:
                             raise ShadowBlocked(
-                                f"Qwen 传输失败：{reason_name}"
+                                f"{self.provider.label} 传输失败：{reason_name}"
                             ) from retry_error
                 else:
                     raise ShadowBlocked(
-                        f"Qwen 传输失败：{reason_name}（已安全重试 2 次仍失败，未产生费用）"
+                        f"{self.provider.label} 传输失败：{reason_name}（已安全重试 2 次仍失败，未产生费用）"
                     )
             else:
                 raise ShadowBlocked(
-                    f"Qwen 传输失败：{reason_name}"
+                    f"{self.provider.label} 传输失败：{reason_name}"
                 ) from error
         except (TimeoutError, ConnectionError) as error:
             # 未知提交状态：服务端可能已计费。按最坏费用预留并记账，禁止盲重试。
@@ -293,7 +330,7 @@ class QwenShadowTransport:
                      "已按最坏情况预留费用，未自动重试",
             )
             raise ShadowBlocked(
-                f"Qwen {type(error).__name__}（提交状态未知）：已记账并预留费用，"
+                f"{self.provider.label} {type(error).__name__}（提交状态未知）：已记账并预留费用，"
                 f"请人工核对供应商用量后再决定是否重试（payload {sha256(encoded).hexdigest()[:12]}…）"
             ) from error
         except Exception as error:  # 兜底：任何其他读取失败都视为未知状态
@@ -310,18 +347,18 @@ class QwenShadowTransport:
                 note=f"{type(error).__name__}：响应读取失败，提交状态未知；未自动重试",
             )
             raise ShadowBlocked(
-                f"Qwen 响应读取失败（{type(error).__name__}）：已记账并预留费用，未自动重试"
+                f"{self.provider.label} 响应读取失败（{type(error).__name__}）：已记账并预留费用，未自动重试"
             ) from error
         finished_at = datetime.now(timezone.utc).isoformat()
         if http_status != 200 or response_payload.get("model") != self.model:
-            raise ShadowBlocked("Qwen 供应商身份与配置不一致")
+            raise ShadowBlocked(f"{self.provider.label} 供应商身份与配置不一致")
         choices = response_payload.get("choices")
         if not isinstance(choices, list) or len(choices) != 1:
-            raise ShadowBlocked("Qwen 返回 choices 数量非法")
+            raise ShadowBlocked("模型返回 choices 数量非法")
         finish_reason = choices[0].get("finish_reason")
         content = (choices[0].get("message") or {}).get("content")
         if not isinstance(content, str) or not content.strip():
-            raise ShadowBlocked("Qwen 返回内容为空")
+            raise ShadowBlocked("模型返回内容为空")
         parsed, repair_note = _parse_model_json(content)
         parsed_ok = parsed is not None
         schema_ok = bool(
@@ -348,7 +385,8 @@ class QwenShadowTransport:
             usage_early = response_payload.get("usage") or {}
             p_tokens = int(usage_early.get("prompt_tokens", 0))
             c_tokens = int(usage_early.get("completion_tokens", 0))
-            cost_early = _price_cny(p_tokens, c_tokens)
+            cost_early = self.provider.price(prompt_tokens=p_tokens,
+                                             completion_tokens=c_tokens)
             self.spent_cny += cost_early
             ledger.append(
                 purpose=purpose,
@@ -364,7 +402,7 @@ class QwenShadowTransport:
                 note="响应内容无法解析或 schema 不符，按实际用量记账；未自动重试",
             )
             raise ShadowBlocked(
-                f"Qwen 返回内容无法解析或 schema 不符（finish_reason={finish_reason}）："
+                f"模型返回内容无法解析或 schema 不符（finish_reason={finish_reason}）："
                 f"已按实际用量 {cost_early:.6f} 元记账，未自动重试"
             )
         if finish_reason not in ("stop", None):
@@ -382,12 +420,20 @@ class QwenShadowTransport:
             )
         usage = response_payload.get("usage")
         if not isinstance(usage, dict):
-            raise ShadowBlocked("Qwen 返回缺少用量回执")
+            raise ShadowBlocked("模型返回缺少用量回执")
         prompt_tokens = int(usage.get("prompt_tokens", -1))
         completion_tokens = int(usage.get("completion_tokens", -1))
         if prompt_tokens < 0 or completion_tokens < 0:
-            raise ShadowBlocked("Qwen 用量回执非法")
-        cost = _price_cny(prompt_tokens, completion_tokens)
+            raise ShadowBlocked("模型用量回执非法")
+        # 缓存命中价远低于未命中价（DeepSeek 公开价目），如实计入账本
+        cached_tokens = int(
+            usage.get("prompt_cache_hit_tokens")
+            or (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+            or 0
+        )
+        cost = self.provider.price(prompt_tokens=prompt_tokens,
+                                   completion_tokens=completion_tokens,
+                                   cached_tokens=cached_tokens)
         self.spent_cny += cost
         if self.spent_cny > self.budget_cny:
             raise ShadowBlocked(
@@ -396,9 +442,9 @@ class QwenShadowTransport:
             )
         ledger.append(
             purpose=purpose,
-            provider="aliyun-model-studio",
+            provider=self.provider.label,
             model=self.model,
-            region="cn-beijing",
+            region=self.provider.region,
             retention="不保存",
             payload_sha256=sha256(encoded).hexdigest(),
             request_started_at=started_at,
@@ -462,6 +508,11 @@ class QwenShadowTransport:
                 cached = {}  # 缓存损坏只影响省钱，不影响正确性：忽略后重新 OCR
             if not isinstance(cached, dict):
                 cached = {}
+            # 缓存必须与当前供应商/模型一致：换了模型就重新识别，
+            # 避免把上一家模型的识别结果当成这一家的输出。
+            if (str(cached.get("provider") or "") != self.provider.key
+                    or str(cached.get("model") or "") != self.model):
+                cached = {}
             # JSON 会把 (file_name, page_number) 元组还原成列表；直接 set() 会抛
             # TypeError: unhashable type: 'list'，必须先归一化再比较。
             cached_authorized = {
@@ -491,7 +542,7 @@ class QwenShadowTransport:
                                page.page_number)
             with Image.open(str(path)) as image:
                 tokens = _visual_tokens(image.width, image.height)
-            if batch and batch_tokens + tokens > 7_000:
+            if batch and batch_tokens + tokens > self._batch_token_limit():
                 updated.extend(self._ocr_batch(batch, ledger, path_overrides))
                 batch, batch_tokens = [], 0
             batch.append(page)
@@ -501,7 +552,8 @@ class QwenShadowTransport:
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(
-                json.dumps({"authorized": sorted(authorized, key=str),
+                json.dumps({"provider": self.provider.key, "model": self.model,
+                            "authorized": sorted(authorized, key=str),
                             "pages": [{"file_name": page.file_name,
                                        "page_number": page.page_number,
                                        "text": page.text} for page in updated]},
@@ -509,6 +561,10 @@ class QwenShadowTransport:
                 encoding="utf-8",
             )
         return updated
+
+    def _batch_token_limit(self) -> int:
+        """单批图片的视觉 token 上限：DeepSeek 每图封顶 1024，可多放几张。"""
+        return 6_000 if self.provider.key == "deepseek" else 7_000
 
     def _ocr_batch(self, batch: list[PageText], ledger: RequestLedger,
                    path_overrides: dict | None = None) -> list[PageText]:

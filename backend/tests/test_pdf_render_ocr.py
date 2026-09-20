@@ -66,7 +66,12 @@ class OcrTargetTests(unittest.TestCase):
     def _transport(self):
         from case_kernel.shadow_live_transport import QwenShadowTransport
 
-        return QwenShadowTransport.__new__(QwenShadowTransport)
+        from case_kernel.model_providers import ALIYUN
+
+        transport = QwenShadowTransport.__new__(QwenShadowTransport)
+        transport.provider = ALIYUN
+        transport.model = ALIYUN.model
+        return transport
 
     def test_rendered_pdf_pages_are_included_and_unauthorized_skipped(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -130,7 +135,11 @@ class OcrCacheTests(unittest.TestCase):
 
             Image.new("RGB", (300, 400), "white").save(materials / "银行流水.jpg", format="JPEG")
 
+            from case_kernel.model_providers import ALIYUN
+
             transport = QwenShadowTransport.__new__(QwenShadowTransport)
+            transport.provider = ALIYUN
+            transport.model = ALIYUN.model
             transport.materials_root = materials
             calls: list[int] = []
 
@@ -155,6 +164,49 @@ class OcrCacheTests(unittest.TestCase):
             self.assertEqual([page.text for page in second], ["第一页文字"])
             self.assertEqual(len(calls), 1)
 
+    def test_cache_is_scoped_to_provider_and_model(self) -> None:
+        """换了模型必须重新 OCR：不能把上一家模型的识别结果当成这一家的输出。"""
+        from case_kernel.model_providers import ALIYUN, DEEPSEEK
+        from case_kernel.shadow_live_transport import QwenShadowTransport
+        from case_kernel.shadow_mode import PageText
+        from PIL import Image
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            materials = root / "materials"
+            materials.mkdir()
+            Image.new("RGB", (300, 400), "white").save(materials / "a.jpg", format="JPEG")
+            calls: list[str] = []
+
+            def make(provider):
+                transport = QwenShadowTransport.__new__(QwenShadowTransport)
+                transport.provider = provider
+                transport.model = provider.model
+                transport.materials_root = materials
+
+                def fake_call(*, instruction, images, max_output_tokens, purpose, ledger,
+                              expected_schema, strict_schema=True, image_paths=None):
+                    calls.append(provider.key)
+                    return {"schema": "shadow-ocr-v1",
+                            "pages": [{"file_name": name, "page_number": page,
+                                       "text": provider.key} for name, page in images]}
+
+                transport._call = fake_call  # type: ignore[assignment]
+                return transport
+
+            pages = [PageText("a.jpg", "", 1, "")]
+            first = make(ALIYUN)._ocr_batches(pages, {"a.jpg"}, ledger=_Ledger())
+            self.assertEqual(first[0].text, "aliyun-maas")
+            # 同一供应商：命中缓存，不再调用
+            again = make(ALIYUN)._ocr_batches(pages, {"a.jpg"}, ledger=_Ledger())
+            self.assertEqual(again[0].text, "aliyun-maas")
+            self.assertEqual(calls, ["aliyun-maas"])
+            # 换供应商：缓存失效，重新识别
+            switched = make(DEEPSEEK)._ocr_batches(pages, {"a.jpg"}, ledger=_Ledger())
+            self.assertEqual(switched[0].text, "deepseek")
+            self.assertEqual(calls, ["aliyun-maas", "deepseek"])
+
     def test_corrupt_cache_is_ignored(self) -> None:
         from case_kernel.shadow_live_transport import QwenShadowTransport
         from case_kernel.shadow_mode import PageText
@@ -168,7 +220,11 @@ class OcrCacheTests(unittest.TestCase):
             Image.new("RGB", (300, 400), "white").save(materials / "a.jpg", format="JPEG")
             (root / "materials.ocr_cache.json").write_text("{ 不是 JSON", encoding="utf-8")
 
+            from case_kernel.model_providers import ALIYUN
+
             transport = QwenShadowTransport.__new__(QwenShadowTransport)
+            transport.provider = ALIYUN
+            transport.model = ALIYUN.model
             transport.materials_root = materials
             transport._call = lambda **kwargs: {  # type: ignore[assignment]
                 "schema": "shadow-ocr-v1",
@@ -187,7 +243,11 @@ class ImageIdentifierGateTests(unittest.TestCase):
     def _transport(self, *, allow: bool):
         from case_kernel.shadow_live_transport import QwenShadowTransport
 
+        from case_kernel.model_providers import ALIYUN
+
         transport = QwenShadowTransport.__new__(QwenShadowTransport)
+        transport.provider = ALIYUN
+        transport.model = ALIYUN.model
         transport.allow_image_identifiers = allow
         transport.image_identifier_findings = []
         return transport

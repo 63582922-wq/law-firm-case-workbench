@@ -94,7 +94,8 @@ def _preflight_review(request: BriefRequest, engine_amounts: dict) -> list[str]:
     return items
 
 
-def _degraded(request: BriefRequest, engine_amounts: dict, reason: str) -> BriefResult:
+def _degraded(request: BriefRequest, engine_amounts: dict, reason: str,
+              *, out_root: Path | None = None) -> BriefResult:
     """未配置模型：只产出确定性骨架，逐节标注待律师补写。"""
     sections = [
         {
@@ -122,6 +123,9 @@ def _degraded(request: BriefRequest, engine_amounts: dict, reason: str) -> Brief
         proposal_source="未调用模型（确定性骨架）",
         generated_at=_now(),
     )
+    if out_root is not None:
+        # 降级稿同样要落盘：否则界面显示「草稿可用」却无法打开或导出。
+        Path(out_root).joinpath("答辩状草稿.md").write_text(markdown, encoding="utf-8")
     return BriefResult(
         status=STATUS_MODEL_NOT_CONFIGURED,
         gate_level="MODEL_NOT_CONFIGURED",
@@ -161,15 +165,17 @@ def run_brief(request: BriefRequest) -> BriefResult:
         summary = request.selections.notes[:600]
 
     if request.preflight_path is None or not Path(request.preflight_path).is_file():
-        return _degraded(request, engine_amounts, "未配置数据路径确认文件（preflight）。")
+        return _degraded(request, engine_amounts, "未配置数据路径确认文件（preflight）。",
+                         out_root=out_root)
     try:
         preflight = validate_preflight(json.loads(Path(request.preflight_path).read_text(encoding="utf-8")))
     except (ShadowBlocked, ValueError) as error:
-        return _degraded(request, engine_amounts, str(error))
+        return _degraded(request, engine_amounts, str(error), out_root=out_root)
     if request.env_file is None or not Path(request.env_file).is_file():
-        return _degraded(request, engine_amounts, "未找到模型环境配置文件。")
+        return _degraded(request, engine_amounts, "未找到模型环境配置文件。", out_root=out_root)
     if not context:
-        return _degraded(request, engine_amounts, "本案尚无决策包报告，模型不参与文书拟写。")
+        return _degraded(request, engine_amounts, "本案尚无决策包报告，模型不参与文书拟写。",
+                         out_root=out_root)
 
     ledger = RequestLedger(out_root / "brief_ledger.json")
     _emit(request, "起草论证文字", 40)

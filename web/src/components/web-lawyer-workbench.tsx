@@ -751,7 +751,7 @@ function WebLocalDeliverySteps({
         <li>
           <strong>第 2 步 · 生成案件决策包</strong>
           <span style={{ marginLeft: 8, opacity: 0.8 }}>
-            {analysisLabel}（真实模型调用约 1 分钟、约 ¥0.05；扫描件需在页面上授权）
+            {analysisLabel}（真实模型调用约 1 分钟、约 ¥0.01–0.07（按用量计费）；扫描件需在页面上授权）
           </span>
           <div style={{ marginTop: 6 }}>
             <a className={styles.webLawyerPrimaryAction}

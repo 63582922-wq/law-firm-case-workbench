@@ -132,6 +132,25 @@ class LocalWebBriefTest(unittest.TestCase):
             self.assertEqual(docx.status_code, 200)
             self.assertTrue(docx.content.startswith(b"PK"))
 
+    def test_first_generation_binds_version_and_run_id(self) -> None:
+        """直接生成（没有先保存选择）时，草稿也必须绑定版本/参数/分析运行。"""
+        os.environ.pop("CASE_WORKBENCH_DISABLE_AGENT", None)
+        response = self.client.post(f"/api/local/v1/cases/{self.case_id}/brief/generate",
+                                    json={}, headers=self._headers("brief-gen-fresh"))
+        self.assertEqual(response.status_code, 200)
+        deadline = time.time() + 10
+        state = {}
+        while time.time() < deadline:
+            state = self.client.get(f"/api/local/v1/cases/{self.case_id}/brief").json()["state"]
+            if state["status"] not in ("RUNNING", "NOT_RUN"):
+                break
+            time.sleep(0.05)
+        # 本环境没有模型环境文件 → 确定性骨架；关键是**不能是 STALE**
+        self.assertEqual(state["status"], "MODEL_NOT_CONFIGURED")
+        self.assertFalse(state["stale"])
+        self.assertTrue(state["markdown_available"])
+        os.environ["CASE_WORKBENCH_DISABLE_AGENT"] = "1"
+
     def test_changing_selections_invalidates_existing_draft(self) -> None:
         run_dir = self.store._analysis_dir(self.case_id)
         draft = run_dir / "答辩状草稿.md"
