@@ -147,9 +147,12 @@ export function WebDeliverableChecklist({
       <td>{statusSelect(item)}</td>
       <td>{item.note}</td>
       <td>
-        {["authorisation", "service_address", "statement", "evidence_source",
-          "mediation", "evidence_list"].includes(item.itemId) ? (
+        {item.source === "template" ? (
           <button type="button" onClick={() => void openTemplate(item)}>查看模板</button>
+        ) : item.source === "brief" ? (
+          <span style={{ opacity: 0.7 }}>在「答辩状」页生成</span>
+        ) : item.source === "analysis" ? (
+          <span style={{ opacity: 0.7 }}>在「决策包」页生成</span>
         ) : (
           <span style={{ opacity: 0.6 }}>—</span>
         )}

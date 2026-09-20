@@ -1056,8 +1056,35 @@ class LocalWebStore:
             states=state.get("states") or {},
             materials=self.deliverable_materials(case_id),
             answer_draft=answer,
+            issues=self.analysis_issues(case_id),
             generated_at=_iso(_now()),
         )
+
+    def analysis_issues(self, case_id: str) -> list[str]:
+        """从决策包报告里取出争点标题，供代理词骨架引用（需律师确认）。"""
+        path = self.agent_report_path(case_id)
+        if path is None:
+            return []
+        issues: list[str] = []
+        in_table = False
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## 三、争点矩阵"):
+                in_table = True
+                continue
+            if in_table and stripped.startswith("## "):
+                break
+            if not in_table or not stripped.startswith("|"):
+                continue
+            cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+            if len(cells) < 2 or set(cells[0]) <= set("-: "):
+                continue
+            title = cells[1]
+            if title and title not in ("争议焦点",) and not title.startswith("---"):
+                issues.append(title[:120])
+            if len(issues) >= 8:
+                break
+        return issues
 
     # ------------------------------------------------ 答辩状草稿（律师工作稿）
 

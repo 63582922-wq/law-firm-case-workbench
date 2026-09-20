@@ -169,6 +169,33 @@ class LocalWebDeliverablesTest(unittest.TestCase):
         self.assertIn("附：民事答辩状（草稿）", exported.text)
         self.assertIn("驳回原告全部诉请", exported.text)
 
+    def test_package_carries_issues_from_analysis_report(self) -> None:
+        """代理词应带上决策包已列争点（标注需律师确认）。"""
+        report = self.store._analysis_dir(self.case_id) / "决策包.md"
+        report.write_text(
+            "# 决策包\n\n## 三、争点矩阵\n\n"
+            "| # | 争议焦点 | 为何重要 |\n|---|---|---|\n"
+            "| 1 | 交易主体是否为答辩人 | 影响责任承担 |\n"
+            "| 2 | 货款金额是否确定 | 影响本金 |\n\n"
+            "## 四、对抗分析\n\n（略）\n",
+            encoding="utf-8",
+        )
+        # 先触发一次分析以建立 analysis_runs 行（真实流程里该行总是存在）
+        self.client.post(f"/api/local/v1/cases/{self.case_id}/analysis", json={},
+                         headers=self._headers("dev-analysis-1"))
+        self.store._set_agent_state(self.case_id, agent_status="COMPLETED",
+                                    agent_report_path=str(report),
+                                    agent_source_version=int(
+                                        self.store._case(self.case_id)["version"]))
+        self.client.put(f"/api/local/v1/cases/{self.case_id}/deliverables",
+                        json={"parties": self._parties(), "states": {}},
+                        headers=self._headers("dev-put-5"))
+        exported = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export?format=md")
+        self.assertIn("交易主体是否为答辩人", exported.text)
+        self.assertIn("货款金额是否确定", exported.text)
+        self.assertIn("来自决策包，请律师确认", exported.text)
+
     def test_parties_prefilled_from_brief_selections(self) -> None:
         self.client.put(f"/api/local/v1/cases/{self.case_id}/brief",
                         json={"selections": {"respondent": "来自答辩状", "claimant": "对方",

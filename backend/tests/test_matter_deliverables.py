@@ -89,6 +89,42 @@ class TemplateTests(unittest.TestCase):
         self.assertIn("| 2 | 微信聊天记录.pdf | 43 |", text)
         self.assertIn(PLACEHOLDER, text)
 
+    def test_cross_examination_lists_each_material_with_blank_opinions(self) -> None:
+        from case_kernel.matter_deliverables import render_cross_examination
+
+        text = render_cross_examination(PARTIES, MATERIALS)
+        self.assertIn("真实性", text)
+        self.assertIn("合法性", text)
+        self.assertIn("关联性", text)
+        self.assertIn("起诉状.pdf", text)
+        self.assertIn("微信聊天记录.pdf", text)
+        # 三性意见与理由必须留空：系统不代律师作出认可判断
+        row = [line for line in text.splitlines() if "起诉状.pdf" in line][0]
+        self.assertEqual(row.count(PLACEHOLDER), 4)
+        self.assertIn("不构成质证结论", text)
+
+    def test_argument_can_carry_issues_from_analysis(self) -> None:
+        from case_kernel.matter_deliverables import render_argument
+
+        text = render_argument(PARTIES, ["交易主体是否为答辩人", "货款金额是否确定"])
+        self.assertIn("交易主体是否为答辩人", text)
+        self.assertIn("来自决策包，请律师确认", text)
+        self.assertIn("系统不代为选择法条", text)
+        empty = render_argument(MatterParties())
+        self.assertIn(PLACEHOLDER, empty)          # 主体为空时同样留待填
+
+    def test_applications_cover_four_types_with_placeholders(self) -> None:
+        from case_kernel.matter_deliverables import render_applications
+
+        text = render_applications(PARTIES)
+        for marker in ("申请追加当事人", "申请调查取证", "申请鉴定", "申请延期举证"):
+            self.assertIn(marker, text)
+        self.assertGreaterEqual(text.count(PLACEHOLDER), 10)
+
+    def test_templates_are_marked_as_template_source(self) -> None:
+        for item_id in ("cross_examination", "argument", "applications"):
+            self.assertEqual(CATALOGUE_BY_ID[item_id].source, "template", item_id)
+
     def test_unknown_template_returns_none(self) -> None:
         self.assertIsNone(render_template("no-such-item", PARTIES, MATERIALS))
 
@@ -112,7 +148,8 @@ class ChecklistAndPackageTests(unittest.TestCase):
         text = render_package(parties=PARTIES, states={"answer": "未开始"},
                               materials=MATERIALS, answer_draft="")
         for marker in ("交付清单", "授权委托书", "送达地址确认书", "当事人陈述",
-                       "调解意见确认", "证据目录", "证据来源说明", "提交前检查清单"):
+                       "调解意见确认", "证据目录", "证据来源说明", "质证意见",
+                       "代理词", "申请书", "提交前检查清单"):
             self.assertIn(marker, text)
         self.assertIn("尚未生成答辩状草稿", text)
         self.assertIn("不构成法律意见", text)

@@ -59,11 +59,11 @@ CATALOGUE: tuple[Deliverable, ...] = (
     Deliverable("evidence_copies", "证据材料（副本）", "法院", "律师/律所", False,
                 "按目录顺序装订，原件自行保管", "manual"),
     Deliverable("cross_examination", "质证意见", "法院", "律师", False,
-                "对原告证据的真实性、合法性、关联性意见", "manual"),
+                "对原告证据的真实性、合法性、关联性意见；按本案材料逐条列出待填", "template"),
     Deliverable("applications", "申请书（追加当事人/调查取证/鉴定/延期举证）", "法院", "律师", False,
-                "按需提交，注意举证期限", "manual"),
+                "四类申请书骨架，按需取用；注意举证期限", "template"),
     Deliverable("argument", "代理词", "法院", "律师", False,
-                "庭审后提交的辩论意见", "manual"),
+                "庭审辩论意见骨架，可引用决策包已列争点", "template"),
     Deliverable("appeal", "上诉状", "法院", "上诉人（当事人签名）", True,
                 "仅在判决不利时使用；上诉期 15 日", "manual"),
     Deliverable("internal_analysis", "案件分析决策包", "内部", "律师", False,
@@ -322,6 +322,151 @@ def render_evidence_list(parties: MatterParties, materials: Sequence[Mapping]) -
     return "\n".join(lines)
 
 
+def render_cross_examination(
+    parties: MatterParties,
+    materials: Sequence[Mapping],
+) -> str:
+    """质证意见：按本案已入卷材料逐条列出，三性意见由律师逐项填写。
+
+    这里只做两件事：把原告可能提交的材料列成表；把质证的标准三性框架写清楚。
+    对某一份材料认可与否、理由是什么，一律留空由律师填。
+    """
+    lines = _header(parties, "质证意见")
+    lines += [
+        "> 说明：本表逐条对应原告提交的证据材料；「三性意见」与「理由」由律师填写，",
+        "> 系统不代律师作出认可或不认可的判断。",
+        "",
+        "| 序号 | 证据名称 | 页数 | 真实性 | 合法性 | 关联性 | 质证理由 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    if not materials:
+        lines.append(f"| 1 | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} |")
+    for index, material in enumerate(materials, start=1):
+        name = str(material.get("display_name") or "").replace("|", "／")
+        pages = material.get("page_count") or ""
+        lines.append(
+            f"| {index} | {name} | {pages} | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} | {PLACEHOLDER} |")
+    lines += [
+        "",
+        "## 质证要点提示（框架，非结论）",
+        "",
+        "1. **真实性**：原件与复印件是否一致；电子数据（微信、短信、截图）的原始载体、",
+        "   提取过程、是否连续完整、有无删改拼接；能否当庭演示。",
+        "2. **合法性**：取得方式是否合法；是否侵犯他人合法权益或违反法律禁止性规定。",
+        "3. **关联性**：能否证明待证事实；与本案争议焦点是否对应；是否指向案外主体或案外交易。",
+        "4. **形式瑕疵**：同一编号单据金额不一致、签收栏空白、抬头主体与实际交易主体不符等。",
+        "",
+        "> 以上仅为质证框架，是否提出、如何表述由律师决定；本页不构成质证结论。",
+    ]
+    lines += _signature_block("质证人（代理人）")
+    return "\n".join(lines)
+
+
+def render_argument(
+    parties: MatterParties,
+    issues: Sequence[str] | None = None,
+) -> str:
+    """代理词骨架；可带入决策包里已列出的争点作为标题候选（需律师确认）。"""
+    lines = _header(parties, "代理词")
+    lines += [
+        f"尊敬的审判长、审判员：",
+        "",
+        f"本人受{_or(parties.respondent)}委托，担任其与{_or(parties.claimant, '对方当事人')}"
+        f"{_or(parties.cause, '本案')}一案的诉讼代理人。现发表如下代理意见。",
+        "",
+        "## 一、案件基本情况",
+        f"{PLACEHOLDER}（写明交易经过、往来款项与本案争议由来，事实以当事人陈述和已提交证据为准）",
+        "",
+        "## 二、争议焦点",
+    ]
+    if issues:
+        for index, issue in enumerate(issues, start=1):
+            lines.append(f"{index}. {issue}（来自决策包，请律师确认后保留或改写）")
+    else:
+        lines.append(f"1. {PLACEHOLDER}")
+    lines += [
+        "",
+        "## 三、代理意见",
+        f"（一）{PLACEHOLDER}",
+        "",
+        f"（二）{PLACEHOLDER}",
+        "",
+        "## 四、法律依据",
+        f"{PLACEHOLDER}（只填写律师登记并核对过的法源；系统不代为选择法条）",
+        "",
+        "## 五、结论",
+        f"综上，请求法院{PLACEHOLDER}（写明请求，例如驳回原告对答辩人的全部诉讼请求）。",
+    ]
+    lines += _signature_block("代理人")
+    return "\n".join(lines)
+
+
+def render_applications(parties: MatterParties) -> str:
+    """四类申请书骨架：追加当事人、调查取证、鉴定、延期举证。"""
+    lines = _header(parties, "申请书（按需取用）")
+    lines += [
+        f"> 说明：以下为四类常用申请书的骨架，按本案实际需要选用并补全；"
+        f"未使用的部分请删除。举证期限、申请期限请自行核对。",
+        "",
+        "---",
+        "",
+        "## 一、申请追加当事人",
+        "",
+        f"申请人：{_or(parties.respondent)}",
+        "",
+        f"申请事项：请求追加{PLACEHOLDER}（写明拟追加主体的名称、住所、统一社会信用代码"
+        "或身份信息）为本案当事人。",
+        "",
+        f"事实与理由：{PLACEHOLDER}（写明该主体与本案交易的关系、为何应由其承担责任）",
+        "",
+        "此致",
+        f"{_or(parties.court)}",
+        "",
+        *_signature_block("申请人"),
+        "---",
+        "",
+        "## 二、申请调查取证",
+        "",
+        f"申请事项：请求依法调取{PLACEHOLDER}（写明证据名称、持有单位或个人）。",
+        "",
+        f"待证事实：{PLACEHOLDER}",
+        "",
+        f"无法自行收集的理由：{PLACEHOLDER}",
+        "",
+        "此致",
+        f"{_or(parties.court)}",
+        "",
+        *_signature_block("申请人"),
+        "---",
+        "",
+        "## 三、申请鉴定",
+        "",
+        f"申请事项：请求对{PLACEHOLDER}（写明鉴定事项，例如文书形成时间、笔迹、印章）进行司法鉴定。",
+        "",
+        f"事实与理由：{PLACEHOLDER}",
+        "",
+        f"检材与样本：{PLACEHOLDER}",
+        "",
+        "此致",
+        f"{_or(parties.court)}",
+        "",
+        *_signature_block("申请人"),
+        "---",
+        "",
+        "## 四、申请延期举证",
+        "",
+        f"申请事项：请求准予延期举证至{PLACEHOLDER}（写明申请期限）。",
+        "",
+        f"事实与理由：{PLACEHOLDER}（写明客观障碍，例如证据由第三方持有、需调取原件）",
+        "",
+        "此致",
+        f"{_or(parties.court)}",
+        "",
+        *_signature_block("申请人"),
+    ]
+    return "\n".join(lines)
+
+
 def render_template(
     item_id: str,
     parties: MatterParties,
@@ -340,6 +485,12 @@ def render_template(
         return render_mediation(parties)
     if item_id == "evidence_list":
         return render_evidence_list(parties, materials or [])
+    if item_id == "cross_examination":
+        return render_cross_examination(parties, materials or [])
+    if item_id == "argument":
+        return render_argument(parties)
+    if item_id == "applications":
+        return render_applications(parties)
     return None
 
 
@@ -406,6 +557,7 @@ def render_package(
     states: Mapping[str, str],
     materials: Sequence[Mapping],
     answer_draft: str = "",
+    issues: Sequence[str] | None = None,
     generated_at: str = "",
 ) -> str:
     """应诉材料包：清单 + 签字文件 + 证据目录 + 已有答辩状草稿。"""
@@ -421,10 +573,12 @@ def render_package(
         lines.append(f"- 生成时间：{generated_at}")
     lines += ["", "---", "", render_checklist(parties, states), "", "---", ""]
     for item_id in ("authorisation", "service_address", "statement", "mediation",
-                    "evidence_list", "evidence_source"):
+                    "evidence_list", "evidence_source", "cross_examination",
+                    "applications"):
         rendered = render_template(item_id, parties, materials)
         if rendered:
             lines += [rendered, "", "---", ""]
+    lines += [render_argument(parties, issues), "", "---", ""]
     if answer_draft.strip():
         lines += ["# 附：民事答辩状（草稿）", "", answer_draft.strip(), "", "---", ""]
     else:
