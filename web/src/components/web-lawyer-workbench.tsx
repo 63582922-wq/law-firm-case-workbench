@@ -36,6 +36,9 @@ import {
   listWebLawyerCases,
   normalizeCaseTitle,
   readWebLawyerSession,
+  readWebBrief,
+  readWebCaseAnalysisState,
+  readWebDeliverables,
   uploadWebMaterialInChunks,
   uploadWebCommonMaterial,
   uploadWebMaterialArchive,
@@ -449,6 +452,17 @@ function AuthenticatedWebLawyerWorkbench({
     : hasCaseMaterials
     ? "材料已入卷。可核对页面、标记重点，并回到案件首页继续处理。"
     : "先选择本案材料。接收完成后，再进入材料核对。";
+  // 每一页在页头直接说明"这一步怎么做"，不再用"完成前一步"这种现在不成立的提示。
+  const viewHint: Record<string, string> = {
+    evidence: workflowHint,
+    analysis: "在下面填计算参数（民间借贷口径，或勾选买卖合同货款口径）→ 点「开始分析」。扫描件需先勾选「扫描件图像原样发送」授权；完成后可导出 Markdown / Word。",
+    brief: "先勾选你要主张的抗辩、逐项选择对诉请的态度、登记可引用的法条，再点「保存并生成草稿」。判决/立场由你决定，数字只来自计算表。",
+    deliverables: "填写当事人信息、逐项更新交付状态，然后点「导出应诉材料包（Word）」：其中 7 份需要当事人签字。",
+    facts: "本机模式未提供该环节；需律所服务器模式。",
+    legal: "本机模式未提供该环节；需律所服务器模式。",
+    calculation: "核对已确认的规则和交易后，再进行正式测算。",
+    bundle: "本机模式未提供该环节；需律所服务器模式。",
+  };
 
   return (
     <main className={`${styles.shell} ${styles.webLawyerShell}`}>
@@ -470,19 +484,15 @@ function AuthenticatedWebLawyerWorkbench({
           <p className={styles.eyebrow}>{isLocalWebMode ? "本机审阅案件" : "案件工作区"}</p>
           <h1 id="web-case-title">{selectedCase ? selectedCase.title : "选择或建立案件"}</h1>
           <p>{selectedCase
-            ? isLocalWebMode ? "本机审阅 · 可接收材料并进行人工核对" : `${selectedCase.materialCount} 份材料已入卷`
-            : "选择左侧案件，或建立新案件。"}</p>
+            ? isLocalWebMode
+              ? `本机审阅 · ${selectedCase.materialCount} 份材料已入卷`
+              : `${selectedCase.materialCount} 份材料已入卷`
+            : "先点左侧任意案件（或点下方「建立案件」），再按四步流程办理。"}</p>
         </div>
         {initialView !== "overview" ? <div className={styles.webLawyerCaseHeaderStatus}>
-          <span>下一步</span>
+          <span>这一步怎么做</span>
           <strong>{workflowLabel}</strong>
-          <small>{initialView === "evidence"
-            ? workflowHint
-            : initialView === "calculation"
-              ? "核对已确认的规则和交易后，再进行正式测算。"
-              : initialView === "bundle"
-                ? "先审阅文件和依据，确认无误后再导出提交材料。"
-                : `完成前一步后，即可继续处理“${sectionLabels[initialView]}”。`}</small>
+          <small>{viewHint[initialView] ?? workflowHint}</small>
         </div> : null}
       </section>
 
@@ -645,12 +655,137 @@ function WebLawyerNavigation({ capabilities, caseId, currentView, hasMaterials }
     <nav className={styles.webLawyerNavigation} aria-label="案件工作区导航">
       {items.map((item) => {
         const available = canOpenWebLawyerView(capabilities, item.id, Boolean(caseId), hasMaterials);
+        if (!available && isLocalWebMode) {
+          // 本机模式没有这些环节：不再在导航里摆一排点不动的灰项，
+          // 改为在导航下方一句话说明它们属于服务器模式。
+          return null;
+        }
         if (!available) {
-          return <span aria-disabled="true" className={styles.webLawyerNavigationUnavailable} key={item.id} title={caseId ? (isLocalWebMode ? "本机模式未提供该环节；请在律所服务器模式办理" : "完成前一步后可继续处理") : "请先选择案件"}>{item.label}</span>;
+          return <span aria-disabled="true" className={styles.webLawyerNavigationUnavailable} key={item.id} title={caseId ? "完成前一步后可继续处理" : "请先选择案件"}>{item.label}</span>;
         }
         return <a aria-current={item.id === currentView ? "page" : undefined} className={item.id === currentView ? styles.webLawyerNavigationActive : undefined} href={caseId ? `${item.href}?case=${encodeURIComponent(caseId)}` : item.href} key={item.id}>{item.label}</a>;
       })}
+      {isLocalWebMode ? (
+        <span className={styles.webLawyerNavigationUnavailable}
+              title="这些环节需要律所服务器模式（受管案卷库、法律依据登记与文书服务）">
+          确认案情 · 依据与测算 · 金额核对 · 成果文件：需服务器模式
+        </span>
+      ) : null}
     </nav>
+  );
+}
+
+/**
+ * 本机模式的「四步交付」引导：律师打开案件首页就该知道先做什么、东西在哪。
+ * 每一步给出当前状态与唯一的主按钮；需要律师在页面上做选择/授权的步骤不代点。
+ */
+function WebLocalDeliverySteps({
+  caseId,
+  materialCount,
+  onSessionExpired,
+}: {
+  caseId: string;
+  materialCount: number;
+  onSessionExpired: () => void;
+}) {
+  const [analysis, setAnalysis] = useState<string>("…");
+  const [brief, setBrief] = useState<string>("…");
+  const [deliverables, setDeliverables] = useState<string>("…");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const state = await readWebCaseAnalysisState(caseId);
+        if (!cancelled) setAnalysis(state.agent.status);
+      } catch (error) {
+        if (!cancelled && isWebLoginRequired(error)) onSessionExpired();
+      }
+      try {
+        const state = await readWebBrief(caseId);
+        if (!cancelled) setBrief(state.state.status);
+      } catch { /* 未开始或不可用：保持占位 */ }
+      try {
+        const state = await readWebDeliverables(caseId);
+        if (!cancelled) {
+          const signed = Object.values(state.states).filter((value) => value === "已签字").length;
+          setDeliverables(signed > 0 ? `已签字 ${signed} 份` : "待导出");
+        }
+      } catch { /* 忽略 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [caseId, onSessionExpired]);
+
+  const analysisLabel = analysis === "COMPLETED" ? "已完成"
+    : analysis === "RUNNING" ? "生成中…"
+    : analysis === "STALE" ? "材料/参数已变化，需重新生成"
+    : analysis === "FAILED" ? "上次失败，可重试"
+    : analysis === "BLOCKED" ? "被安全门禁阻断（页面上有原因）"
+    : analysis === "MODEL_NOT_CONFIGURED" ? "已出确定性结果（未配置模型）"
+    : analysis === "…" ? "读取中…" : "未生成";
+  const briefLabel = brief === "COMPLETED" ? "草稿已就绪"
+    : brief === "MODEL_NOT_CONFIGURED" ? "只有骨架（未配置模型）"
+    : brief === "STALE" ? "选择已变，需重新生成"
+    : brief === "RUNNING" ? "起草中…" : brief === "…" ? "读取中…" : "未生成";
+
+  return (
+    <section className={styles.webCaseInputCard} aria-labelledby="web-local-steps-title">
+      <div>
+        <p className={styles.eyebrow}>本机办案流程（四步）</p>
+        <h2 id="web-local-steps-title">从这里开始：材料 → 决策包 → 答辩状 → 应诉材料包</h2>
+        <p>每一步都在上面导航里，点主按钮即可；需要你做选择或授权的地方会停下来等你。</p>
+      </div>
+      <ol style={{ display: "grid", gap: 12, paddingLeft: 20, margin: "12px 0 0" }}>
+        <li>
+          <strong>第 1 步 · 材料入卷</strong>
+          <span style={{ marginLeft: 8, opacity: 0.8 }}>
+            当前 {materialCount} 份{materialCount > 0 ? "（已可继续）" : "（先上传起诉状与证据）"}
+          </span>
+          <div style={{ marginTop: 6 }}>
+            <a className={styles.webLawyerPrimaryAction}
+               href={`/evidence?case=${encodeURIComponent(caseId)}`}>
+              {materialCount > 0 ? "查看或补充材料" : "上传案件材料"}
+            </a>
+          </div>
+        </li>
+        <li>
+          <strong>第 2 步 · 生成案件决策包</strong>
+          <span style={{ marginLeft: 8, opacity: 0.8 }}>
+            {analysisLabel}（真实模型调用约 1 分钟、约 ¥0.05；扫描件需在页面上授权）
+          </span>
+          <div style={{ marginTop: 6 }}>
+            <a className={styles.webLawyerPrimaryAction}
+               href={`/analysis?case=${encodeURIComponent(caseId)}`}>
+              {analysis === "COMPLETED" ? "查看或重新生成决策包" : "去生成决策包"}
+            </a>
+          </div>
+        </li>
+        <li>
+          <strong>第 3 步 · 生成答辩状草稿</strong>
+          <span style={{ marginLeft: 8, opacity: 0.8 }}>
+            {briefLabel}（勾选你要主张的抗辩、登记法条后生成）
+          </span>
+          <div style={{ marginTop: 6 }}>
+            <a className={styles.webLawyerPrimaryAction}
+               href={`/brief?case=${encodeURIComponent(caseId)}`}>
+              去填写主张并生成
+            </a>
+          </div>
+        </li>
+        <li>
+          <strong>第 4 步 · 导出应诉材料包</strong>
+          <span style={{ marginLeft: 8, opacity: 0.8 }}>
+            {deliverables}（含授权委托书、送达地址确认书等 7 份需当事人签字的文件）
+          </span>
+          <div style={{ marginTop: 6 }}>
+            <a className={styles.webLawyerPrimaryAction}
+               href={`/deliverables?case=${encodeURIComponent(caseId)}`}>
+              去交付清单导出 Word
+            </a>
+          </div>
+        </li>
+      </ol>
+    </section>
   );
 }
 
@@ -688,22 +823,35 @@ function WebCaseOverview({
     <div className={styles.webCaseOverviewStack}>
       {isLocalWebMode ? (
         <section className={styles.webCapabilityBoundary} role="status">
-          <div><strong>当前为离线模式</strong></div>
-          <p>可接收和人工审阅材料，暂不能运行办案任务。</p>
+          <div><strong>本机离线模式 · 能做什么</strong></div>
+          <p>
+            接收材料、生成案件决策包、生成答辩状草稿、导出含当事人签字件的应诉材料包；
+            多人协作、法院提交包与成果文件终审需要律所服务器模式。
+          </p>
         </section>
       ) : null}
 
-      <WebCaseJourney caseId={caseItem.caseId} onSessionExpired={onSessionExpired} />
-
-      <WebCasePosture
-        canConfirm={canConfirmCasePosture}
-        canReview={canReviewCasePosture}
+      {isLocalWebMode ? <WebLocalDeliverySteps
         caseId={caseItem.caseId}
-        caseVersion={caseItem.version}
-        onCurrentChanged={onPostureCurrentChanged}
+        materialCount={caseItem.materialCount}
         onSessionExpired={onSessionExpired}
-        onVersionAdvanced={onVersionAdvanced}
-      />
+      /> : null}
+
+      {isLocalWebMode ? null : (
+        <WebCaseJourney caseId={caseItem.caseId} onSessionExpired={onSessionExpired} />
+      )}
+
+      {isLocalWebMode ? null : (
+        <WebCasePosture
+          canConfirm={canConfirmCasePosture}
+          canReview={canReviewCasePosture}
+          caseId={caseItem.caseId}
+          caseVersion={caseItem.version}
+          onCurrentChanged={onPostureCurrentChanged}
+          onSessionExpired={onSessionExpired}
+          onVersionAdvanced={onVersionAdvanced}
+        />
+      )}
 
       <section className={styles.webCaseInputCard} aria-labelledby="web-case-overview-title">
         <div>
