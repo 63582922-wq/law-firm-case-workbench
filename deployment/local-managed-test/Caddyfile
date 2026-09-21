@@ -1,0 +1,60 @@
+{
+	admin off
+	auto_https disable_redirects
+	servers :443 {
+		protocols h1 h2
+	}
+}
+
+https://{$LAWCASE_WORKBENCH_HOST} {
+	tls /run/lawcase-edge/edge.crt /run/lawcase-edge/edge.key
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Strict-Transport-Security "max-age=86400"
+	}
+
+	handle /healthz {
+		reverse_proxy api:8080
+	}
+
+	handle /setup-status {
+		reverse_proxy api:8080
+	}
+
+	handle /readyz {
+		reverse_proxy api:8080
+	}
+
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}
+
+https://{$LAWCASE_IDENTITY_HOST} {
+	tls /run/lawcase-edge/edge.crt /run/lawcase-edge/edge.key
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "no-referrer"
+		Strict-Transport-Security "max-age=86400"
+	}
+
+	reverse_proxy keycloak:8080 {
+		header_up Host {host}
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto https
+		header_up X-Forwarded-Port {$LAWCASE_HTTPS_PORT}
+	}
+}

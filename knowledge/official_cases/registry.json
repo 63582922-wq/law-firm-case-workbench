@@ -1,0 +1,116 @@
+{
+  "schema_version": "official-public-case-catalog-v1",
+  "verified_on": "2026-08-10",
+  "sources": [
+    {
+      "source_id": "PEOPLES_COURT_CASE_DATABASE",
+      "publisher": "最高人民法院",
+      "authority_level": "GUIDING_AND_REFERENCE_CASE_DATABASE",
+      "official_url": "https://rmfyalk.court.gov.cn/",
+      "allowed_domains": ["rmfyalk.court.gov.cn"],
+      "approved_acquisition_modes": ["METADATA_ONLY", "LAWYER_INITIATED_DOWNLOAD"],
+      "license_status": "REVIEW_REQUIRED",
+      "bulk_capture_allowed": false,
+      "full_text_repository_allowed": false,
+      "commercial_training_allowed": false
+    },
+    {
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "publisher": "最高人民法院",
+      "authority_level": "OFFICIAL_TYPICAL_CASE_OR_JUDGMENT_PUBLICATION",
+      "official_url": "https://www.court.gov.cn/",
+      "allowed_domains": ["www.court.gov.cn", "cicc.court.gov.cn"],
+      "approved_acquisition_modes": ["METADATA_ONLY", "INDIVIDUAL_AUTHORIZED_CAPTURE"],
+      "license_status": "REVIEW_REQUIRED",
+      "bulk_capture_allowed": false,
+      "full_text_repository_allowed": false,
+      "commercial_training_allowed": false
+    },
+    {
+      "source_id": "CHINA_JUDGMENTS_ONLINE",
+      "publisher": "最高人民法院",
+      "authority_level": "JUDICIAL_OPENNESS_PLATFORM",
+      "official_url": "https://wenshu.court.gov.cn/",
+      "allowed_domains": ["wenshu.court.gov.cn"],
+      "approved_acquisition_modes": ["DISCOVERY_ONLY"],
+      "license_status": "NOT_ESTABLISHED",
+      "bulk_capture_allowed": false,
+      "full_text_repository_allowed": false,
+      "commercial_training_allowed": false
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "REAL-PRIVATE-LENDING-TEMPORAL-SPLIT-001",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "深圳市润本信息咨询有限公司与阳江市信鑫海产品有限公司等民间借贷纠纷一审民事判决书",
+      "official_url": "https://cicc.court.gov.cn/html/1/218/347/329/428/434/12861.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["旧合同", "2020年8月20日分段", "一年期LPR四倍", "已支付利息"],
+      "evaluation_uses": ["时间适用规则分段", "起诉时间与合同时间参数区分", "判决主文与计算结果一致性"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    },
+    {
+      "candidate_id": "SPC-TYPICAL-INVALID-LOAN-OFFSET-012",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "李某、王某诉陈某某民间借贷纠纷案",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/16210.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["借贷无效", "高额已付利息", "超额部分冲抵本金"],
+      "evaluation_uses": ["合同效力先决条件", "已付款性质确认", "本金冲抵失效传播"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    },
+    {
+      "candidate_id": "SPC-TYPICAL-UNREGISTERED-MORTGAGE-013",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "郑某某诉雷某、刘某某、重庆某文化传播有限公司民间借贷纠纷案",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/16210.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["抵押登记", "优先受偿权", "担保审查"],
+      "evaluation_uses": ["担保材料缺口识别", "诉请范围检查"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    },
+    {
+      "candidate_id": "SPC-TYPICAL-SALE-AS-SECURITY-014",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "李某诉段某民间借贷纠纷案",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/16210.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["买卖合同担保借贷", "法律关系识别", "禁止直接取得担保物"],
+      "evaluation_uses": ["名为买卖实为借贷识别", "诉请纠偏提示"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    },
+    {
+      "candidate_id": "SPC-TYPICAL-NO-INTEREST-DEMAND-DATE-015",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "马某诉张某民间借贷纠纷案",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/16210.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["未约定利息", "催告日期不明", "逾期利息证据"],
+      "evaluation_uses": ["利息请求证据缺口", "起算日置信度", "诉请逐项回应"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    },
+    {
+      "candidate_id": "SPC-TEMPLATE-CASH-REPAYMENT-010",
+      "source_id": "SPC_OFFICIAL_SITE_CASES",
+      "title": "邢某与王某民间借贷纠纷案",
+      "official_url": "https://www.court.gov.cn/zixun/xiangqing/469671.html",
+      "discovered_on": "2026-08-10",
+      "issue_tags": ["现金还款抗辩", "交易习惯", "微信与行程证据"],
+      "evaluation_uses": ["答辩漏洞检查", "证据补充问题生成", "争点矩阵"],
+      "acquisition_mode": "METADATA_ONLY",
+      "status": "HUMAN_REVIEW_REQUIRED",
+      "formal_use_allowed": false
+    }
+  ]
+}

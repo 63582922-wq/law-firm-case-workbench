@@ -1,0 +1,44 @@
+{
+    admin off
+}
+
+# Caddy obtains HTTPS certificates automatically when LAWCASE_PUBLIC_HOST is a
+# reachable public DNS name.  For localhost it uses a local development CA;
+# see docs/WEB_DEPLOYMENT.md before using this outside a smoke check.
+{$LAWCASE_PUBLIC_HOST} {
+    encode zstd gzip
+
+    header {
+        -Server
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    # In setup-gated mode these paths report the deployment boundary. In
+    # production mode the API returns the same-origin Web readiness payload.
+    handle /healthz {
+        reverse_proxy api:8080
+    }
+
+    handle /setup-status {
+        reverse_proxy api:8080
+    }
+
+    handle /readyz {
+        reverse_proxy api:8080
+    }
+
+    # Keep the /api prefix.  The browser API deliberately mounts only under
+    # /api/v1; using handle_path here would strip it and could accidentally
+    # route a request into an old desktop /v1 contract.
+    handle /api/* {
+        reverse_proxy api:8080
+    }
+
+    handle {
+        reverse_proxy frontend:3000
+    }
+}

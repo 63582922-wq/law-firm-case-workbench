@@ -1,0 +1,1562 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from unittest.mock import patch
+from uuid import UUID, uuid4
+import unittest
+
+from case_kernel.case_ledger_postgres import CaseLedgerPersistenceBlocked
+from case_kernel.errors import VersionConflict
+from case_kernel.evidence_manifest import PageDisposition
+from case_kernel.evidence_manifest_postgres import (
+    PostgresEvidenceManifestStore,
+    _manifest_readiness_hash,
+    evidence_page_decision_batch_hash,
+    _agent_candidate_disposition,
+    AGENT_RELEVANT_PAGE_CANDIDATE_MIN_CONFIDENCE,
+    AGENT_UNRELATED_PAGE_CANDIDATE_MIN_CONFIDENCE,
+)
+from case_kernel.web_agent_material_review import (
+    AgentCandidateStatus,
+    AgentEvidencePageBinding,
+    AgentPageCandidate,
+    CandidateReasonCode,
+    PageCandidateKind,
+    ReviewPriority,
+    _input_hash_from_bindings,
+    agent_candidate_output_hash,
+)
+from case_kernel.local_case_folder import FolderManifest, OriginalFileRecord, folder_manifest_hash
+from case_kernel.models import Actor, Role
+
+
+@dataclass
+class FakeResult:
+    row: dict | None = None
+    rows: list[dict] | None = None
+    rowcount: int = 1
+
+    def fetchone(self):
+        return self.row
+
+    def fetchall(self):
+        return self.rows or []
+
+
+class FakeEvidenceConnection:
+    def __init__(
+        self,
+        *,
+        permitted: bool = True,
+        prior_receipt: dict | None = None,
+        page_decision: dict | None = None,
+        batch_page_decisions: list[dict] | None = None,
+        lock_pages: list[dict] | None = None,
+        duplicate_groups: list[dict] | None = None,
+        duplicate_members: list[dict] | None = None,
+        annotations: list[dict] | None = None,
+        manifest_row: dict | None = None,
+        derivative_row: dict | None = None,
+        verified_locator_row: dict | None = None,
+        original_page_locator_row: dict | None = None,
+        derivative_run_row: dict | None = None,
+        derivative_run_existing: dict | None = None,
+        derivative_run_claimed: dict | None = None,
+        derivative_run_artifacts: list[dict] | None = None,
+        clock_comparison: bool = True,
+        heartbeat_expires_at: datetime | None = None,
+        projection_version: int = 7,
+        evidence_page_rows: list[dict] | None = None,
+        evidence_page_total: int = 0,
+        evidence_page_annotations: list[dict] | None = None,
+        readiness_pages: list[dict] | None = None,
+        summary_originals: list[dict] | None = None,
+        summary_duplicate_members: list[dict] | None = None,
+        approved_folder_scan: dict | None = None,
+        approved_folder_files: list[dict] | None = None,
+        local_folder_scan_rows: list[dict] | None = None,
+        local_folder_candidate: dict | None = None,
+        local_folder_file_rows: list[dict] | None = None,
+        local_folder_file_total: int = 0,
+        normalized_original_duplicate: bool = False,
+        agent_run: dict | None = None,
+        agent_bindings: list[dict] | None = None,
+        agent_candidates: list[dict] | None = None,
+        agent_event: dict | None = None,
+        agent_pages: list[dict] | None = None,
+    ) -> None:
+        self.permitted = permitted
+        self.prior_receipt = prior_receipt
+        self.page_decision = page_decision
+        self.batch_page_decisions = batch_page_decisions or []
+        self.lock_pages = lock_pages or []
+        self.duplicate_groups = duplicate_groups or []
+        self.duplicate_members = duplicate_members or []
+        self.annotations = annotations or []
+        self.manifest_row = manifest_row
+        self.derivative_row = derivative_row
+        self.verified_locator_row = verified_locator_row
+        self.original_page_locator_row = original_page_locator_row
+        self.derivative_run_row = derivative_run_row
+        self.derivative_run_existing = derivative_run_existing
+        self.derivative_run_claimed = derivative_run_claimed
+        self.derivative_run_artifacts = derivative_run_artifacts or []
+        self.clock_comparison = clock_comparison
+        self.heartbeat_expires_at = heartbeat_expires_at
+        self.projection_version = projection_version
+        self.evidence_page_rows = evidence_page_rows or []
+        self.evidence_page_total = evidence_page_total
+        self.evidence_page_annotations = evidence_page_annotations or []
+        self.readiness_pages = readiness_pages or []
+        self.summary_originals = summary_originals or []
+        self.summary_duplicate_members = summary_duplicate_members or []
+        self.approved_folder_scan = approved_folder_scan
+        self.approved_folder_files = approved_folder_files or []
+        self.local_folder_scan_rows = local_folder_scan_rows or []
+        self.local_folder_candidate = local_folder_candidate
+        self.local_folder_file_rows = local_folder_file_rows or []
+        self.local_folder_file_total = local_folder_file_total
+        self.normalized_original_duplicate = normalized_original_duplicate
+        self.agent_run = agent_run
+        self.agent_bindings = agent_bindings or []
+        self.agent_candidates = agent_candidates or []
+        self.agent_event = agent_event
+        self.agent_pages = agent_pages or []
+        self.executed: list[tuple[str, tuple | None]] = []
+
+    def execute(self, sql: str, params: tuple | None = None) -> FakeResult:
+        normalized = " ".join(sql.split())
+        self.executed.append((normalized, params))
+        if "SELECT request_hash, response_json" in normalized:
+            if self.prior_receipt is None:
+                return FakeResult(row=None)
+            return FakeResult(
+                row={"request_hash": self.prior_receipt["request_hash"], "response_json": self.prior_receipt["response_json"]}
+            )
+        if "SELECT m.version," in normalized:
+            return FakeResult(row={"version": 1, "permitted": self.permitted})
+        if normalized.startswith("SELECT 1 FROM matters m JOIN matter_actor_roles"):
+            return FakeResult(row={"permitted": 1} if self.permitted else None)
+        if normalized.startswith("SELECT version FROM matters"):
+            return FakeResult(row={"version": self.projection_version})
+        if normalized.startswith("SELECT matter_id, version FROM matters"):
+            return FakeResult(row={"matter_id": params[0], "version": self.projection_version})
+        if normalized.startswith("SELECT COUNT(*) AS total_count FROM evidence_pages"):
+            return FakeResult(row={"total_count": self.evidence_page_total})
+        if normalized.startswith("SELECT page.evidence_page_id, page.evidence_file_id, page.page_number, source.original_label, source.created_at"):
+            return FakeResult(rows=self.evidence_page_rows)
+        if normalized.startswith("SELECT run_id, matter_id, matter_version, input_hash, output_hash"):
+            return FakeResult(row=self.agent_run)
+        if normalized.startswith("SELECT evidence_page_id, source_file_sha256, page_number, extracted_text_sha256 FROM web_agent_material_page_bindings"):
+            return FakeResult(rows=self.agent_bindings)
+        if normalized.startswith("SELECT candidate_id, evidence_page_id, source_file_sha256, page_number, candidate_kind"):
+            return FakeResult(rows=self.agent_candidates)
+        if normalized.startswith("SELECT payload FROM web_agent_material_events"):
+            return FakeResult(row=self.agent_event)
+        if normalized.startswith("SELECT page.evidence_page_id, page.page_number, source.original_file_sha256"):
+            return FakeResult(rows=self.agent_pages)
+        if "evidence_page_id = ANY" in normalized:
+            return FakeResult(rows=self.evidence_page_annotations)
+        if normalized.startswith("SELECT evidence_file_id, original_label, original_file_sha256"):
+            return FakeResult(rows=self.summary_originals)
+        if normalized.startswith("SELECT page.evidence_page_id, page.evidence_file_id, page.page_number, approved.decision_id"):
+            return FakeResult(rows=self.readiness_pages)
+        if normalized.startswith("SELECT annotation_id, evidence_page_id FROM evidence_page_annotations"):
+            return FakeResult(rows=self.annotations)
+        if normalized.startswith("SELECT member.duplicate_group_id, member.evidence_page_id"):
+            return FakeResult(rows=self.summary_duplicate_members)
+        if normalized.startswith("SELECT scan_id, root_fingerprint, manifest_hash"):
+            return FakeResult(row=self.approved_folder_scan)
+        if normalized.startswith("SELECT relative_path, byte_size, file_sha256, detected_kind"):
+            return FakeResult(rows=self.approved_folder_files)
+        if normalized.startswith("SELECT scan_id, manifest_hash, status"):
+            return FakeResult(row=self.local_folder_candidate)
+        if normalized.startswith("SELECT scan_id, manifest_hash, base_scan_id"):
+            return FakeResult(rows=self.local_folder_scan_rows)
+        if normalized.startswith("SELECT scan_id FROM local_folder_scans"):
+            return FakeResult(row={"scan_id": self.local_folder_candidate["scan_id"]} if self.local_folder_candidate else None)
+        if normalized.startswith("SELECT COUNT(*) AS total_count FROM local_folder_scan_files"):
+            return FakeResult(row={"total_count": self.local_folder_file_total})
+        if normalized.startswith("SELECT relative_path, previous_relative_path, byte_size, file_sha256"):
+            return FakeResult(rows=self.local_folder_file_rows)
+        if "original_file_sha256 = %s AND original_label = %s" in normalized:
+            return FakeResult(row={"exists": 1} if self.normalized_original_duplicate else None)
+        if normalized.startswith("SELECT 1 FROM evidence_original_files"):
+            return FakeResult(row={"exists": 1})
+        if normalized.startswith("SELECT 1 FROM evidence_pages"):
+            return FakeResult(row={"exists": 1})
+        if "SELECT evidence_page_id, disposition, status FROM evidence_page_decisions" in normalized:
+            return FakeResult(
+                row=self.page_decision
+                or {"evidence_page_id": str(uuid4()), "disposition": "INCLUDE", "status": "CANDIDATE"}
+            )
+        if normalized.startswith("SELECT decision_id, evidence_page_id, disposition, status FROM evidence_page_decisions"):
+            return FakeResult(rows=self.batch_page_decisions)
+        if "UPDATE evidence_page_decisions SET status = 'APPROVED'" in normalized and "decision_id = ANY" in normalized:
+            return FakeResult(rowcount=len(params[2]))
+        if "SELECT manifest_id FROM evidence_manifests" in normalized:
+            return FakeResult(row=None)
+        if "source.byte_size, source.media_type, source.page_count" in normalized:
+            return FakeResult(row=self.original_page_locator_row)
+        if "SELECT page.evidence_page_id, page.evidence_file_id" in normalized:
+            return FakeResult(rows=self.lock_pages)
+        if "SELECT duplicate_group_id, status, canonical_page_id" in normalized:
+            return FakeResult(rows=self.duplicate_groups)
+        if "SELECT duplicate_group_id, evidence_page_id FROM evidence_page_duplicate_members" in normalized:
+            return FakeResult(rows=self.duplicate_members)
+        if "SELECT annotation_id, evidence_page_id, purpose" in normalized:
+            return FakeResult(rows=self.annotations)
+        if "SELECT content_hash, included_pages, status FROM evidence_manifests" in normalized:
+            return FakeResult(row=self.manifest_row)
+        if "SELECT status, content_hash FROM evidence_manifests" in normalized:
+            return FakeResult(row=self.manifest_row)
+        if "SELECT status FROM evidence_derivative_runs" in normalized:
+            return FakeResult(row=self.derivative_run_existing)
+        if "SELECT run.status, run.attempt_count" in normalized or "SELECT run.status, run.lease_id" in normalized:
+            return FakeResult(row=self.derivative_run_row)
+        if normalized.startswith("SELECT %s <= now()") or normalized.startswith("SELECT %s > now()"):
+            key = "expired" if "expired" in normalized else "active"
+            return FakeResult(row={key: self.clock_comparison})
+        if "UPDATE evidence_derivative_runs SET status = 'RUNNING'" in normalized:
+            return FakeResult(row=self.derivative_run_claimed)
+        if "SET lease_expires_at = now()" in normalized:
+            return FakeResult(
+                row={"lease_expires_at": self.heartbeat_expires_at}
+                if self.heartbeat_expires_at is not None
+                else None
+            )
+        if "SELECT derivative_id, artifact_type, status, manifest_id" in normalized:
+            return FakeResult(rows=self.derivative_run_artifacts)
+        if "SELECT derivative.status, derivative.manifest_id" in normalized:
+            return FakeResult(row=self.derivative_row)
+        if "SELECT derivative.derivative_id, derivative.manifest_id" in normalized:
+            return FakeResult(row=self.verified_locator_row)
+        if "UPDATE matters SET version = version + 1" in normalized:
+            return FakeResult(row={"version": 2})
+        return FakeResult()
+
+
+class FakeConnectionContext:
+    def __init__(self, connection: FakeEvidenceConnection) -> None:
+        self.connection = connection
+
+    def __enter__(self) -> FakeEvidenceConnection:
+        return self.connection
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+
+class PostgresEvidenceManifestStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.firm_id = str(uuid4())
+        self.actor_id = str(uuid4())
+        self.matter_id = str(uuid4())
+        self.actor = Actor(self.actor_id, self.firm_id, frozenset({Role.LEAD_LAWYER}))
+        self.store = PostgresEvidenceManifestStore("postgresql://not-used.invalid/lawcase_workbench_test")
+
+    def folder_manifest(self) -> FolderManifest:
+        originals = tuple(sorted((
+            OriginalFileRecord(
+                relative_path="法院送达资料/起诉状.pdf",
+                byte_size=1024,
+                sha256="a" * 64,
+                detected_kind="PDF",
+            ),
+            OriginalFileRecord(
+                relative_path="微信转账记录/2022.xlsx",
+                byte_size=2048,
+                sha256="b" * 64,
+                detected_kind="SPREADSHEET",
+            ),
+        ), key=lambda item: item.relative_path))
+        root_hash = "c" * 64
+        return FolderManifest(
+            scan_id=str(uuid4()),
+            root_fingerprint=root_hash,
+            manifest_hash=folder_manifest_hash(root_hash, originals),
+            scanned_at=datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc),
+            total_files=2,
+            total_bytes=3072,
+            skipped_symlinks=1,
+            originals=originals,
+        )
+
+    def test_alpha_identity_is_rejected_before_database_connection(self) -> None:
+        actor = Actor("alpha-lead", "alpha-firm", frozenset({Role.LEAD_LAWYER}))
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect") as connect:
+            with self.assertRaisesRegex(ValueError, "requires UUID"):
+                self.store.register_original_file(
+                    matter_id="alpha-matter",
+                    actor=actor,
+                    expected_version=1,
+                    idempotency_key="evidence-original-001",
+                    original_label="[合成] 微信账单.pdf",
+                    original_file_sha256="a" * 64,
+                    byte_size=4096,
+                    media_type="application/pdf",
+                    page_count=2,
+                    source_scan_fingerprint="b" * 64,
+                )
+        connect.assert_not_called()
+
+    def test_original_registration_is_append_only_versioned_audited_and_stales_outputs(self) -> None:
+        connection = FakeEvidenceConnection()
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-original-001",
+                original_label="[合成] 微信账单.pdf",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                media_type="application/pdf",
+                page_count=2,
+                source_scan_fingerprint="b" * 64,
+            )
+
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_original_files", sql)
+        self.assertEqual(sql.count("INSERT INTO evidence_pages"), 2)
+        self.assertIn("UPDATE evidence_derivative_artifacts", sql)
+        self.assertIn("UPDATE evidence_manifests", sql)
+        self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+        self.assertIn("INSERT INTO audit_events", sql)
+        self.assertIn("INSERT INTO outbox_events", sql)
+        self.assertIn("INSERT INTO command_idempotency", sql)
+        self.assertNotIn("DELETE FROM evidence_", sql)
+
+    def test_normalized_original_registers_raw_source_pages_and_encrypted_pdf_lineage_atomically(self) -> None:
+        connection = FakeEvidenceConnection()
+        pdf_hash = "d" * 64
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_normalized_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="normalized-evidence-original-001",
+                original_label="微信转账记录/付款截图.png",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                source_media_type="image/png",
+                page_count=1,
+                source_scan_fingerprint="b" * 64,
+                normalizer_id="lawcase-local-normalizer",
+                normalizer_version="1",
+                transform_hash="c" * 64,
+                normalized_pdf_sha256=pdf_hash,
+                normalized_pdf_bytes=1024,
+                normalized_pdf_object_key=f"{pdf_hash[:2]}/{pdf_hash[2:4]}/{pdf_hash}.lca",
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_original_files", sql)
+        self.assertIn("INSERT INTO evidence_normalized_representations", sql)
+        self.assertEqual(sql.count("INSERT INTO evidence_pages"), 1)
+        self.assertTrue(
+            any(
+                params is not None and "NORMALIZED_EVIDENCE_ORIGINAL_REGISTERED" in params
+                for _, params in connection.executed
+            )
+        )
+        self.assertNotIn("absolute_path", sql)
+
+    def test_normalized_original_rejects_artifact_key_not_bound_to_pdf_hash(self) -> None:
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "object key"):
+            self.store.register_normalized_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="normalized-evidence-original-key-001",
+                original_label="付款截图.png",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                source_media_type="image/png",
+                page_count=1,
+                source_scan_fingerprint="b" * 64,
+                normalizer_id="lawcase-local-normalizer",
+                normalizer_version="1",
+                transform_hash="c" * 64,
+                normalized_pdf_sha256="d" * 64,
+                normalized_pdf_bytes=1024,
+                normalized_pdf_object_key="bad/key.lca",
+            )
+
+    def test_local_folder_scan_candidate_persists_only_relative_inventory_and_audit_counts(self) -> None:
+        manifest = self.folder_manifest()
+        connection = FakeEvidenceConnection()
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.create_local_folder_scan_candidate(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="local-folder-scan-001",
+                manifest=manifest,
+            )
+        self.assertEqual(receipt.object_id, manifest.scan_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO local_folder_scans", sql)
+        self.assertEqual(sql.count("INSERT INTO local_folder_scan_files"), 2)
+        self.assertNotIn("selected_root", sql)
+        self.assertNotIn("absolute_path", sql)
+        file_params = [
+            params for statement, params in connection.executed
+            if "INSERT INTO local_folder_scan_files" in statement
+        ]
+        self.assertEqual(
+            {params[3] for params in file_params},
+            {"法院送达资料/起诉状.pdf", "微信转账记录/2022.xlsx"},
+        )
+
+        tampered = FolderManifest(**{**manifest.__dict__, "manifest_hash": "d" * 64})
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect") as connect:
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "hash does not match"):
+                self.store.create_local_folder_scan_candidate(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="local-folder-scan-tampered",
+                    manifest=tampered,
+                )
+        connect.assert_not_called()
+
+    def test_local_folder_scan_approval_is_hash_bound_and_stales_old_outputs(self) -> None:
+        scan_id = str(uuid4())
+        manifest_hash = "e" * 64
+        mismatch = FakeEvidenceConnection(
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": "f" * 64, "status": "CANDIDATE"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(mismatch),
+        ):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "changed before approval"):
+                self.store.approve_local_folder_scan(
+                    matter_id=self.matter_id,
+                    scan_id=scan_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="local-folder-approve-mismatch",
+                    manifest_hash=manifest_hash,
+                    approval_hash="a" * 64,
+                )
+
+        connection = FakeEvidenceConnection(
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": manifest_hash, "status": "CANDIDATE"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.approve_local_folder_scan(
+                matter_id=self.matter_id,
+                scan_id=scan_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="local-folder-approve",
+                manifest_hash=manifest_hash,
+                approval_hash="a" * 64,
+            )
+        self.assertEqual(receipt.object_id, scan_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'APPROVED'", sql)
+        self.assertIn("UPDATE evidence_manifests", sql)
+        self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+    def test_local_folder_file_page_is_version_and_scan_bound(self) -> None:
+        scan_id = str(uuid4())
+        rows = [
+            {
+                "relative_path": f"材料/{index}.pdf",
+                "previous_relative_path": None,
+                "byte_size": index * 100,
+                "file_sha256": f"{index:x}" * 64,
+                "detected_kind": "PDF",
+                "change_kind": "NEW",
+                "present": True,
+                "sort_sequence": index,
+            }
+            for index in range(1, 4)
+        ]
+        connection = FakeEvidenceConnection(
+            projection_version=7,
+            local_folder_candidate={"scan_id": scan_id, "manifest_hash": "a" * 64, "status": "CANDIDATE"},
+            local_folder_file_rows=rows,
+            local_folder_file_total=3,
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            first = self.store.list_local_folder_scan_file_page(
+                matter_id=self.matter_id,
+                scan_id=scan_id,
+                actor=self.actor,
+                limit=2,
+                cursor=None,
+                expected_version=7,
+            )
+        self.assertEqual(len(first.items), 2)
+        self.assertTrue(first.has_more)
+        self.assertIsNotNone(first.next_cursor)
+        other_scan_id = str(uuid4())
+        with self.assertRaisesRegex(Exception, "scope"):
+            self.store.list_local_folder_scan_file_page(
+                matter_id=self.matter_id,
+                scan_id=other_scan_id,
+                actor=self.actor,
+                limit=2,
+                cursor=first.next_cursor,
+                expected_version=7,
+            )
+
+    def test_idempotent_replay_is_resolved_before_stale_expected_version_check(self) -> None:
+        original_payload = {
+            "matter_id": self.matter_id,
+            "expected_version": 1,
+            "original_label": "[合成] 微信账单.pdf",
+            "original_file_sha256": "a" * 64,
+            "byte_size": 4096,
+            "media_type": "application/pdf",
+            "page_count": 2,
+            "source_scan_fingerprint": "b" * 64,
+            "supersedes_file_id": None,
+        }
+        from case_kernel.case_ledger_postgres import _payload_hash
+
+        response = {
+            "command_name": "REGISTER_EVIDENCE_ORIGINAL",
+            "idempotency_key": "evidence-original-replay",
+            "matter_id": self.matter_id,
+            "matter_version": 2,
+            "audit_event_id": str(uuid4()),
+            "object_type": "EVIDENCE_ORIGINAL",
+            "object_id": str(uuid4()),
+        }
+        connection = FakeEvidenceConnection(
+            prior_receipt={"request_hash": _payload_hash(original_payload), "response_json": response}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_original_file(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-original-replay",
+                original_label="[合成] 微信账单.pdf",
+                original_file_sha256="a" * 64,
+                byte_size=4096,
+                media_type="application/pdf",
+                page_count=2,
+                source_scan_fingerprint="b" * 64,
+            )
+        self.assertEqual(receipt.object_id, response["object_id"])
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("SELECT m.version", sql)
+        self.assertNotIn("INSERT INTO evidence_original_files", sql)
+
+    def test_approved_page_decision_invalidates_manifest_derivative_and_submission(self) -> None:
+        decision_id = str(uuid4())
+        page_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            page_decision={"evidence_page_id": page_id, "disposition": "INCLUDE", "status": "CANDIDATE"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.approve_page_decision(
+                matter_id=self.matter_id,
+                decision_id=decision_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-decision-approve",
+                approval_hash="c" * 64,
+            )
+        self.assertEqual(receipt.object_id, decision_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'INVALIDATED', approval_hash = NULL", sql)
+        self.assertIn("SET status = 'APPROVED', approval_hash", sql)
+        self.assertIn("UPDATE evidence_derivative_artifacts", sql)
+        self.assertIn("UPDATE evidence_manifests", sql)
+        self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+    def test_batch_page_decision_approval_is_one_atomic_ledger_command(self) -> None:
+        first_decision_id, second_decision_id = sorted((str(uuid4()), str(uuid4())))
+        first_page_id, second_page_id = str(uuid4()), str(uuid4())
+        rows = [
+            {"decision_id": first_decision_id, "evidence_page_id": first_page_id, "disposition": "INCLUDE", "status": "CANDIDATE"},
+            {"decision_id": second_decision_id, "evidence_page_id": second_page_id, "disposition": "EXCLUDE", "status": "CANDIDATE"},
+        ]
+        connection = FakeEvidenceConnection(batch_page_decisions=rows)
+        batch_hash = evidence_page_decision_batch_hash(
+            matter_id=self.matter_id,
+            expected_version=1,
+            decision_ids=(second_decision_id, first_decision_id),
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.approve_page_decisions_batch(
+                matter_id=self.matter_id,
+                decision_ids=(second_decision_id, first_decision_id),
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-batch-approve",
+                batch_hash=batch_hash,
+                approval_hash="c" * 64,
+            )
+        self.assertEqual(receipt.command_name, "APPROVE_EVIDENCE_PAGE_DECISIONS_BATCH")
+        self.assertEqual(receipt.matter_version, 2)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertEqual(sql.count("UPDATE matters SET version = version + 1"), 1)
+        self.assertEqual(sql.count("INSERT INTO audit_events"), 1)
+        self.assertEqual(sql.count("INSERT INTO outbox_events"), 1)
+        self.assertIn("decision_id = ANY", sql)
+        self.assertIn("UPDATE evidence_derivative_artifacts", sql)
+        self.assertIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+    def test_batch_page_decision_idempotent_replay_returns_single_prior_receipt(self) -> None:
+        from case_kernel.case_ledger_postgres import _payload_hash
+
+        decision_id = str(uuid4())
+        batch_hash = evidence_page_decision_batch_hash(
+            matter_id=self.matter_id, expected_version=1, decision_ids=(decision_id,)
+        )
+        response = {
+            "command_name": "APPROVE_EVIDENCE_PAGE_DECISIONS_BATCH",
+            "idempotency_key": "evidence-page-batch-replay",
+            "matter_id": self.matter_id,
+            "matter_version": 2,
+            "audit_event_id": str(uuid4()),
+            "object_type": "EVIDENCE_PAGE_DECISION_BATCH",
+            "object_id": str(uuid4()),
+        }
+        payload = {
+            "matter_id": self.matter_id,
+            "decision_ids": (decision_id,),
+            "expected_version": 1,
+            "batch_hash": batch_hash,
+            "approval_hash": "c" * 64,
+        }
+        connection = FakeEvidenceConnection(
+            prior_receipt={"request_hash": _payload_hash(payload), "response_json": response}
+        )
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect", return_value=FakeConnectionContext(connection)):
+            receipt = self.store.approve_page_decisions_batch(
+                matter_id=self.matter_id,
+                decision_ids=(decision_id,),
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-batch-replay",
+                batch_hash=batch_hash,
+                approval_hash="c" * 64,
+            )
+        self.assertEqual(receipt.object_id, response["object_id"])
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("SELECT decision_id, evidence_page_id", sql)
+        self.assertNotIn("UPDATE matters SET version = version + 1", sql)
+
+    def test_batch_page_decision_approval_rejects_partial_or_competing_candidates_before_updates(self) -> None:
+        first_decision_id, missing_decision_id = sorted((str(uuid4()), str(uuid4())))
+        page_id = str(uuid4())
+        partial = FakeEvidenceConnection(batch_page_decisions=[{
+            "decision_id": first_decision_id,
+            "evidence_page_id": page_id,
+            "disposition": "INCLUDE",
+            "status": "CANDIDATE",
+        }])
+        batch_hash = evidence_page_decision_batch_hash(
+            matter_id=self.matter_id,
+            expected_version=1,
+            decision_ids=(first_decision_id, missing_decision_id),
+        )
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect", return_value=FakeConnectionContext(partial)):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "do not belong"):
+                self.store.approve_page_decisions_batch(
+                    matter_id=self.matter_id,
+                    decision_ids=(first_decision_id, missing_decision_id),
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-page-batch-partial",
+                    batch_hash=batch_hash,
+                    approval_hash="c" * 64,
+                )
+        partial_sql = "\n".join(statement for statement, _ in partial.executed)
+        self.assertNotIn("SET status = 'APPROVED'", partial_sql)
+        self.assertNotIn("UPDATE matters SET version = version + 1", partial_sql)
+
+        second_decision_id = str(uuid4())
+        competing_rows = sorted([
+            {"decision_id": first_decision_id, "evidence_page_id": page_id, "disposition": "INCLUDE", "status": "CANDIDATE"},
+            {"decision_id": second_decision_id, "evidence_page_id": page_id, "disposition": "EXCLUDE", "status": "CANDIDATE"},
+        ], key=lambda row: row["decision_id"])
+        competing = FakeEvidenceConnection(batch_page_decisions=competing_rows)
+        competing_ids = tuple(row["decision_id"] for row in competing_rows)
+        competing_hash = evidence_page_decision_batch_hash(
+            matter_id=self.matter_id, expected_version=1, decision_ids=competing_ids
+        )
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect", return_value=FakeConnectionContext(competing)):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "competing"):
+                self.store.approve_page_decisions_batch(
+                    matter_id=self.matter_id,
+                    decision_ids=competing_ids,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-page-batch-competing",
+                    batch_hash=competing_hash,
+                    approval_hash="c" * 64,
+                )
+
+    def test_batch_page_decision_approval_rejects_non_candidate_and_tampered_hash(self) -> None:
+        decision_id, page_id = str(uuid4()), str(uuid4())
+        correct_hash = evidence_page_decision_batch_hash(
+            matter_id=self.matter_id, expected_version=1, decision_ids=(decision_id,)
+        )
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "hash"):
+            self.store.approve_page_decisions_batch(
+                matter_id=self.matter_id,
+                decision_ids=(decision_id,),
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-batch-tampered",
+                batch_hash="0" * 64,
+                approval_hash="c" * 64,
+            )
+        approved = FakeEvidenceConnection(batch_page_decisions=[{
+            "decision_id": decision_id,
+            "evidence_page_id": page_id,
+            "disposition": "INCLUDE",
+            "status": "APPROVED",
+        }])
+        with patch("case_kernel.evidence_manifest_postgres.psycopg.connect", return_value=FakeConnectionContext(approved)):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "active candidate"):
+                self.store.approve_page_decisions_batch(
+                    matter_id=self.matter_id,
+                    decision_ids=(decision_id,),
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-page-batch-not-candidate",
+                    batch_hash=correct_hash,
+                    approval_hash="c" * 64,
+                )
+        sql = "\n".join(statement for statement, _ in approved.executed)
+        self.assertNotIn("SET status = 'APPROVED'", sql)
+
+    def test_new_page_decision_candidate_invalidates_prior_candidate_for_recoverable_snapshot(self) -> None:
+        page_id = str(uuid4())
+        connection = FakeEvidenceConnection()
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.create_page_decision_candidate(
+                matter_id=self.matter_id,
+                evidence_page_id=page_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-page-decision-candidate-replacement",
+                disposition=PageDisposition.INCLUDE,
+                reason="[合成] 与目标主体相关。",
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        invalidate_at = sql.index("UPDATE evidence_page_decisions SET status = 'INVALIDATED'")
+        insert_at = sql.index("INSERT INTO evidence_page_decisions")
+        self.assertLess(invalidate_at, insert_at)
+        self.assertIn("AND status = 'CANDIDATE'", sql)
+
+    def test_manifest_lock_blocks_any_source_page_without_approved_decision(self) -> None:
+        page_id = str(uuid4())
+        file_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            lock_pages=[
+                {
+                    "evidence_page_id": page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 1,
+                    "original_label": "[合成] 微信账单.pdf",
+                    "original_file_sha256": "a" * 64,
+                    "decision_id": None,
+                    "disposition": None,
+                    "pending_decision_id": None,
+                }
+            ]
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "unresolved pages: 1"):
+                self.store.lock_manifest(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-manifest-lock-missing",
+                    approval_hash="d" * 64,
+                    readiness_hash="c" * 64,
+                )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("INSERT INTO evidence_manifests", sql)
+
+    def test_manifest_lock_materializes_page_order_and_approved_red_box_lineage(self) -> None:
+        file_id = str(uuid4())
+        first_page_id = str(uuid4())
+        second_page_id = str(uuid4())
+        first_decision_id = str(uuid4())
+        second_decision_id = str(uuid4())
+        annotation_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            lock_pages=[
+                {
+                    "evidence_page_id": first_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 1,
+                    "original_label": "[合成] 微信账单.pdf",
+                    "original_file_sha256": "a" * 64,
+                    "decision_id": first_decision_id,
+                    "disposition": "INCLUDE",
+                    "pending_decision_id": None,
+                },
+                {
+                    "evidence_page_id": second_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 2,
+                    "original_label": "[合成] 微信账单.pdf",
+                    "original_file_sha256": "a" * 64,
+                    "decision_id": second_decision_id,
+                    "disposition": "EXCLUDE",
+                    "pending_decision_id": None,
+                },
+            ],
+            annotations=[
+                {
+                    "annotation_id": annotation_id,
+                    "evidence_page_id": first_page_id,
+                    "purpose": "HIGHLIGHT_RELEVANT_REGION",
+                    "x0": Decimal("0.1"),
+                    "y0": Decimal("0.2"),
+                    "x1": Decimal("0.8"),
+                    "y1": Decimal("0.4"),
+                    "label": "[合成] 与原告相关交易行",
+                    "approval_hash": "e" * 64,
+                }
+            ],
+        )
+        readiness_hash = _manifest_readiness_hash(
+            matter_id=self.matter_id,
+            matter_version=1,
+            page_rows=connection.lock_pages,
+            duplicate_group_rows=connection.duplicate_groups,
+            duplicate_members={},
+            annotation_map={first_page_id: tuple(connection.annotations)},
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.lock_manifest(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-manifest-lock",
+                approval_hash="f" * 64,
+                readiness_hash=readiness_hash,
+            )
+        UUID(receipt.object_id)
+        manifest_params = next(
+            params for sql, params in connection.executed if "INSERT INTO evidence_manifests" in sql
+        )
+        self.assertEqual(manifest_params[5:8], (2, 1, 1))
+        page_params = [
+            params for sql, params in connection.executed if "INSERT INTO evidence_manifest_pages" in sql
+        ]
+        self.assertEqual([params[-1] for params in page_params], [1, None])
+        annotation_params = next(
+            params
+            for sql, params in connection.executed
+            if "INSERT INTO evidence_manifest_page_annotations" in sql
+        )
+        self.assertEqual(annotation_params[1:3], (first_page_id, annotation_id))
+
+    def test_manifest_lock_blocks_pending_candidate_and_changed_readiness(self) -> None:
+        page_id = str(uuid4())
+        file_id = str(uuid4())
+        decision_id = str(uuid4())
+        approved_page = {
+            "evidence_page_id": page_id,
+            "evidence_file_id": file_id,
+            "page_number": 1,
+            "original_label": "[合成] 微信账单.pdf",
+            "original_file_sha256": "a" * 64,
+            "decision_id": decision_id,
+            "disposition": "INCLUDE",
+            "pending_decision_id": str(uuid4()),
+        }
+        pending_connection = FakeEvidenceConnection(lock_pages=[approved_page])
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(pending_connection),
+        ):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "pending page disposition"):
+                self.store.lock_manifest(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-manifest-lock-pending",
+                    approval_hash="d" * 64,
+                    readiness_hash="c" * 64,
+                )
+        pending_sql = "\n".join(statement for statement, _ in pending_connection.executed)
+        self.assertNotIn("INSERT INTO evidence_manifests", pending_sql)
+
+        approved_page["pending_decision_id"] = None
+        changed_connection = FakeEvidenceConnection(lock_pages=[approved_page])
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(changed_connection),
+        ):
+            with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "readiness changed"):
+                self.store.lock_manifest(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    expected_version=1,
+                    idempotency_key="evidence-manifest-lock-changed",
+                    approval_hash="d" * 64,
+                    readiness_hash="c" * 64,
+                )
+        changed_sql = "\n".join(statement for statement, _ in changed_connection.executed)
+        self.assertNotIn("INSERT INTO evidence_manifests", changed_sql)
+
+    def test_evidence_page_list_is_version_bound_and_keyset_paginated(self) -> None:
+        created_at = datetime(2025, 8, 20, 9, 0, tzinfo=timezone.utc)
+        file_id = str(uuid4())
+        page_ids = [str(uuid4()) for _ in range(3)]
+        rows = [
+            {
+                "evidence_page_id": page_id,
+                "evidence_file_id": file_id,
+                "page_number": index,
+                "original_label": "[合成] 微信账单.pdf",
+                "source_created_at": created_at,
+                "decision_id": str(uuid4()) if index == 1 else None,
+                "disposition": "INCLUDE" if index == 1 else None,
+                "reason": "[合成] 与当事人有关。" if index == 1 else None,
+                "status": "APPROVED" if index == 1 else None,
+                "approval_hash": "a" * 64 if index == 1 else None,
+                "approved_by": self.actor_id if index == 1 else None,
+                "pending_decision_id": None,
+                "pending_disposition": None,
+                "pending_reason": None,
+                "pending_status": None,
+            }
+            for index, page_id in enumerate(page_ids, start=1)
+        ]
+        annotation_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            projection_version=7,
+            evidence_page_rows=rows,
+            evidence_page_total=3,
+            evidence_page_annotations=[
+                {
+                    "annotation_id": annotation_id,
+                    "evidence_page_id": page_ids[0],
+                    "purpose": "HIGHLIGHT_RELEVANT_REGION",
+                    "x0": Decimal("0.1"),
+                    "y0": Decimal("0.2"),
+                    "x1": Decimal("0.8"),
+                    "y1": Decimal("0.4"),
+                    "label": "[合成] 交易行",
+                    "status": "APPROVED",
+                    "approval_hash": "b" * 64,
+                    "approved_by": self.actor_id,
+                }
+            ],
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            first = self.store.list_evidence_page(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                limit=2,
+                cursor=None,
+                expected_version=7,
+            )
+        self.assertEqual(first.total_count, 3)
+        self.assertEqual(len(first.items), 2)
+        self.assertTrue(first.has_more)
+        self.assertIsNotNone(first.next_cursor)
+        self.assertEqual(first.items[0]["original_label"], "[合成] 微信账单.pdf")
+        self.assertEqual(first.items[0]["annotations"][0]["annotation_id"], annotation_id)
+        self.assertNotIn("rendered_page_sha256", first.items[0])
+
+        continuation_connection = FakeEvidenceConnection(
+            projection_version=7,
+            evidence_page_rows=[rows[2]],
+            evidence_page_total=3,
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(continuation_connection),
+        ):
+            second = self.store.list_evidence_page(
+                matter_id=self.matter_id,
+                actor=self.actor,
+                limit=2,
+                cursor=first.next_cursor,
+                expected_version=7,
+            )
+        self.assertEqual(len(second.items), 1)
+        self.assertFalse(second.has_more)
+        paged_sql = "\n".join(statement for statement, _ in continuation_connection.executed)
+        self.assertIn(") > (%s, %s, %s, %s)", paged_sql)
+
+    def test_evidence_page_list_rejects_changed_projection_before_page_query(self) -> None:
+        connection = FakeEvidenceConnection(projection_version=8)
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            with self.assertRaises(VersionConflict):
+                self.store.list_evidence_page(
+                    matter_id=self.matter_id,
+                    actor=self.actor,
+                    limit=50,
+                    cursor=None,
+                    expected_version=7,
+                )
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("SELECT COUNT(*) AS total_count FROM evidence_pages", sql)
+
+    def test_evidence_review_summary_counts_all_pages_without_page_payloads(self) -> None:
+        file_id = str(uuid4())
+        first_page_id = str(uuid4())
+        second_page_id = str(uuid4())
+        pending_id = str(uuid4())
+        duplicate_group_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            projection_version=9,
+            readiness_pages=[
+                {
+                    "evidence_page_id": first_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 1,
+                    "decision_id": str(uuid4()),
+                    "disposition": "INCLUDE",
+                    "pending_decision_id": pending_id,
+                },
+                {
+                    "evidence_page_id": second_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 2,
+                    "decision_id": None,
+                    "disposition": None,
+                    "pending_decision_id": None,
+                },
+            ],
+            summary_originals=[
+                {
+                    "evidence_file_id": file_id,
+                    "original_label": "[合成] 微信账单.pdf",
+                    "original_file_sha256": "a" * 64,
+                    "byte_size": 4096,
+                    "media_type": "application/pdf",
+                    "page_count": 2,
+                    "source_scan_fingerprint": "b" * 64,
+                    "supersedes_file_id": None,
+                    "created_at": datetime(2025, 8, 20, 9, 0, tzinfo=timezone.utc),
+                }
+            ],
+            duplicate_groups=[
+                {
+                    "duplicate_group_id": duplicate_group_id,
+                    "status": "CANDIDATE",
+                    "canonical_page_id": None,
+                    "approval_hash": None,
+                    "approved_by": None,
+                }
+            ],
+            summary_duplicate_members=[
+                {
+                    "duplicate_group_id": duplicate_group_id,
+                    "evidence_page_id": first_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 1,
+                    "original_label": "[合成] 微信账单.pdf",
+                },
+                {
+                    "duplicate_group_id": duplicate_group_id,
+                    "evidence_page_id": second_page_id,
+                    "evidence_file_id": file_id,
+                    "page_number": 2,
+                    "original_label": "[合成] 微信账单.pdf",
+                },
+            ],
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            summary = self.store.get_evidence_review_summary(
+                matter_id=self.matter_id,
+                actor=self.actor,
+            )
+        self.assertEqual(summary.version, 9)
+        self.assertEqual(summary.total_pages, 2)
+        self.assertEqual(summary.unresolved_page_count, 1)
+        self.assertEqual(summary.pending_decision_count, 1)
+        self.assertEqual(summary.unresolved_duplicate_count, 1)
+        self.assertEqual(summary.duplicate_groups[0]["members"][1]["page_number"], 2)
+        self.assertEqual(len(summary.manifest_readiness_hash), 64)
+        self.assertEqual(len(summary.summary_hash), 64)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertNotIn("approved.reason", sql)
+
+    def test_system_worker_registers_only_hash_bound_current_manifest_derivative(self) -> None:
+        manifest_id = str(uuid4())
+        artifact_hash = "9" * 64
+        object_key = f"{artifact_hash[:2]}/{artifact_hash[2:4]}/{artifact_hash}.lca"
+        system_actor = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        connection = FakeEvidenceConnection(
+            manifest_row={"content_hash": "8" * 64, "included_pages": 2, "status": "LOCKED"}
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.register_derivative_candidate(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=system_actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-register",
+                manifest_content_hash="8" * 64,
+                artifact_type="ANNOTATED_RELATED_PAGES_PDF",
+                storage_object_key=object_key,
+                artifact_sha256=artifact_hash,
+                page_count=2,
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_derivative_artifacts", sql)
+        self.assertIn("EVIDENCE_DERIVATIVE_CANDIDATE_REGISTERED", str(connection.executed))
+        self.assertNotIn("UPDATE submission_bundles SET validity = 'STALE'", sql)
+
+        with self.assertRaisesRegex(CaseLedgerPersistenceBlocked, "must match the artifact SHA-256"):
+            self.store.register_derivative_candidate(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=system_actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-wrong-key",
+                manifest_content_hash="8" * 64,
+                artifact_type="RELATED_PAGES_PDF",
+                storage_object_key=f"aa/bb/{artifact_hash}.lca",
+                artifact_sha256=artifact_hash,
+                page_count=2,
+            )
+
+    def test_derivative_verification_preserves_manifest_and_artifact_hash_binding(self) -> None:
+        derivative_id = str(uuid4())
+        manifest_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            derivative_row={
+                "status": "CANDIDATE",
+                "manifest_id": manifest_id,
+                "artifact_type": "RELATED_PAGES_PDF",
+                "artifact_sha256": "7" * 64,
+                "manifest_status": "LOCKED",
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.verify_derivative(
+                matter_id=self.matter_id,
+                derivative_id=derivative_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-derivative-verify",
+                verification_hash="6" * 64,
+            )
+        self.assertEqual(receipt.object_id, derivative_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'VERIFIED', verification_hash", sql)
+        self.assertIn("verified_at = now()", sql)
+
+    def test_verified_derivative_locator_is_server_only_current_and_matter_scoped(self) -> None:
+        derivative_id = str(uuid4())
+        manifest_id = str(uuid4())
+        artifact_hash = "5" * 64
+        object_key = f"{artifact_hash[:2]}/{artifact_hash[2:4]}/{artifact_hash}.lca"
+        connection = FakeEvidenceConnection(
+            verified_locator_row={
+                "derivative_id": derivative_id,
+                "manifest_id": manifest_id,
+                "artifact_type": "RELATED_PAGES_PDF",
+                "storage_object_key": object_key,
+                "artifact_sha256": artifact_hash,
+                "page_count": 2,
+                "status": "VERIFIED",
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            locator = self.store.get_verified_derivative_locator(
+                matter_id=self.matter_id,
+                derivative_id=derivative_id,
+                actor=self.actor,
+            )
+        self.assertEqual(locator.object_key, object_key)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("derivative.status = 'VERIFIED'", sql)
+        self.assertIn("manifest.status = 'LOCKED'", sql)
+        self.assertNotIn(object_key, repr(locator))
+
+    def test_original_page_locator_is_read_only_matter_scoped_and_contains_no_local_path(self) -> None:
+        page_id = str(uuid4())
+        file_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            original_page_locator_row={
+                "evidence_page_id": page_id,
+                "evidence_file_id": file_id,
+                "page_number": 2,
+                "original_label": "[合成] 微信账单.pdf",
+                "original_file_sha256": "9" * 64,
+                "byte_size": 2048,
+                "media_type": "application/pdf",
+                "page_count": 4,
+            }
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            locator = self.store.get_original_page_locator(
+                matter_id=self.matter_id,
+                evidence_page_id=page_id,
+                actor=self.actor,
+            )
+        self.assertEqual(locator.evidence_page_id, page_id)
+        self.assertEqual(locator.evidence_file_id, file_id)
+        self.assertEqual(locator.page_number, 2)
+        self.assertNotIn("relative_path", locator.__dict__)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("page.evidence_page_id = %s", sql)
+        self.assertIn("page.matter_id = %s AND page.firm_id = %s", sql)
+
+    def test_lead_queues_only_one_hash_bound_manifest_run(self) -> None:
+        manifest_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            manifest_row={"status": "LOCKED", "content_hash": "4" * 64},
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.enqueue_derivative_run(
+                matter_id=self.matter_id,
+                manifest_id=manifest_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="evidence-run-enqueue",
+                manifest_content_hash="4" * 64,
+                approval_hash="3" * 64,
+            )
+        UUID(receipt.object_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("INSERT INTO evidence_derivative_runs", sql)
+        self.assertIn("EVIDENCE_DERIVATIVE_RUN_QUEUED", str(connection.executed))
+
+    def test_worker_claims_with_a_bounded_recoverable_lease(self) -> None:
+        run_id = str(uuid4())
+        manifest_id = str(uuid4())
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+        connection = FakeEvidenceConnection(
+            derivative_run_row={
+                "status": "QUEUED",
+                "attempt_count": 0,
+                "lease_id": None,
+                "lease_expires_at": None,
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "2" * 64,
+                "manifest_status": "LOCKED",
+                "current_manifest_hash": "2" * 64,
+            },
+            derivative_run_claimed={
+                "attempt_count": 1,
+                "lease_expires_at": expires_at,
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "2" * 64,
+            },
+        )
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            lease = self.store.claim_derivative_run(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                actor=worker,
+                expected_version=1,
+                idempotency_key="evidence-run-claim",
+                lease_seconds=120,
+            )
+        UUID(lease.lease_id)
+        self.assertEqual(lease.attempt_count, 1)
+        self.assertEqual(lease.lease_expires_at, expires_at)
+        self.assertEqual(lease.matter_version, 2)
+
+    def test_worker_completes_only_with_current_lease_and_both_verified_outputs(self) -> None:
+        run_id = str(uuid4())
+        lease_id = str(uuid4())
+        manifest_id = str(uuid4())
+        related_id = str(uuid4())
+        annotated_id = str(uuid4())
+        connection = FakeEvidenceConnection(
+            derivative_run_row={
+                "status": "RUNNING",
+                "lease_id": lease_id,
+                "lease_expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+                "manifest_id": manifest_id,
+                "manifest_content_hash": "1" * 64,
+                "manifest_status": "LOCKED",
+                "current_manifest_hash": "1" * 64,
+            },
+            derivative_run_artifacts=[
+                {"derivative_id": related_id, "artifact_type": "RELATED_PAGES_PDF", "status": "VERIFIED", "manifest_id": manifest_id},
+                {"derivative_id": annotated_id, "artifact_type": "ANNOTATED_RELATED_PAGES_PDF", "status": "VERIFIED", "manifest_id": manifest_id},
+            ],
+        )
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            receipt = self.store.complete_derivative_run(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                lease_id=lease_id,
+                related_derivative_id=related_id,
+                annotated_derivative_id=annotated_id,
+                actor=worker,
+                expected_version=1,
+                idempotency_key="evidence-run-complete",
+            )
+        self.assertEqual(receipt.object_id, run_id)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("SET status = 'SUCCEEDED'", sql)
+
+    def test_worker_heartbeat_renews_only_the_current_unexpired_lease_without_changing_matter_version(self) -> None:
+        run_id = str(uuid4())
+        lease_id = str(uuid4())
+        renewed_until = datetime.now(timezone.utc) + timedelta(minutes=2)
+        connection = FakeEvidenceConnection(heartbeat_expires_at=renewed_until)
+        worker = Actor(self.actor_id, self.firm_id, frozenset({Role.SYSTEM_WORKER}))
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            result = self.store.renew_derivative_run_lease(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                lease_id=lease_id,
+                actor=worker,
+                lease_seconds=120,
+            )
+        self.assertEqual(result, renewed_until)
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertIn("lease_expires_at > now()", sql)
+        self.assertNotIn("UPDATE matters SET version", sql)
+
+    def test_agent_candidate_policy_accepts_only_clear_low_risk_pages(self) -> None:
+        def candidate(
+            *,
+            kind: PageCandidateKind,
+            confidence: float,
+            priority: ReviewPriority,
+            reasons: tuple[CandidateReasonCode, ...],
+        ) -> AgentPageCandidate:
+            return AgentPageCandidate(
+                candidate_id=str(uuid4()), matter_id=self.matter_id,
+                evidence_page_id=str(uuid4()), source_file_sha256="a" * 64,
+                page_number=1, kind=kind, confidence=confidence,
+                review_priority=priority, reason_codes=reasons,
+                supporting_excerpt="[合成] 页面片段", duplicate_of_page_id=None,
+                input_hash="b" * 64, status=AgentCandidateStatus.NEEDS_REVIEW,
+            )
+
+        relevant = candidate(
+            kind=PageCandidateKind.RELEVANT_PAGE,
+            confidence=AGENT_RELEVANT_PAGE_CANDIDATE_MIN_CONFIDENCE,
+            priority=ReviewPriority.MEDIUM,
+            reasons=(CandidateReasonCode.TRANSACTION_ENTRY,),
+        )
+        unrelated = candidate(
+            kind=PageCandidateKind.UNRELATED_PAGE,
+            confidence=AGENT_UNRELATED_PAGE_CANDIDATE_MIN_CONFIDENCE,
+            priority=ReviewPriority.LOW,
+            reasons=(CandidateReasonCode.NO_CASE_SIGNAL,),
+        )
+        self.assertEqual(
+            _agent_candidate_disposition(relevant, has_current_decision=False, has_duplicate_review=False)[0],
+            PageDisposition.INCLUDE,
+        )
+        self.assertEqual(
+            _agent_candidate_disposition(unrelated, has_current_decision=False, has_duplicate_review=False)[0],
+            PageDisposition.EXCLUDE,
+        )
+
+        blocked = (
+            candidate(
+                kind=PageCandidateKind.RELEVANT_PAGE,
+                confidence=AGENT_RELEVANT_PAGE_CANDIDATE_MIN_CONFIDENCE - 0.01,
+                priority=ReviewPriority.MEDIUM,
+                reasons=(CandidateReasonCode.TRANSACTION_ENTRY,),
+            ),
+            candidate(
+                kind=PageCandidateKind.RELEVANT_PAGE,
+                confidence=1.0,
+                priority=ReviewPriority.HIGH,
+                reasons=(CandidateReasonCode.TRANSACTION_ENTRY,),
+            ),
+            candidate(
+                kind=PageCandidateKind.UNRELATED_PAGE,
+                confidence=1.0,
+                priority=ReviewPriority.LOW,
+                reasons=(CandidateReasonCode.NO_CASE_SIGNAL, CandidateReasonCode.CONFLICTING_CONTEXT),
+            ),
+            candidate(
+                kind=PageCandidateKind.OCR_REQUIRED,
+                confidence=1.0,
+                priority=ReviewPriority.HIGH,
+                reasons=(CandidateReasonCode.LOW_OCR_CONFIDENCE,),
+            ),
+        )
+        for value in blocked:
+            disposition, exclusion = _agent_candidate_disposition(
+                value, has_current_decision=False, has_duplicate_review=False
+            )
+            self.assertIsNone(disposition)
+            self.assertTrue(exclusion)
+        self.assertIsNone(_agent_candidate_disposition(
+            relevant, has_current_decision=True, has_duplicate_review=False
+        )[0])
+        self.assertIsNone(_agent_candidate_disposition(
+            relevant, has_current_decision=False, has_duplicate_review=True
+        )[0])
+
+    def test_agent_low_risk_staging_is_one_atomic_candidate_only_command(self) -> None:
+        run_id = str(uuid4())
+        page_ids = tuple(str(uuid4()) for _ in range(3))
+        bindings = tuple(sorted((
+            AgentEvidencePageBinding(page_ids[0], "a" * 64, 1, "1" * 64),
+            AgentEvidencePageBinding(page_ids[1], "b" * 64, 2, "2" * 64),
+            AgentEvidencePageBinding(page_ids[2], "c" * 64, 3, "3" * 64),
+        ), key=lambda item: (item.source_file_sha256, item.page_number, item.evidence_page_id)))
+        input_hash = _input_hash_from_bindings(matter_id=self.matter_id, bindings=bindings)
+        candidates = (
+            AgentPageCandidate(
+                str(uuid4()), self.matter_id, page_ids[0], "a" * 64, 1,
+                PageCandidateKind.RELEVANT_PAGE, 0.95, ReviewPriority.MEDIUM,
+                (CandidateReasonCode.TRANSACTION_ENTRY,), "[合成] 转账记录", None,
+                input_hash, AgentCandidateStatus.NEEDS_REVIEW,
+            ),
+            AgentPageCandidate(
+                str(uuid4()), self.matter_id, page_ids[1], "b" * 64, 2,
+                PageCandidateKind.UNRELATED_PAGE, 0.995, ReviewPriority.LOW,
+                (CandidateReasonCode.NO_CASE_SIGNAL,), "[合成] 无案件信号", None,
+                input_hash, AgentCandidateStatus.NEEDS_REVIEW,
+            ),
+            AgentPageCandidate(
+                str(uuid4()), self.matter_id, page_ids[2], "c" * 64, 3,
+                PageCandidateKind.OCR_REQUIRED, 0.4, ReviewPriority.HIGH,
+                (CandidateReasonCode.LOW_OCR_CONFIDENCE,), "", None,
+                input_hash, AgentCandidateStatus.NEEDS_REVIEW,
+            ),
+        )
+        output_hash = agent_candidate_output_hash(candidates)
+        connection = FakeEvidenceConnection(
+            agent_run={
+                "run_id": run_id, "matter_id": self.matter_id,
+                "matter_version": 1, "input_hash": input_hash,
+                "output_hash": output_hash, "run_version": 4,
+                "status": "NEEDS_REVIEW",
+            },
+            agent_bindings=[{
+                "evidence_page_id": item.evidence_page_id,
+                "source_file_sha256": item.source_file_sha256,
+                "page_number": item.page_number,
+                "extracted_text_sha256": item.extracted_text_sha256,
+            } for item in bindings],
+            agent_candidates=[{
+                "candidate_id": item.candidate_id,
+                "evidence_page_id": item.evidence_page_id,
+                "source_file_sha256": item.source_file_sha256,
+                "page_number": item.page_number,
+                "candidate_kind": item.kind.value,
+                "confidence": item.confidence,
+                "review_priority": item.review_priority.value,
+                "reason_codes": [value.value for value in item.reason_codes],
+                "supporting_excerpt": item.supporting_excerpt,
+                "duplicate_of_page_id": item.duplicate_of_page_id,
+                "input_hash": item.input_hash,
+                "status": item.status.value,
+            } for item in candidates],
+            agent_event={"payload": {"output_hash": output_hash, "candidate_count": 3}},
+            agent_pages=[{
+                "evidence_page_id": item.evidence_page_id,
+                "page_number": item.page_number,
+                "original_file_sha256": item.source_file_sha256,
+                "has_current_decision": False,
+                "has_duplicate_review": False,
+            } for item in candidates],
+        )
+        with patch(
+            "case_kernel.evidence_manifest_postgres.psycopg.connect",
+            return_value=FakeConnectionContext(connection),
+        ):
+            result = self.store.stage_low_risk_agent_page_decision_candidates(
+                matter_id=self.matter_id,
+                run_id=run_id,
+                actor=self.actor,
+                expected_version=1,
+                idempotency_key="agent-evidence-stage-atomic-0001",
+            )
+        self.assertEqual(result.include_count, 1)
+        self.assertEqual(result.exclude_count, 1)
+        self.assertEqual(len(result.decision_ids), 2)
+        self.assertEqual(result.exclusions[0].category, "HIGH_RISK")
+        sql = "\n".join(statement for statement, _ in connection.executed)
+        self.assertEqual(sql.count("INSERT INTO evidence_page_decisions"), 2)
+        self.assertIn("'CANDIDATE'", sql)
+        self.assertNotIn("SET status = 'APPROVED'", sql)
+        self.assertEqual(sql.count("UPDATE matters SET version = version + 1"), 1)
+        self.assertEqual(sql.count("INSERT INTO audit_events"), 1)
+        self.assertEqual(sql.count("INSERT INTO outbox_events"), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,930 @@
+name: ${COMPOSE_PROJECT_NAME:-lawcase-managed-alpha}
+
+x-api-build: &api-build
+  context: ../..
+  dockerfile: deployment/local-managed-test/api.Dockerfile
+  args:
+    PYTHON_IMAGE: ${LAWCASE_PYTHON_IMAGE:-mirror.gcr.io/library/python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2}
+    INSTALL_DOCUMENT_RENDERER_TOOLS: "false"
+
+x-service-security: &service-security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  trust-bundle-bootstrap:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    user: "0:0"
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        umask 022
+        cat /etc/ssl/certs/ca-certificates.crt /source/ca.crt > /bundle/ca-bundle.crt
+        chmod 0444 /bundle/ca-bundle.crt
+    network_mode: none
+    read_only: true
+    volumes:
+      - ./runtime/tls/ca.crt:/source/ca.crt:ro
+      - ca_bundle:/bundle
+    <<: *service-security
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
+
+  provider-preflight:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: "no"
+    depends_on:
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - python
+      - /opt/lawcase-probes/provider_probe.py
+      - --mode
+      - materials-configuration
+    environment:
+      LAWCASE_AGENT_WORKER_DEEPSEEK_API_KEY: ${LAWCASE_AGENT_WORKER_DEEPSEEK_API_KEY}
+      LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_API_KEY: ${LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_API_KEY}
+      LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_MODEL: deepseek-v4-pro
+      LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_API_KEY: ${LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_API_KEY}
+      LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_WORKSPACE_ID: ${LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_WORKSPACE_ID}
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=0700,uid=10001,gid=10001
+    volumes:
+      - ./probes:/opt/lawcase-probes:ro
+    <<: *service-security
+
+  clamav-runtime-bootstrap:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    user: "0:0"
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        chown clamav:clamav /definitions
+        chmod 0755 /definitions
+        chown clamav:clamav /socket
+        chmod 0770 /socket
+    network_mode: none
+    read_only: true
+    volumes:
+      - clamav_definitions:/definitions
+      - clamav_socket:/socket
+    <<: *service-security
+    cap_add:
+      - CHOWN
+      - FOWNER
+
+  clamav-signatures:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    user: "clamav"
+    restart: "no"
+    depends_on:
+      clamav-runtime-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - freshclam
+      - --stdout
+      - --datadir=/var/lib/clamav
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/log/clamav:rw,noexec,nosuid,size=16m,mode=0700,uid=100,gid=102
+      - /var/run/clamav:rw,noexec,nosuid,size=4m,mode=0700,uid=100,gid=102
+    volumes:
+      - clamav_definitions:/var/lib/clamav
+    networks:
+      - provider-egress
+    <<: *service-security
+
+  clamd:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    user: "clamav"
+    restart: unless-stopped
+    depends_on:
+      clamav-signatures:
+        condition: service_completed_successfully
+    command:
+      - /usr/sbin/clamd
+      - --foreground=true
+      - --config-file=/opt/lawcase-clamav/clamd.conf
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=768m,mode=0700,uid=100,gid=102
+      - /var/log/clamav:rw,noexec,nosuid,size=16m,mode=0700,uid=100,gid=102
+    volumes:
+      - clamav_definitions:/var/lib/clamav:ro
+      - clamav_socket:/run/lawcase-clamav
+      - ./clamav:/opt/lawcase-clamav:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(socket.AF_UNIX); s.settimeout(3); s.connect('/run/lawcase-clamav/clamd.sock'); s.sendall(b'zPING\\0'); assert s.recv(16) == b'PONG\\0'"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 180s
+    <<: *service-security
+
+  clamav-probe:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: "no"
+    depends_on:
+      clamd:
+        condition: service_healthy
+    command:
+      - python
+      - /opt/lawcase-probes/clamav_probe.py
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m
+    volumes:
+      - clamav_definitions:/var/lib/clamav:ro
+      - clamav_socket:/run/lawcase-clamav
+      - ./clamav:/opt/lawcase-clamav:ro
+      - ./probes:/opt/lawcase-probes:ro
+    group_add:
+      - "102"
+    network_mode: none
+    <<: *service-security
+
+  postgres:
+    image: ${LAWCASE_POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${LAWCASE_POSTGRES_SUPERUSER_PASSWORD:?generated by init}
+      LAWCASE_POSTGRES_TLS_RUNTIME_DIR: /run/lawcase-postgres-runtime
+      LAWCASE_POSTGRES_MIGRATOR_PASSWORD: ${LAWCASE_POSTGRES_MIGRATOR_PASSWORD:?generated by init}
+      LAWCASE_WEB_APP_POSTGRES_PASSWORD: ${LAWCASE_WEB_APP_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_WEB_IDENTITY_POSTGRES_PASSWORD: ${LAWCASE_WEB_IDENTITY_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_WEB_SESSION_POSTGRES_PASSWORD: ${LAWCASE_WEB_SESSION_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_AGENT_WORKER_POSTGRES_PASSWORD: ${LAWCASE_AGENT_WORKER_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_AGENT_VERIFIER_POSTGRES_PASSWORD: ${LAWCASE_AGENT_VERIFIER_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_KEYCLOAK_POSTGRES_PASSWORD: ${LAWCASE_KEYCLOAK_POSTGRES_PASSWORD:?generated by init}
+    entrypoint:
+      - /lawcase-postgres/postgres-entrypoint.sh
+    command:
+      - postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - postgres_socket:/var/run/postgresql
+      - postgres_tls_runtime:/run/lawcase-postgres-runtime
+      - ./postgres:/lawcase-postgres:ro
+      - ./postgres/initdb:/docker-entrypoint-initdb.d:ro
+      - ./postgres/pg_hba.conf:/etc/postgresql/lawcase-pg_hba.conf:ro
+      - ./runtime/local-managed.env:/run/lawcase-config/local-managed.env:ro
+      - ./runtime/tls/postgres.crt:/run/lawcase-postgres-tls/server.crt:ro
+      - ./runtime/tls/postgres.key:/run/lawcase-postgres-tls/server.key:ro
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-tls/ca.crt:ro
+    networks:
+      data:
+        aliases:
+          - postgres
+      identity-data:
+        aliases:
+          - postgres
+    shm_size: 256mb
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -h /var/run/postgresql -U postgres -d postgres
+      interval: 10s
+      timeout: 8s
+      retries: 30
+      start_period: 60s
+    <<: *service-security
+    # The official image starts as root only long enough to own the fresh data,
+    # socket and copied TLS key, then permanently drops to the postgres user.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+
+  postgres-migrate:
+    image: ${LAWCASE_POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777}
+    user: "70:70"
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /lawcase-postgres/migrate-and-seed.sh
+    environment:
+      LAWCASE_MIGRATION_ADMIN_SOCKET: /var/run/postgresql
+      LAWCASE_TEST_FIRM_ID: ${LAWCASE_TEST_FIRM_ID}
+      LAWCASE_TEST_FIRM_NAME: ${LAWCASE_TEST_FIRM_NAME}
+      LAWCASE_TEST_LEAD_ACTOR_ID: ${LAWCASE_TEST_LEAD_ACTOR_ID}
+      LAWCASE_TEST_WORKER_ACTOR_ID: ${LAWCASE_TEST_WORKER_ACTOR_ID}
+      LAWCASE_TEST_VERIFIER_ACTOR_ID: ${LAWCASE_TEST_VERIFIER_ACTOR_ID}
+      LAWCASE_TEST_LEAD_SUBJECT: ${LAWCASE_TEST_LEAD_SUBJECT}
+      LAWCASE_TEST_LEAD_USERNAME: ${LAWCASE_TEST_LEAD_USERNAME}
+      LAWCASE_WEB_OIDC_ISSUER: ${LAWCASE_TEST_OIDC_ISSUER}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m,mode=0700,uid=70,gid=70
+    volumes:
+      - postgres_socket:/var/run/postgresql
+      - ./postgres:/lawcase-postgres:ro
+      - ../../backend/migrations:/migrations:ro
+      - ./runtime/local-managed.env:/run/lawcase-config/local-managed.env:ro
+    network_mode: none
+    <<: *service-security
+
+  postgres-assert:
+    image: ${LAWCASE_POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777}
+    user: "70:70"
+    restart: "no"
+    depends_on:
+      postgres-migrate:
+        condition: service_completed_successfully
+    entrypoint:
+      - /lawcase-postgres/assert-runtime.sh
+    environment:
+      LAWCASE_POSTGRES_MIGRATOR_PASSWORD: ${LAWCASE_POSTGRES_MIGRATOR_PASSWORD:?generated by init}
+      LAWCASE_WEB_APP_POSTGRES_PASSWORD: ${LAWCASE_WEB_APP_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_WEB_IDENTITY_POSTGRES_PASSWORD: ${LAWCASE_WEB_IDENTITY_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_WEB_SESSION_POSTGRES_PASSWORD: ${LAWCASE_WEB_SESSION_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_AGENT_WORKER_POSTGRES_PASSWORD: ${LAWCASE_AGENT_WORKER_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_AGENT_VERIFIER_POSTGRES_PASSWORD: ${LAWCASE_AGENT_VERIFIER_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_KEYCLOAK_POSTGRES_PASSWORD: ${LAWCASE_KEYCLOAK_POSTGRES_PASSWORD:?generated by init}
+      LAWCASE_TEST_FIRM_ID: ${LAWCASE_TEST_FIRM_ID}
+      LAWCASE_TEST_LEAD_ACTOR_ID: ${LAWCASE_TEST_LEAD_ACTOR_ID}
+      LAWCASE_TEST_WORKER_ACTOR_ID: ${LAWCASE_TEST_WORKER_ACTOR_ID}
+      LAWCASE_TEST_VERIFIER_ACTOR_ID: ${LAWCASE_TEST_VERIFIER_ACTOR_ID}
+      LAWCASE_TEST_LEAD_SUBJECT: ${LAWCASE_TEST_LEAD_SUBJECT}
+      LAWCASE_WEB_OIDC_ISSUER: ${LAWCASE_TEST_OIDC_ISSUER}
+    read_only: true
+    volumes:
+      - ./postgres:/lawcase-postgres:ro
+      - ../../backend/migrations:/migrations:ro
+      - ./runtime/local-managed.env:/run/lawcase-config/local-managed.env:ro
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-ca/ca.crt:ro
+    networks:
+      - data
+    <<: *service-security
+
+  postgres-tenant-probe:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: "no"
+    depends_on:
+      postgres-assert:
+        condition: service_completed_successfully
+    command:
+      - python
+      - /opt/lawcase-probes/postgres_tenant_probe.py
+    environment:
+      LAWCASE_WEB_APP_POSTGRES_DSN: "postgresql://lawcase_web_application:${LAWCASE_WEB_APP_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_TEST_FIRM_ID: ${LAWCASE_TEST_FIRM_ID}
+    read_only: true
+    volumes:
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-ca/ca.crt:ro
+      - ./probes:/opt/lawcase-probes:ro
+    networks:
+      - data
+    <<: *service-security
+
+  keycloak:
+    image: ${LAWCASE_KEYCLOAK_RUNTIME_IMAGE:-lawcase-managed-alpha-keycloak:local}
+    build:
+      context: ../..
+      dockerfile: deployment/local-managed-test/keycloak.Dockerfile
+      args:
+        KEYCLOAK_IMAGE: ${LAWCASE_KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.7.0@sha256:0f198be292568439d700cdbfb893e69a6009bb43a94a06a945b1d3d506c76b13}
+    restart: unless-stopped
+    depends_on:
+      postgres-assert:
+        condition: service_completed_successfully
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - start
+      - --optimized
+      - --import-realm
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: lawcase-local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${LAWCASE_KEYCLOAK_ADMIN_PASSWORD:?generated by init}
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://postgres:5432/keycloak?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${LAWCASE_KEYCLOAK_POSTGRES_PASSWORD:?generated by init}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME: https://${LAWCASE_IDENTITY_HOST}
+      KC_HOSTNAME_STRICT: "true"
+      KC_PROXY_HEADERS: xforwarded
+      # The Docker Desktop test VM is intentionally small. The image default
+      # reserves half of all visible RAM at startup; one synthetic realm does
+      # not need that and the unbounded reservation starves clamd/renderer.
+      JAVA_OPTS_KC_HEAP: -Xms128m -Xmx512m
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m,mode=0700,uid=1000,gid=0
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./runtime/keycloak/realm.json:/opt/keycloak/data/import/lawcase-test.json:ro
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-ca/ca.crt:ro
+    networks:
+      - edge
+      - identity-data
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -ec
+        - "exec 3<>/dev/tcp/127.0.0.1/9000; printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3; grep -q '200 OK' <&3"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    <<: *service-security
+
+  kes-runtime-bootstrap:
+    image: ${LAWCASE_POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777}
+    user: "0:0"
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        install -m 0600 -o 1000 -g 1000 /source/kes-server.key /out/kes-server.key
+        install -m 0444 -o 1000 -g 1000 /source/kes-server.crt /out/kes-server.crt
+        install -m 0444 -o 1000 -g 1000 /source/ca.crt /out/ca.crt
+        install -m 0444 -o 1000 -g 1000 /source/config.yml /out/config.yml
+        chown -R 1000:1000 /keys
+        chmod 0700 /keys
+    network_mode: none
+    read_only: true
+    volumes:
+      - ./runtime/tls/kes-server.key:/source/kes-server.key:ro
+      - ./runtime/tls/kes-server.crt:/source/kes-server.crt:ro
+      - ./runtime/tls/ca.crt:/source/ca.crt:ro
+      - ./runtime/kes/config.yml:/source/config.yml:ro
+      - kes_runtime:/out
+      - kes_keys:/keys
+    <<: *service-security
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+
+  kes:
+    image: ${LAWCASE_KES_IMAGE:-quay.io/minio/kes:2025-03-12T09-35-18Z@sha256:bb97b121b03b0acd04eecea63a5909ec2e56eab1a48e0cc418036b67502a64b0}
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      kes-runtime-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - server
+      - --config
+      - /config/config.yml
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=0700,uid=1000,gid=1000
+    volumes:
+      - kes_runtime:/config:ro
+      - kes_keys:/keys
+    networks:
+      - kms
+    <<: *service-security
+
+  kes-ready-probe:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    user: "0:0"
+    restart: "no"
+    depends_on:
+      kes:
+        condition: service_started
+    environment:
+      LAWCASE_KES_CA: /tls/ca.crt
+      LAWCASE_KES_CLIENT_CERT: /tls/kes-client.crt
+      LAWCASE_KES_CLIENT_KEY: /tls/kes-client.key
+    command:
+      - python
+      - /opt/lawcase-probes/kes_probe.py
+    read_only: true
+    volumes:
+      - ./runtime/tls/ca.crt:/tls/ca.crt:ro
+      - ./runtime/tls/kes-client.crt:/tls/kes-client.crt:ro
+      - ./runtime/tls/kes-client.key:/tls/kes-client.key:ro
+      - ./probes:/opt/lawcase-probes:ro
+    networks:
+      - kms
+    <<: *service-security
+
+  object-storage-runtime-bootstrap:
+    image: ${LAWCASE_POSTGRES_IMAGE:-mirror.gcr.io/library/postgres:16.14-alpine3.24@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777}
+    user: "0:0"
+    restart: "no"
+    command:
+      - sh
+      - -ec
+      - |
+        install -d -m 0700 -o 1000 -g 1000 /out/CAs /out/kes
+        install -m 0600 -o 1000 -g 1000 /source/minio.key /out/private.key
+        install -m 0444 -o 1000 -g 1000 /source/minio.crt /out/public.crt
+        install -m 0444 -o 1000 -g 1000 /source/ca.crt /out/CAs/ca.crt
+        install -m 0600 -o 1000 -g 1000 /source/kes-client.key /out/kes/client.key
+        install -m 0444 -o 1000 -g 1000 /source/kes-client.crt /out/kes/client.crt
+        chown -R 1000:1000 /data
+        chmod 0700 /data
+    network_mode: none
+    read_only: true
+    volumes:
+      - ./runtime/tls/minio.key:/source/minio.key:ro
+      - ./runtime/tls/minio.crt:/source/minio.crt:ro
+      - ./runtime/tls/ca.crt:/source/ca.crt:ro
+      - ./runtime/tls/kes-client.key:/source/kes-client.key:ro
+      - ./runtime/tls/kes-client.crt:/source/kes-client.crt:ro
+      - object_tls:/out
+      - object_data:/data
+    <<: *service-security
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+
+  object-storage:
+    image: ${LAWCASE_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e}
+    user: "1000:1000"
+    restart: unless-stopped
+    depends_on:
+      kes-ready-probe:
+        condition: service_completed_successfully
+      object-storage-runtime-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - server
+      - /data
+      - --address
+      - :9000
+      - --console-address
+      - :9001
+      - --certs-dir
+      - /certs
+    environment:
+      MINIO_ROOT_USER: ${LAWCASE_OBJECT_ROOT_USER:?generated by init}
+      MINIO_ROOT_PASSWORD: ${LAWCASE_OBJECT_ROOT_PASSWORD:?generated by init}
+      MINIO_SITE_REGION: ${LAWCASE_OBJECT_REGION:-us-east-1}
+      MINIO_KMS_KES_ENDPOINT: https://kes:7373
+      MINIO_KMS_KES_CERT_FILE: /certs/kes/client.crt
+      MINIO_KMS_KES_KEY_FILE: /certs/kes/client.key
+      MINIO_KMS_KES_CAPATH: /certs/CAs/ca.crt
+      MINIO_KMS_KES_KEY_NAME: minio-default-key
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m,mode=0700,uid=1000,gid=1000
+    volumes:
+      - object_data:/data
+      - object_tls:/certs:ro
+    networks:
+      - data
+      - kms
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --cacert
+        - /certs/CAs/ca.crt
+        - https://object-storage:9000/minio/health/ready
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    <<: *service-security
+
+  object-storage-bootstrap:
+    image: ${LAWCASE_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727}
+    restart: "no"
+    depends_on:
+      object-storage:
+        condition: service_healthy
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    entrypoint:
+      - /bin/sh
+      - /bootstrap/bootstrap.sh
+    environment:
+      SSL_CERT_FILE: /trust/ca-bundle.crt
+      LAWCASE_OBJECT_ROOT_USER: ${LAWCASE_OBJECT_ROOT_USER:?generated by init}
+      LAWCASE_OBJECT_ROOT_PASSWORD: ${LAWCASE_OBJECT_ROOT_PASSWORD:?generated by init}
+      LAWCASE_OBJECT_BUCKET: ${LAWCASE_OBJECT_BUCKET:-lawcase-private-alpha}
+      LAWCASE_WEB_OBJECT_ACCESS_KEY_ID: ${LAWCASE_WEB_OBJECT_ACCESS_KEY_ID:?generated by init}
+      LAWCASE_WEB_OBJECT_SECRET_ACCESS_KEY: ${LAWCASE_WEB_OBJECT_SECRET_ACCESS_KEY:?generated by init}
+      LAWCASE_WORKER_OBJECT_ACCESS_KEY_ID: ${LAWCASE_WORKER_OBJECT_ACCESS_KEY_ID:?generated by init}
+      LAWCASE_WORKER_OBJECT_SECRET_ACCESS_KEY: ${LAWCASE_WORKER_OBJECT_SECRET_ACCESS_KEY:?generated by init}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+      - /root/.mc:rw,noexec,nosuid,size=16m
+    volumes:
+      - ./object-store:/bootstrap:ro
+      - ./object-store:/policies:ro
+      - ca_bundle:/trust:ro
+    networks:
+      - data
+    <<: *service-security
+
+  object-storage-sse-probe:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: "no"
+    depends_on:
+      object-storage-bootstrap:
+        condition: service_completed_successfully
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      LAWCASE_OBJECT_ENDPOINT: https://object-storage:9000
+      LAWCASE_OBJECT_REGION: ${LAWCASE_OBJECT_REGION:-us-east-1}
+      LAWCASE_OBJECT_BUCKET: ${LAWCASE_OBJECT_BUCKET:-lawcase-private-alpha}
+      LAWCASE_CA_BUNDLE: /run/lawcase-ca/ca-bundle.crt
+      LAWCASE_WEB_OBJECT_ACCESS_KEY_ID: ${LAWCASE_WEB_OBJECT_ACCESS_KEY_ID:?generated by init}
+      LAWCASE_WEB_OBJECT_SECRET_ACCESS_KEY: ${LAWCASE_WEB_OBJECT_SECRET_ACCESS_KEY:?generated by init}
+      LAWCASE_WORKER_OBJECT_ACCESS_KEY_ID: ${LAWCASE_WORKER_OBJECT_ACCESS_KEY_ID:?generated by init}
+      LAWCASE_WORKER_OBJECT_SECRET_ACCESS_KEY: ${LAWCASE_WORKER_OBJECT_SECRET_ACCESS_KEY:?generated by init}
+    command:
+      - python
+      - /opt/lawcase-probes/s3_sse_probe.py
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    volumes:
+      - ca_bundle:/run/lawcase-ca:ro
+      - ./probes:/opt/lawcase-probes:ro
+    networks:
+      - data
+    <<: *service-security
+
+  frontend:
+    build:
+      context: ../../web
+      dockerfile: ../deployment/web/frontend.Dockerfile
+      additional_contexts:
+        knowledge: ../../knowledge
+      args:
+        NODE_IMAGE: ${LAWCASE_NODE_IMAGE:-mirror.gcr.io/library/node:22.23.1-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    expose:
+      - "3000"
+    networks:
+      - edge
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test -s /app/web/server.js &&
+          test -s /app/web/.next/BUILD_ID &&
+          test -d /app/web/.next/static &&
+          test -d /app/web/public &&
+          node -e "fetch('http://127.0.0.1:3000/').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 20s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    <<: *service-security
+
+  api:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: unless-stopped
+    depends_on:
+      postgres-assert:
+        condition: service_completed_successfully
+      postgres-tenant-probe:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+      object-storage-sse-probe:
+        condition: service_completed_successfully
+      clamav-probe:
+        condition: service_completed_successfully
+      clamd:
+        condition: service_healthy
+      provider-preflight:
+        condition: service_completed_successfully
+      document-renderer:
+        condition: service_healthy
+      document-renderer-probe:
+        condition: service_completed_successfully
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SSL_CERT_FILE: /run/lawcase-ca/ca-bundle.crt
+      AWS_CA_BUNDLE: /run/lawcase-ca/ca-bundle.crt
+      LAWCASE_WEB_RUNTIME_MODE: PRODUCTION_WEB
+      LAWCASE_WEB_DEPLOYMENT_TOPOLOGY: SINGLE_API_PROCESS
+      LAWCASE_WEB_OIDC_STATE_STORE: IN_PROCESS_EPHEMERAL
+      LAWCASE_WEB_PUBLIC_ORIGIN: https://${LAWCASE_WORKBENCH_HOST}
+      LAWCASE_WEB_OIDC_ISSUER: ${LAWCASE_TEST_OIDC_ISSUER}
+      LAWCASE_WEB_OIDC_AUTHORIZATION_ENDPOINT: ${LAWCASE_TEST_OIDC_ISSUER}/protocol/openid-connect/auth
+      LAWCASE_WEB_OIDC_TOKEN_ENDPOINT: ${LAWCASE_TEST_OIDC_ISSUER}/protocol/openid-connect/token
+      LAWCASE_WEB_OIDC_JWKS_URL: ${LAWCASE_TEST_OIDC_ISSUER}/protocol/openid-connect/certs
+      LAWCASE_WEB_OIDC_CLIENT_ID: ${LAWCASE_KEYCLOAK_CLIENT_ID}
+      LAWCASE_WEB_OIDC_CLIENT_SECRET: ${LAWCASE_OIDC_CLIENT_SECRET:?generated by init}
+      LAWCASE_WEB_OIDC_AUDIENCE: ${LAWCASE_KEYCLOAK_CLIENT_ID}
+      LAWCASE_WEB_OIDC_SCOPES: openid,profile
+      LAWCASE_WEB_OIDC_REQUIRED_AMR: mfa
+      LAWCASE_WEB_OIDC_ACCEPTED_ACR: ""
+      LAWCASE_WEB_APP_POSTGRES_DSN: "postgresql://lawcase_web_application:${LAWCASE_WEB_APP_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_WEB_APP_DATABASE_ROLE: lawcase_web_application
+      LAWCASE_WEB_IDENTITY_DIRECTORY_POSTGRES_DSN: "postgresql://lawcase_identity_directory:${LAWCASE_WEB_IDENTITY_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_WEB_IDENTITY_DIRECTORY_DATABASE_ROLE: lawcase_identity_directory
+      LAWCASE_WEB_SESSION_GATEWAY_POSTGRES_DSN: "postgresql://lawcase_web_session_gateway:${LAWCASE_WEB_SESSION_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_WEB_SESSION_GATEWAY_DATABASE_ROLE: lawcase_web_session_gateway
+      LAWCASE_WEB_OBJECT_STORE_ENDPOINT: https://object-storage:9000
+      LAWCASE_WEB_OBJECT_STORE_REGION: ${LAWCASE_OBJECT_REGION}
+      LAWCASE_WEB_OBJECT_STORE_BUCKET: ${LAWCASE_OBJECT_BUCKET}
+      LAWCASE_WEB_OBJECT_STORE_ACCESS_KEY_ID: ${LAWCASE_WEB_OBJECT_ACCESS_KEY_ID}
+      LAWCASE_WEB_OBJECT_STORE_SECRET_ACCESS_KEY: ${LAWCASE_WEB_OBJECT_SECRET_ACCESS_KEY}
+      LAWCASE_WEB_OBJECT_STORE_ENCRYPTION: AES256
+      LAWCASE_WEB_OBJECT_STORE_KMS_KEY_ID: ""
+      LAWCASE_WEB_CLAMAV_EXECUTABLE: /opt/lawcase-clamav/clamdscan
+      LAWCASE_WEB_CLAMAV_TIMEOUT_SECONDS: "120"
+      LAWCASE_WEB_PDFTOPPM_EXECUTABLE: /usr/bin/pdftoppm
+      LAWCASE_WEB_PDFTOPPM_TIMEOUT_SECONDS: "30"
+      LAWCASE_WEB_DOCUMENT_WORKER_ENABLED: "true"
+      LAWCASE_WEB_DOCUMENT_RENDERER_ENDPOINT: http://document-renderer:8090
+      LAWCASE_WEB_DOCUMENT_RENDERER_SHARED_SECRET: ${LAWCASE_DOCUMENT_RENDERER_SHARED_SECRET}
+      LAWCASE_WEB_DOCUMENT_RENDERER_TIMEOUT_SECONDS: "180"
+      LAWCASE_WEB_UPLOAD_STAGING_ROOT: /var/lib/lawcase/staging
+      LAWCASE_WEB_WORKER_MATERIALIZATION_ROOT: /var/lib/lawcase/worker
+      LAWCASE_WEB_SYSTEM_WORKERS_JSON: "{\"${LAWCASE_TEST_FIRM_ID}\":\"${LAWCASE_TEST_WORKER_ACTOR_ID}\"}"
+      LAWCASE_WEB_SYSTEM_VERIFIERS_JSON: "{\"${LAWCASE_TEST_FIRM_ID}\":\"${LAWCASE_TEST_VERIFIER_ACTOR_ID}\"}"
+      LAWCASE_LOCAL_MANAGED_ACCEPTANCE_AUTH_BYPASS: "true"
+      LAWCASE_LOCAL_MANAGED_ACCEPTANCE_FIRM_ID: ${LAWCASE_TEST_FIRM_ID}
+      LAWCASE_LOCAL_MANAGED_ACCEPTANCE_LEAD_ACTOR_ID: ${LAWCASE_TEST_LEAD_ACTOR_ID}
+    expose:
+      - "8080"
+    networks:
+      - edge
+      - data
+      - document-render
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/lib/lawcase/staging:rw,noexec,nosuid,size=4g,mode=0700,uid=10001,gid=10001
+      - /var/lib/lawcase/worker:rw,noexec,nosuid,size=4g,mode=0700,uid=10001,gid=10001
+    volumes:
+      - ca_bundle:/run/lawcase-ca:ro
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-ca/ca.crt:ro
+      - clamav_definitions:/var/lib/clamav:ro
+      - clamav_socket:/run/lawcase-clamav
+      - ./clamav:/opt/lawcase-clamav:ro
+      - ../../docs/GOLDEN_CASE_SYNTHETIC.md:/app/docs/GOLDEN_CASE_SYNTHETIC.md:ro
+      # Canonical Compose never bind-mounts Python sources into /app/backend.
+      # A separately named local recovery overlay may be used only to inspect
+      # a historical sealed response while a clean image rebuild is blocked;
+      # it is deliberately excluded from the managed start command.
+    group_add:
+      - "102"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).read()"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    <<: *service-security
+
+  document-renderer:
+    build:
+      context: ../..
+      dockerfile: deployment/local-managed-test/api.Dockerfile
+      args:
+        PYTHON_IMAGE: ${LAWCASE_PYTHON_IMAGE:-mirror.gcr.io/library/python:3.12.13-slim-bookworm@sha256:4766d8b510c428e595d74b9cc5bbb2fae8e26316fffb4adc89908d79aacd58a2}
+        INSTALL_DOCUMENT_RENDERER_TOOLS: "true"
+    restart: unless-stopped
+    init: true
+    command:
+      - python
+      - -m
+      - case_api.isolated_document_renderer_app
+    environment:
+      LAWCASE_DOCUMENT_RENDERER_SHARED_SECRET: ${LAWCASE_DOCUMENT_RENDERER_SHARED_SECRET:?generated by init}
+      # The renderer intentionally rejects symbolic executable paths. Debian's
+      # /usr/bin/soffice is a symlink, so name the immutable real binary.
+      LAWCASE_DOCUMENT_RENDERER_SOFFICE_EXECUTABLE: /usr/lib/libreoffice/program/soffice
+      LAWCASE_DOCUMENT_RENDERER_PDFTOPPM_EXECUTABLE: /usr/bin/pdftoppm
+      LAWCASE_DOCUMENT_RENDERER_WORKER_ROOT: /var/lib/lawcase/document-renderer
+      LAWCASE_DOCUMENT_RENDERER_TIMEOUT_SECONDS: "180"
+      LAWCASE_DOCUMENT_RENDERER_MAX_CLOCK_SKEW_SECONDS: "60"
+      LAWCASE_DOCUMENT_RENDERER_REPLAY_CAPACITY: "20000"
+      LAWCASE_DOCUMENT_RENDERER_PORT: "8090"
+    networks:
+      - document-render
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m,mode=0700,uid=10001,gid=10001
+      - /var/lib/lawcase/document-renderer:rw,noexec,nosuid,size=2g,mode=0700,uid=10001,gid=10001
+    pids_limit: 256
+    mem_limit: 2g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=5).read()"
+      interval: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 45s
+    <<: *service-security
+
+  document-renderer-probe:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: "no"
+    depends_on:
+      document-renderer:
+        condition: service_healthy
+    command:
+      - python
+      - /opt/lawcase-probes/document_renderer_probe.py
+    environment:
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_ENDPOINT: http://document-renderer:8090
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_SHARED_SECRET: ${LAWCASE_DOCUMENT_RENDERER_SHARED_SECRET:?generated by init}
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_TIMEOUT_SECONDS: "180"
+    networks:
+      - document-render
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,mode=0700,uid=10001,gid=10001
+    volumes:
+      - ./probes:/opt/lawcase-probes:ro
+    <<: *service-security
+
+  case-agent-worker:
+    image: ${LAWCASE_API_IMAGE:-lawcase-managed-alpha-api-runtime:local}
+    build: *api-build
+    restart: unless-stopped
+    depends_on:
+      postgres-assert:
+        condition: service_completed_successfully
+      postgres-tenant-probe:
+        condition: service_completed_successfully
+      object-storage-sse-probe:
+        condition: service_completed_successfully
+      provider-preflight:
+        condition: service_completed_successfully
+      document-renderer:
+        condition: service_healthy
+      document-renderer-probe:
+        condition: service_completed_successfully
+      trust-bundle-bootstrap:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - case_api.case_agent_worker_deployment
+    environment:
+      SSL_CERT_FILE: /run/lawcase-ca/ca-bundle.crt
+      AWS_CA_BUNDLE: /run/lawcase-ca/ca-bundle.crt
+      LAWCASE_AGENT_WORKER_RUNTIME_MODE: PRODUCTION_AGENT_WORKER
+      LAWCASE_AGENT_WORKER_FIRM_ID: ${LAWCASE_TEST_FIRM_ID}
+      LAWCASE_AGENT_WORKER_ACTOR_ID: ${LAWCASE_TEST_WORKER_ACTOR_ID}
+      LAWCASE_AGENT_WORKER_DATABASE_ROLE: lawcase_agent_worker
+      LAWCASE_AGENT_WORKER_POSTGRES_DSN: "postgresql://lawcase_agent_worker:${LAWCASE_AGENT_WORKER_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_AGENT_VERIFIER_ACTOR_ID: ${LAWCASE_TEST_VERIFIER_ACTOR_ID}
+      LAWCASE_AGENT_VERIFIER_DATABASE_ROLE: lawcase_agent_verifier
+      LAWCASE_AGENT_VERIFIER_POSTGRES_DSN: "postgresql://lawcase_agent_verifier:${LAWCASE_AGENT_VERIFIER_POSTGRES_PASSWORD}@postgres:5432/${LAWCASE_POSTGRES_DB}?sslmode=verify-full&sslrootcert=/run/lawcase-postgres-ca/ca.crt"
+      LAWCASE_AGENT_WORKER_PRIVATE_ROOT: /var/lib/lawcase/agent-worker
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_ENDPOINT: https://object-storage:9000
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_REGION: ${LAWCASE_OBJECT_REGION}
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_BUCKET: ${LAWCASE_OBJECT_BUCKET}
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_ACCESS_KEY_ID: ${LAWCASE_WORKER_OBJECT_ACCESS_KEY_ID}
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_SECRET_ACCESS_KEY: ${LAWCASE_WORKER_OBJECT_SECRET_ACCESS_KEY}
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_ENCRYPTION: AES256
+      LAWCASE_AGENT_WORKER_OBJECT_STORE_KMS_KEY_ID: ""
+      LAWCASE_AGENT_WORKER_DEEPSEEK_API_KEY: ${LAWCASE_AGENT_WORKER_DEEPSEEK_API_KEY}
+      LAWCASE_AGENT_WORKER_DEEPSEEK_MODEL: deepseek-v4-pro
+      LAWCASE_AGENT_WORKER_DEEPSEEK_ALLOWED_MODELS: deepseek-v4-pro
+      LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_API_KEY: ${LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_API_KEY}
+      LAWCASE_AGENT_WORKER_LEDGER_EXTRACTION_MODEL: deepseek-v4-pro
+      LAWCASE_AGENT_WORKER_QWEN_API_KEY: ${LAWCASE_AGENT_WORKER_QWEN_API_KEY}
+      LAWCASE_AGENT_WORKER_QWEN_WORKSPACE_ID: ${LAWCASE_AGENT_WORKER_QWEN_WORKSPACE_ID}
+      LAWCASE_AGENT_WORKER_QWEN_PDFTOPPM_EXECUTABLE: /usr/bin/pdftoppm
+      LAWCASE_AGENT_WORKER_BRAVE_SEARCH_API_KEY: ${LAWCASE_AGENT_WORKER_BRAVE_SEARCH_API_KEY:-}
+      LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_API_KEY: ${LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_API_KEY}
+      LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_WORKSPACE_ID: ${LAWCASE_AGENT_WORKER_LAWYER_ANALYSIS_WORKSPACE_ID}
+      LAWCASE_AGENT_WORKER_DOCUMENT_DELIVERY_ENABLED: "true"
+      LAWCASE_AGENT_WORKER_DOCUMENT_SOFFICE_EXECUTABLE: ""
+      LAWCASE_AGENT_WORKER_DOCUMENT_PDFTOPPM_EXECUTABLE: ""
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_ENDPOINT: http://document-renderer:8090
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_SHARED_SECRET: ${LAWCASE_DOCUMENT_RENDERER_SHARED_SECRET}
+      LAWCASE_AGENT_WORKER_DOCUMENT_RENDERER_TIMEOUT_SECONDS: "180"
+    networks:
+      - data
+      - provider-egress
+      - document-render
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/lib/lawcase/agent-worker:rw,noexec,nosuid,size=4g,mode=0700,uid=10001,gid=10001
+    volumes:
+      - ca_bundle:/run/lawcase-ca:ro
+      - ./runtime/tls/ca.crt:/run/lawcase-postgres-ca/ca.crt:ro
+    <<: *service-security
+
+  gateway:
+    image: ${LAWCASE_CADDY_IMAGE:-mirror.gcr.io/library/caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648}
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    environment:
+      LAWCASE_WORKBENCH_HOST: ${LAWCASE_WORKBENCH_HOST}
+      LAWCASE_IDENTITY_HOST: ${LAWCASE_IDENTITY_HOST}
+      LAWCASE_HTTPS_PORT: ${LAWCASE_HTTPS_PORT:-443}
+    ports:
+      - "${LAWCASE_BIND_ADDRESS:-127.0.0.1}:${LAWCASE_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./runtime/tls/edge.crt:/run/lawcase-edge/edge.crt:ro
+      - ./runtime/tls/edge.key:/run/lawcase-edge/edge.key:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      edge:
+        aliases:
+          - ${LAWCASE_WORKBENCH_HOST}
+          - ${LAWCASE_IDENTITY_HOST}
+    <<: *service-security
+    cap_add:
+      - NET_BIND_SERVICE
+
+volumes:
+  ca_bundle:
+  caddy_data:
+  caddy_config:
+  clamav_definitions:
+  clamav_socket:
+  postgres_data:
+  postgres_socket:
+  postgres_tls_runtime:
+  keycloak_data:
+  kes_runtime:
+  kes_keys:
+  object_tls:
+  object_data:
+
+networks:
+  edge:
+    driver: bridge
+  data:
+    driver: bridge
+    internal: true
+  identity-data:
+    driver: bridge
+    internal: true
+  provider-egress:
+    driver: bridge
+  kms:
+    driver: bridge
+    internal: true
+  document-render:
+    driver: bridge
+    internal: true

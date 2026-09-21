@@ -1,0 +1,16 @@
+# The API image consumes only backend source plus deployment/web/api-gate.py.
+# Never transfer local runtime credentials, evidence fixtures, Git history or
+# frontend dependency trees to the Docker build context.
+.git/
+.DS_Store
+**/.DS_Store
+**/__pycache__/
+**/.pytest_cache/
+**/.venv/
+**/node_modules/
+web/
+outputs/
+docs/
+deployment/local-managed-test/runtime/
+deployment/web/.env
+backend/.env

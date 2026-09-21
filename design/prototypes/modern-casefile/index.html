@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>现代案卷室｜合成案件原型</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!--
+    现代案卷室 / 方向 A
+
+    设计假设：
+    1. 使用者是桌面端办理民间借贷应诉的律师与律师助理；案件正在材料核对阶段。
+    2. 所有姓名、案号、金额、交易号、文件名和日期均为严格合成数据；不对应任何真实案件或人员。
+    3. 纸张肌理、墨色标题、朱红证据标记用于建立“案卷正在被审阅”的实体感；不是仿古或政务网站。
+    4. 此原型只演示信息层级和交互状态，不执行法律结论、金额计算、审批或导出。
+  -->
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="wordmark" href="#overview" data-screen-target="overview" aria-label="合成案件工作台首页">
+        <span class="mark">案</span>
+        <span>案卷工作台</span>
+      </a>
+      <div class="topbar-context">
+        <span>华南合成律所</span>
+        <span class="topbar-separator" aria-hidden="true"></span>
+        <span>内部合成 Alpha</span>
+      </div>
+      <div class="operator" aria-label="当前角色">
+        <span class="operator-role">承办律师</span>
+        <span class="operator-name">陈律师（合成）</span>
+      </div>
+    </header>
+
+    <section class="matter-band" aria-labelledby="matter-name">
+      <div class="matter-index">M-024</div>
+      <div class="matter-title-wrap">
+        <p class="eyebrow">民间借贷纠纷 · 被告一审应诉 · 全部为合成数据</p>
+        <h1 id="matter-name">原告甲诉被告乙民间借贷纠纷</h1>
+      </div>
+      <div class="matter-meta">
+        <div>
+          <span>案号</span>
+          <strong>（2026）粤13民初024号</strong>
+        </div>
+        <div>
+          <span>受理法院</span>
+          <strong>海滨市中级人民法院（合成）</strong>
+        </div>
+      </div>
+      <button class="stage-button" type="button" aria-label="当前流程阶段：材料核验">
+        <span>当前阶段</span>
+        <strong>材料核验</strong>
+      </button>
+    </section>
+
+    <div class="deadline-strip" aria-label="程序期限提示">
+      <span class="deadline-label">程序期限候选</span>
+      <strong>答辩期届满：2026 年 08 月 14 日</strong>
+      <span class="deadline-divider" aria-hidden="true"></span>
+      <span>来源：法院电子送达回证 · 第 1 页</span>
+      <span class="state-chip pending">待律师确认</span>
+      <button class="source-link" type="button" data-screen-target="evidence">查看来源页</button>
+    </div>
+
+    <div class="workspace">
+      <aside class="case-nav" aria-label="案件内导航">
+        <p class="nav-label">案件卷宗</p>
+        <nav>
+          <button class="nav-item active" type="button" data-screen-target="overview" aria-current="page">案件总览</button>
+          <button class="nav-item" type="button" data-screen-target="evidence">材料与证据</button>
+          <button class="nav-item muted" type="button">主体与身份</button>
+          <button class="nav-item muted" type="button">诉请与争点</button>
+          <button class="nav-item muted" type="button">事实与时间线</button>
+          <button class="nav-item muted" type="button">交易台账</button>
+          <button class="nav-item muted" type="button">法律依据</button>
+          <button class="nav-item muted" type="button">利息计算</button>
+          <button class="nav-item muted" type="button">文书工作室</button>
+          <button class="nav-item muted" type="button">提交中心</button>
+        </nav>
+        <div class="nav-ledger">
+          <span>审计记录</span>
+          <strong>28 条</strong>
+          <small>合成演示记录</small>
+        </div>
+      </aside>
+
+      <main class="screen-stage">
+        <section class="screen overview-screen is-visible" id="overview" aria-labelledby="overview-title">
+          <div class="screen-heading">
+            <div>
+              <p class="section-kicker">案件控制页</p>
+              <h2 id="overview-title">把下一项专业决定放在最前面</h2>
+            </div>
+            <p class="page-proof">最后核对：2026-08-09 14:20 · 合成演示</p>
+          </div>
+
+          <section class="decision-sheet" aria-labelledby="decision-title">
+            <div class="sheet-tab">待律师决定 · 01</div>
+            <div class="decision-main">
+              <p class="section-kicker red-kicker">争点边界需要确认</p>
+              <h3 id="decision-title">确认 3 笔“已付利息”候选款项的付款性质</h3>
+              <p>原告起诉材料未逐笔列明已付款项；流水中存在三笔“转账”记录。请仅确认付款性质，不在此页作出利率或本金冲抵结论。</p>
+              <div class="decision-sources">
+                <span class="source-tag">微信交易流水 · 第 16、17、19 页</span>
+                <span class="source-tag">起诉状 · 第 4 页</span>
+              </div>
+            </div>
+            <div class="decision-impact">
+              <span>确认后影响</span>
+              <ul>
+                <li>正式计算情景</li>
+                <li>利息核算说明</li>
+                <li>答辩状金额段落</li>
+              </ul>
+              <button class="ink-button" type="button" data-screen-target="evidence">进入证据核验</button>
+            </div>
+          </section>
+
+          <section class="progress-section" aria-labelledby="progress-title">
+            <div class="section-line">
+              <h3 id="progress-title">案件进程</h3>
+              <span>所有阶段均需要来源、权限与版本校验</span>
+            </div>
+            <ol class="stage-rail">
+              <li class="complete"><span>01</span><strong>材料登记</strong><small>已完成</small></li>
+              <li class="current"><span>02</span><strong>证据核验</strong><small>待决定</small></li>
+              <li><span>03</span><strong>诉请边界</strong><small>尚未开始</small></li>
+              <li><span>04</span><strong>交易台账</strong><small>尚未开始</small></li>
+              <li><span>05</span><strong>规则与计算</strong><small>尚未开始</small></li>
+              <li><span>06</span><strong>文书与提交</strong><small>尚未开始</small></li>
+            </ol>
+          </section>
+
+          <section class="overview-grid">
+            <article class="ledger-panel material-health" aria-labelledby="material-health-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">材料健康</p>
+                  <h3 id="material-health-title">48 页原件，尚有 6 页待处置</h3>
+                </div>
+                <button class="text-button" type="button" data-screen-target="evidence">打开证据台</button>
+              </div>
+              <dl class="ledger-list">
+                <div><dt>法院送达材料</dt><dd><span class="state-chip approved">已核验</span><b>4 页</b></dd></div>
+                <div><dt>起诉状及附件</dt><dd><span class="state-chip approved">已核验</span><b>12 页</b></dd></div>
+                <div><dt>微信交易流水</dt><dd><span class="state-chip pending">待复核</span><b>24 页</b></dd></div>
+                <div><dt>借据与收条</dt><dd><span class="state-chip review">需比对</span><b>8 页</b></dd></div>
+              </dl>
+              <p class="panel-footnote">“无关页”只会影响派生件范围；所有原件仍完整保留。</p>
+            </article>
+
+            <article class="ledger-panel monetary-panel" aria-labelledby="monetary-title">
+              <div class="panel-heading">
+                <div>
+                  <p class="section-kicker">核心数字</p>
+                  <h3 id="monetary-title">金额必须包含币种与来源</h3>
+                </div>
+                <span class="currency-note">CNY</span>
+              </div>
+              <dl class="amount-list">
+                <div>
+                  <dt>原告主张本金</dt>
+                  <dd><strong>人民币 120,000.00 元</strong><small>起诉状 · 第 3 页</small></dd>
+                </div>
+                <div>
+                  <dt>已付款候选合计</dt>
+                  <dd><strong>人民币 18,600.00 元</strong><small>3 笔待确认性质</small></dd>
+                </div>
+                <div>
+                  <dt>正式计算结果</dt>
+                  <dd><strong class="not-ready">尚不可用</strong><small>付款性质与规则版本未获批准</small></dd>
+                </div>
+              </dl>
+            </article>
+          </section>
+
+          <section class="activity-panel" aria-labelledby="activity-title">
+            <div class="section-line">
+              <h3 id="activity-title">最近变化</h3>
+              <button class="text-button" type="button">查看全部审计</button>
+            </div>
+            <table>
+              <thead><tr><th>时间</th><th>对象</th><th>变化</th><th>来源与影响</th><th>操作人</th></tr></thead>
+              <tbody>
+                <tr><td>14:20</td><td>微信交易流水 · 第 17 页</td><td><span class="state-chip review">标记为相似页</span></td><td>待确认，未从原件排除</td><td>助理甲（合成）</td></tr>
+                <tr><td>14:05</td><td>付款记录 SYN-20200917-001</td><td><span class="state-chip pending">生成候选</span></td><td>待回跳原页并确认付款性质</td><td>解析任务（合成）</td></tr>
+                <tr><td>13:46</td><td>送达日期</td><td><span class="state-chip approved">已录入</span></td><td>尚未确认期限起算规则</td><td>陈律师（合成）</td></tr>
+              </tbody>
+            </table>
+          </section>
+        </section>
+
+        <section class="screen evidence-screen" id="evidence" aria-labelledby="evidence-title" hidden>
+          <div class="screen-heading evidence-heading">
+            <div>
+              <p class="section-kicker">材料与证据 · 页级审阅</p>
+              <h2 id="evidence-title">微信交易流水（合成）</h2>
+            </div>
+            <div class="page-controls" aria-label="页面导航">
+              <button class="page-control" type="button" data-page-target="16">第 16 页</button>
+              <button class="page-control active" type="button" data-page-target="17">第 17 页</button>
+              <button class="page-control" type="button" data-page-target="19">第 19 页</button>
+            </div>
+          </div>
+
+          <div class="evidence-layout">
+            <aside class="evidence-index" aria-label="材料和页码列表">
+              <div class="evidence-filter-row">
+                <span class="filter-active">与原告甲相关</span>
+                <span>6 / 24 页</span>
+              </div>
+              <div class="file-heading">
+                <span class="file-type">PDF</span>
+                <div><strong>微信交易流水_2020（合成）</strong><small>原件 · SHA-256: 7b3f…d921</small></div>
+              </div>
+              <ol class="page-list">
+                <li><button type="button" data-page-target="15"><b>15</b><span><strong>待确认</strong><small>含昵称候选</small></span></button></li>
+                <li><button type="button" data-page-target="16"><b>16</b><span><strong>相关页</strong><small>交易候选 01</small></span></button></li>
+                <li class="selected"><button type="button" data-page-target="17"><b>17</b><span><strong>相关页</strong><small>精确重复候选</small></span></button></li>
+                <li><button type="button" data-page-target="18"><b>18</b><span><strong>无关待确认</strong><small>尚未处置</small></span></button></li>
+                <li><button type="button" data-page-target="19"><b>19</b><span><strong>相关页</strong><small>交易候选 02</small></span></button></li>
+                <li><button type="button" data-page-target="20"><b>20</b><span><strong>相似非重复</strong><small>保留原件</small></span></button></li>
+              </ol>
+              <div class="all-pages-note">已审 18 / 24 页<br /><strong>尚有 6 页必须逐页处置</strong></div>
+            </aside>
+
+            <section class="pdf-viewer" aria-label="原始 PDF 页面预览">
+              <div class="viewer-toolbar">
+                <span class="artifact-badge original">原件预览</span>
+                <span>第 <b id="current-page-number">17</b> 页 / 共 24 页</span>
+                <span class="viewer-spacer"></span>
+                <button type="button" class="toolbar-button">适合宽度</button>
+                <button type="button" class="toolbar-button">100%</button>
+              </div>
+              <article class="pdf-paper" aria-label="合成微信交易流水第 17 页">
+                <header class="pdf-paper-head">
+                  <p>华南合成支付服务</p>
+                  <h3>微信交易流水明细</h3>
+                  <span>生成时间：2026-08-09 13:40（合成测试）</span>
+                </header>
+                <section class="pdf-summary">
+                  <div><span>账单期间</span><strong>2020-09-01 至 2020-09-30</strong></div>
+                  <div><span>导出账户</span><strong>测试账户乙 · SYNTHETIC</strong></div>
+                </section>
+                <table class="pdf-table">
+                  <thead><tr><th>交易时间</th><th>交易类型</th><th>交易对方</th><th>金额（人民币）</th><th>状态</th></tr></thead>
+                  <tbody>
+                    <tr><td>2020-09-15 09:12</td><td>扫码支付</td><td>商户样本 A</td><td>128.00</td><td>支付成功</td></tr>
+                    <tr class="annotated-record">
+                      <td>2020-09-17 10:32</td><td>转账</td><td>原告甲<br /><small>昵称：青松样本</small></td><td><b>2,000.00</b></td><td>已收款</td>
+                    </tr>
+                    <tr><td>2020-09-21 18:45</td><td>红包</td><td>联系人丙（合成）</td><td>66.00</td><td>已收款</td></tr>
+                    <tr><td>2020-09-28 14:09</td><td>转账</td><td>联系人丁（合成）</td><td>500.00</td><td>已收款</td></tr>
+                  </tbody>
+                </table>
+                <p class="pdf-red-note">红框为派生标注预览：仅定位关键记录，不改变原件。</p>
+                <footer class="pdf-paper-foot">合成测试样本 · 不构成真实凭证或法律结论 · 页码 17</footer>
+              </article>
+            </section>
+
+            <aside class="evidence-inspector" aria-label="证据抽取和处置面板">
+              <div class="inspector-section source-header">
+                <p class="section-kicker">当前页身份</p>
+                <div class="source-row"><span class="artifact-badge original">原件</span><strong>稳定页 ID：P-17</strong></div>
+                <p>源文件：微信交易流水_2020（合成）<br />原件哈希：7b3f…d921 · 页渲染哈希：8e91…c443</p>
+              </div>
+
+              <div class="inspector-section">
+                <div class="inspector-heading"><h3>关联与标记</h3><span class="state-chip pending">候选</span></div>
+                <dl class="fact-list">
+                  <div><dt>主体匹配</dt><dd>原告甲 ↔ 昵称“青松样本”<small>置信度：中 · 需律师确认</small></dd></div>
+                  <div><dt>交易候选</dt><dd>人民币 2,000.00 元<small>性质：未确认</small></dd></div>
+                  <div><dt>来源坐标</dt><dd>第 17 页 · 表格第 2 行<small>框选坐标已保存于派生件提案</small></dd></div>
+                </dl>
+                <button class="outline-button" type="button">查看 OCR 原文与坐标</button>
+              </div>
+
+              <div class="inspector-section duplicate-section">
+                <div class="inspector-heading"><h3>重复页处置</h3><span class="state-chip review">需要确认</span></div>
+                <p class="duplicate-type"><strong>精确重复候选</strong><span>与第 16 页视觉哈希一致</span></p>
+                <label class="reason-label" for="duplicate-decision">处置决定</label>
+                <select id="duplicate-decision" aria-label="选择重复页处置决定">
+                  <option value="pending">待律师确认</option>
+                  <option value="exclude">派生件中排除第 17 页</option>
+                  <option value="keep">派生件中保留第 17 页</option>
+                </select>
+                <p class="duplicate-caution">相似但不同的页面不能因本项决定被静默排除；第 20 页仍在待复核队列。</p>
+                <button class="red-action" type="button" id="record-decision">记录模拟审计决定</button>
+                <p class="audit-stamp" id="audit-stamp" aria-live="polite">尚未记录决定</p>
+              </div>
+            </aside>
+          </div>
+          <div class="derived-banner">
+            <div><span class="artifact-badge derived">派生件提案</span><strong>“仅相关页 + 红框标记”尚未生成</strong><p>将包含 6 个经确认的相关页面；原件保持不变，生成前需完成全部页级处置。</p></div>
+            <button class="disabled-button" type="button" disabled>生成派生 PDF（尚有 6 页待处置）</button>
+          </div>
+        </section>
+      </main>
+
+      <aside class="context-rail" aria-label="案件上下文">
+        <div class="rail-heading">
+          <p class="section-kicker">本案简报</p>
+          <span class="synthetic-label">SYNTHETIC</span>
+        </div>
+        <section class="rail-block">
+          <h2>不可跳过的前置条件</h2>
+          <ol class="gate-list">
+            <li><span>01</span><div><strong>确认送达与期限规则</strong><small>当前仅显示期限候选</small></div></li>
+            <li><span>02</span><div><strong>确认付款性质</strong><small>不得将候选直接进入计算</small></div></li>
+            <li><span>03</span><div><strong>批准适用规则版本</strong><small>生成正式测算前必须完成</small></div></li>
+          </ol>
+        </section>
+        <section class="rail-block proposal-block">
+          <p class="section-kicker">系统提案 · 非结论</p>
+          <p>先回到第 16、17、19 页核验付款对象与备注，再将付款性质提交律师确认。</p>
+          <div class="proposal-meta"><span>证据来源</span><strong>3 个页级来源</strong></div>
+          <div class="proposal-meta"><span>不确定性</span><strong>昵称映射未确认</strong></div>
+        </section>
+        <section class="rail-block risk-block">
+          <p class="section-kicker red-kicker">当前阻断</p>
+          <h2>不能锁定提交版</h2>
+          <p>原因：材料页级处置未完成、利息规则未批准、正式计算不存在。</p>
+        </section>
+      </aside>
+    </div>
+
+    <footer class="statusbar">
+      <span>内部合成 Alpha · 不接收真实案件材料 · 不生成可提交法院的文件</span>
+      <span>保存状态：静态原型，无真实写入</span>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

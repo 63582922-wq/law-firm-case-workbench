@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>证据工作台｜专业合议工作室</title>
+  <link rel="stylesheet" href="studio.css">
+</head>
+<body>
+  <!--
+    设计假设（合成 Alpha 静态原型）：
+    1. 证据工作台将“文件和页级处置 / 原始页 / 候选与来源”放进同一工作面，避免结论脱离原件。
+    2. 红框只表示证据标注；风险使用棕红文字，二者不能混为同一语义。原件只读，派生件尚未生成。
+    3. 所有文件名、案情、日期、金额、交易号、人物和坐标均为严格合成数据；不对应任何真实微信或法院材料。
+    4. 本页为静态视觉原型，按钮不执行真实确认、导出、OCR 或审计写入。
+  -->
+  <header class="topbar">
+    <div class="brandline">
+      <span class="brand">合议</span>
+      <span class="subbrand">证据驱动诉讼工作台</span>
+      <span class="tag alpha">内部合成 Alpha</span>
+    </div>
+    <div class="topbar-actions">
+      <span>案件</span>
+      <span>待办与审批</span>
+      <span>知识库</span>
+      <span class="signed-in">承办律师（模拟角色）</span>
+    </div>
+  </header>
+
+  <section class="casebar" aria-label="当前案件">
+    <div>
+      <div class="breadcrumbs"><a href="case-overview.html">案件总览</a> / 材料与证据 / 微信流水</div>
+      <h1 class="case-title">原告甲某诉被告乙某民间借贷纠纷（合成）</h1>
+    </div>
+    <div class="case-meta">
+      <span class="case-ref">案号：合成民初-04281</span>
+      <span class="status-tag decision">重复页待处置</span>
+    </div>
+  </section>
+
+  <div class="workspace">
+    <nav class="case-nav" aria-label="案件内导航">
+      <p class="nav-label">案件工作区</p>
+      <ul>
+        <li><a href="case-overview.html"><span class="nav-index">01</span><span>案件总览</span></a></li>
+        <li><a href="evidence-workbench.html" aria-current="page"><span class="nav-index">02</span><span>材料与证据</span></a></li>
+        <li><a href="#主体"><span class="nav-index">03</span><span>主体与身份</span></a></li>
+        <li><a href="#诉请"><span class="nav-index">04</span><span>诉请与争点</span></a></li>
+        <li><a href="#事实"><span class="nav-index">05</span><span>事实与时间线</span></a></li>
+        <li><a href="#交易"><span class="nav-index">06</span><span>交易台账</span></a></li>
+        <li><a href="#法律"><span class="nav-index">07</span><span>法律依据</span></a></li>
+        <li><a href="#计算"><span class="nav-index">08</span><span>利息计算</span></a></li>
+        <li><a href="#文书"><span class="nav-index">09</span><span>文书工作室</span></a></li>
+        <li><a href="#提交"><span class="nav-index">10</span><span>提交中心</span></a></li>
+        <li><a href="#审计"><span class="nav-index">11</span><span>审计记录</span></a></li>
+      </ul>
+      <div class="nav-divider"></div>
+      <p class="case-nav-note"><strong>原件保护</strong><br>本页面中的选择只会形成处置记录和派生件候选，绝不覆盖或删除原始文件。</p>
+    </nav>
+
+    <main class="evidence-main">
+      <section class="evidence-header" aria-label="当前证据文件">
+        <div>
+          <span class="section-kicker">材料与证据 / 原始文件</span>
+          <h2 class="evidence-file-title">微信交易明细_合成样本_2020.pdf</h2>
+        </div>
+        <div class="file-meta">
+          <span class="status-tag original">原件 · 只读</span>
+          <span class="case-ref">SHA-256：7e3a…8fd1</span>
+          <button class="secondary" type="button">查看文件元数据</button>
+        </div>
+      </section>
+
+      <div class="evidence-layout">
+        <aside class="document-list" aria-label="文件和页面列表">
+          <div class="list-heading"><h2>文件与页面</h2><span>36 / 36 已处置</span></div>
+          <div class="file-row"><strong>微信交易明细_合成样本_2020.pdf</strong><span>18 页 · 原件 · 仅供取证</span></div>
+          <div class="page-group-title"><span>相关与待决定</span><span>4 页</span></div>
+          <ul class="page-list">
+            <li><a href="#p11"><strong>P11 · 相关</strong><span>交易截图 · 已复核</span></a></li>
+            <li><a href="#p12" aria-current="page"><strong>P12 · 相关</strong><span>交易截图 · 选中原页</span></a></li>
+            <li class="duplicate"><a href="#p17"><strong>P17 · 精确重复候选</strong><span>与 P12 视觉哈希一致</span></a></li>
+            <li class="similar"><a href="#p18"><strong>P18 · 相似非重复</strong><span>金额不同 · 保持独立</span></a></li>
+          </ul>
+          <div class="page-group-title"><span>其他页面</span><span>14 页</span></div>
+          <ul class="page-list">
+            <li><a href="#p01"><strong>P01—P10 · 已处置</strong><span>相关或无关均有记录</span></a></li>
+            <li><a href="#p13"><strong>P13—P16 · 已处置</strong><span>相关或无关均有记录</span></a></li>
+          </ul>
+          <div class="page-group-title"><span>派生件</span><span>0</span></div>
+          <p class="muted-copy" style="margin-top:7px;font-size:11px;">需先由律师完成 P12、P17 的处置；目前没有可用于提交的相关页 PDF。</p>
+        </aside>
+
+        <section class="document-viewer" aria-label="原始 PDF 页查看器">
+          <div class="viewer-topline">
+            <span class="viewer-note">原始页 P12 / 18 · 缩放 100% · OCR 已生成，未作为正式事实</span>
+            <div class="page-tools"><button class="secondary" type="button">上一页</button><button class="secondary" type="button">下一页</button><button class="secondary" type="button">适合宽度</button></div>
+          </div>
+
+          <article class="document-page" aria-label="合成微信交易明细第十二页">
+            <header class="doc-header">
+              <p class="doc-title">微信支付交易明细</p>
+              <p class="doc-subtitle">合成测试材料 · 仅用于原型展示 · 非真实交易凭证</p>
+            </header>
+            <div class="doc-meta">
+              <span><strong>账单时间：</strong>2020-08-22 16:42</span>
+              <span><strong>交易状态：</strong>已完成（合成）</span>
+              <span><strong>交易单号：</strong>WX-SYN-20200822-1642</span>
+              <span><strong>来源页码：</strong>P12</span>
+            </div>
+            <section class="doc-section">
+              <p class="doc-section-title">交易详情</p>
+              <dl class="transaction-record">
+                <div class="transaction-grid">
+                  <dt>付款方</dt><dd>乙某（合成身份）</dd>
+                  <dt>收款方</dt><dd>甲某（合成身份）</dd>
+                  <dt>支付金额</dt><dd class="amount-line">CNY 2,000.00</dd>
+                  <dt>转账说明</dt><dd>“利息”字样（合成文本，待律师判断付款性质）</dd>
+                  <dt>交易渠道</dt><dd>微信支付（合成页面）</dd>
+                </div>
+                <div class="proof-box"><span class="proof-box-label">证据标注 · OCR 区块 03</span></div>
+              </dl>
+              <p class="doc-note">注：红框仅标示本页中与候选付款有关的证据区域，不表示已确认事实、付款性质或法律结论。</p>
+            </section>
+            <footer class="doc-page-footer"><span>微信交易明细_合成样本_2020.pdf</span><span>第 12 页 / 共 18 页</span></footer>
+          </article>
+          <p class="viewer-caption"><strong>红框 = 证据定位</strong>；风险、候选与批准分别以文字和独立状态表达，避免把标注误读为结论。</p>
+        </section>
+
+        <aside class="extraction-panel" aria-label="抽取和重复页处置">
+          <span class="section-kicker">页级候选与合议处置</span>
+          <h2 class="panel-title">从 P12 抽取的候选记录</h2>
+          <section class="candidate-block">
+            <span class="status-tag candidate">候选事实 · 未批准</span>
+            <dl>
+              <div><dt>日期</dt><dd>2020-08-22</dd></div>
+              <div><dt>金额</dt><dd>CNY 2,000.00</dd></div>
+              <div><dt>方向</dt><dd>乙某（合成）→ 甲某（合成）</dd></div>
+              <div><dt>付款性质</dt><dd>待律师确认</dd></div>
+              <div><dt>来源坐标</dt><dd class="coordinate">P12 · block-03 · [96,212,406,116]</dd></div>
+            </dl>
+          </section>
+          <section class="decision-block">
+            <span class="section-kicker">重复页处置 · 需要决定</span>
+            <p><strong>P12 与 P17：</strong>视觉哈希一致，建议认定为精确重复。两页原件均保留；确认后仅在派生件选页时保留一次。</p>
+            <p><strong>P18：</strong>文字结构相似但金额不同，属于相似非重复，禁止自动合并或删除。</p>
+            <div class="action-row"><button type="button">确认精确重复（律师）</button><button class="secondary" type="button">保持两页独立</button></div>
+          </section>
+          <section class="audit-block">
+            <span class="section-kicker">模拟审计记录</span>
+            <div class="audit-entry"><strong>09:42 · 系统生成重复候选</strong><span>输入：P12、P17 渲染视觉哈希；输出：需要律师处置。</span></div>
+            <div class="audit-entry"><strong>09:39 · 系统标记 P18 为相似页</strong><span>输入：文本相似度；输出：不得自动排除。</span></div>
+            <div class="audit-entry"><strong>09:18 · 助理角色完成页级盘点</strong><span>仅创建候选与出处，不具备批准权限。</span></div>
+          </section>
+        </aside>
+      </div>
+    </main>
+
+    <aside class="right-rail" aria-label="案件状态与合议摘要">
+      <section class="rail-section">
+        <span class="rail-label">本页定位</span>
+        <h3>页级证据先于台账</h3>
+        <p class="muted-copy">在律师确认来源范围前，系统只展示可追溯候选，不把 OCR 文本或交易说明写成事实。</p>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">证据关系</span>
+        <h3>P12 / P17 / P18</h3>
+        <ul class="check-list">
+          <li class="pending">P12：选中原页</li>
+          <li class="pending">P17：精确重复候选</li>
+          <li class="approved">P18：相似但独立保留</li>
+        </ul>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">处置边界</span>
+        <h3>不会修改原始材料</h3>
+        <p class="muted-copy">确认重复只写入处置理由与派生选择。源文件哈希、页序与原页可见性均不应改变。</p>
+      </section>
+      <section class="rail-section">
+        <span class="rail-label">下游影响</span>
+        <h3>尚不生成正式金额</h3>
+        <p class="muted-copy">本页候选付款必须经历来源确认、付款性质确认和规则批准，才可能进入确定性计算。</p>
+      </section>
+    </aside>
+  </div>
+</body>
+</html>

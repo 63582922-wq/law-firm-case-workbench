@@ -1,0 +1,245 @@
+{
+  "realm": "lawcase-test",
+  "enabled": true,
+  "displayName": "律所案件 AI 工作台·本机受管验收",
+  "displayNameHtml": "律所案件 AI 工作台",
+  "attributes": {
+    "frontendUrl": "__LAWCASE_IDENTITY_ORIGIN__"
+  },
+  "sslRequired": "all",
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "defaultSignatureAlgorithm": "RS256",
+  "notBefore": 1,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "accessTokenLifespan": 600,
+  "accessTokenLifespanForImplicitFlow": 1,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 43200,
+  "ssoSessionIdleTimeoutRememberMe": 0,
+  "ssoSessionMaxLifespanRememberMe": 0,
+  "offlineSessionIdleTimeout": 1,
+  "offlineSessionMaxLifespanEnabled": true,
+  "offlineSessionMaxLifespan": 1,
+  "clientSessionIdleTimeout": 1800,
+  "clientSessionMaxLifespan": 43200,
+  "accessCodeLifespan": 60,
+  "accessCodeLifespanUserAction": 300,
+  "accessCodeLifespanLogin": 300,
+  "actionTokenGeneratedByAdminLifespan": 300,
+  "actionTokenGeneratedByUserLifespan": 300,
+  "passwordPolicy": "length(16)",
+  "otpPolicyType": "totp",
+  "otpPolicyAlgorithm": "HmacSHA1",
+  "otpPolicyInitialCounter": 0,
+  "otpPolicyDigits": 6,
+  "otpPolicyLookAheadWindow": 1,
+  "otpPolicyPeriod": 30,
+  "otpPolicyCodeReusable": false,
+  "otpSupportedApplications": [
+    "totpAppFreeOTPName",
+    "totpAppGoogleName",
+    "totpAppMicrosoftAuthenticatorName"
+  ],
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxTemporaryLockouts": 0,
+  "bruteForceStrategy": "MULTIPLE",
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "eventsEnabled": true,
+  "eventsListeners": [
+    "jboss-logging"
+  ],
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "internationalizationEnabled": true,
+  "supportedLocales": [
+    "zh-CN",
+    "en"
+  ],
+  "defaultLocale": "zh-CN",
+  "authenticatorConfig": [
+    {
+      "alias": "lawcase-password-amr",
+      "config": {
+        "default.reference.value": "pwd",
+        "default.reference.maxAge": "43200"
+      }
+    },
+    {
+      "alias": "lawcase-totp-amr",
+      "config": {
+        "default.reference.value": "mfa",
+        "default.reference.maxAge": "43200"
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "lawcase-browser-mfa",
+      "description": "Password followed by a real TOTP execution; no cookie-only or identity-provider bypass.",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticatorConfig": "lawcase-password-amr",
+          "authenticator": "auth-username-password-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 10,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticatorConfig": "lawcase-totp-amr",
+          "authenticator": "auth-otp-form",
+          "authenticatorFlow": false,
+          "requirement": "REQUIRED",
+          "priority": 20,
+          "autheticatorFlow": false,
+          "userSetupAllowed": false
+        }
+      ]
+    }
+  ],
+  "browserFlow": "lawcase-browser-mfa",
+  "clients": [
+    {
+      "clientId": "lawcase-web-workbench",
+      "name": "律所案件 AI 工作台",
+      "description": "Server-side authorization-code client for the managed Web workbench.",
+      "rootUrl": "__LAWCASE_WORKBENCH_ORIGIN__",
+      "adminUrl": "__LAWCASE_WORKBENCH_ORIGIN__",
+      "baseUrl": "__LAWCASE_WORKBENCH_ORIGIN__/",
+      "enabled": true,
+      "alwaysDisplayInConsole": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__LAWCASE_OIDC_CLIENT_SECRET__",
+      "redirectUris": [
+        "__LAWCASE_WORKBENCH_CALLBACK__"
+      ],
+      "webOrigins": [
+        "__LAWCASE_WORKBENCH_ORIGIN__"
+      ],
+      "notBefore": 1,
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": false,
+      "frontchannelLogout": true,
+      "protocol": "openid-connect",
+      "fullScopeAllowed": false,
+      "nodeReRegistrationTimeout": -1,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "access.token.signed.response.alg": "RS256",
+        "id.token.signed.response.alg": "RS256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "require.pushed.authorization.requests": "false",
+        "use.refresh.tokens": "false",
+        "client.use.lightweight.access.token.enabled": "false",
+        "exclude.session.state.from.auth.response": "true",
+        "post.logout.redirect.uris": "__LAWCASE_WORKBENCH_ORIGIN__/*"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "protocolMappers": [
+        {
+          "name": "lawcase-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "lawcase-web-workbench",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "lawcase-auth-time",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usersessionmodel-note-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.session.note": "AUTH_TIME",
+            "claim.name": "auth_time",
+            "jsonType.label": "long",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "lawcase-not-before",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "nbf",
+            "claim.value": "0",
+            "jsonType.label": "long",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "lawcase-amr",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-amr-mapper",
+          "consentRequired": false,
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "basic",
+        "profile"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "id": "__LAWCASE_TEST_LEAD_SUBJECT__",
+      "username": "__LAWCASE_TEST_LEAD_USERNAME__",
+      "email": "lead.lawyer@lawcase.test",
+      "firstName": "验收",
+      "lastName": "律师",
+      "enabled": true,
+      "emailVerified": true,
+      "totp": false,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__LAWCASE_TEST_LEAD_PASSWORD__",
+          "temporary": false
+        }
+      ],
+      "requiredActions": [
+        "CONFIGURE_TOTP"
+      ],
+      "realmRoles": [],
+      "clientRoles": {}
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+"""Dependency-free identifiers shared by legal-research planning layers."""
+
+LEGAL_RESEARCH_PLAN_SCHEMA = "agent-legal-research-plan-candidate-v1"
+LEGAL_RESEARCH_PLAN_ARTIFACT_KIND = "LEGAL_RESEARCH_PLAN_CANDIDATE"
+LEGAL_RESEARCH_PLAN_REVIEW_STATUS = "NEEDS_LAWYER_REVIEW"
+LEGAL_RESEARCH_PLANNING_SKILL_ID = "legal_rule_research_planning"
+LEGAL_RESEARCH_PLANNING_TOOL_ID = "plan_authoritative_rule_research"
+
+__all__ = (
+    "LEGAL_RESEARCH_PLAN_ARTIFACT_KIND",
+    "LEGAL_RESEARCH_PLAN_REVIEW_STATUS",
+    "LEGAL_RESEARCH_PLAN_SCHEMA",
+    "LEGAL_RESEARCH_PLANNING_SKILL_ID",
+    "LEGAL_RESEARCH_PLANNING_TOOL_ID",
+)

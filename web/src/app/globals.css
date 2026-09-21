@@ -1,0 +1,27 @@
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+  overflow-x: auto;
+}
+
+body {
+  /* Route-level shells own their minimum width.  The managed lawyer Web
+     workbench is responsive, while the legacy desktop shell keeps its
+     explicit 1180px floor in case-workbench.module.css. */
+  min-width: 0;
+  color: #26312f;
+  background: #f3f0e6;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+:root {
+  --font-serif: "Songti SC", STSong, SimSun, serif;
+}

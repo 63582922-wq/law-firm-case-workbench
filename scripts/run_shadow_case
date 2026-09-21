@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+python_bin="$project_root/backend/.venv/bin/python"
+
+if [ ! -x "$python_bin" ]; then
+  echo "BLOCKED: backend/.venv is missing; install the frozen backend environment first." >&2
+  exit 2
+fi
+
+export PYTHONPATH="$project_root/backend${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python_bin" "$project_root/backend/scripts/run_shadow_case.py" "$@"

@@ -33,11 +33,16 @@ coverage/
 .pytest_cache/
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 venv/
+tmp/
 
 # Local tools and OS
 .DS_Store
 .idea/
 .vscode/
 *.log
+
+# Run artifacts (shadow mode derived text etc.)
+outputs/

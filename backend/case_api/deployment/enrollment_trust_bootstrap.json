@@ -1,0 +1,7 @@
+{
+  "schema_version": "lawcase-enrollment-trust-bootstrap-v1",
+  "deployment_state": "NOT_CONFIGURED",
+  "threshold": 0,
+  "roots": [],
+  "catalog_envelope": null
+}

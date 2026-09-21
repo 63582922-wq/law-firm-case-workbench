@@ -1,0 +1,16 @@
+{
+  "schema_version": "golden-lawyer-analysis-core-v3",
+  "run_id": "synthetic-v3-failure-excerpt",
+  "failure_excerpt": {
+    "interest_assessment": "保护上限为12%，并按约定利率继续计算",
+    "limitations_question": "是否曾通过电话或微信向原告催促还款",
+    "strategy_b": {
+      "scenario_ids": [
+        "S-B-2"
+      ],
+      "benefit": "最大化还款总额（+30,000+50,000）",
+      "claim": "锁定未过时效结论"
+    }
+  },
+  "fixture_scope": "fully synthetic regression evidence; not an accepted Agent output"
+}

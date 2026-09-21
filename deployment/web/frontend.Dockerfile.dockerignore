@@ -1,0 +1,15 @@
+# Dockerfile-specific ignore rules for the `web/` build context.  They keep
+# installed modules, Tauri outputs, and local browser build products out of a
+# self-hosted web image.
+node_modules
+.next
+out
+coverage
+.turbo
+src-tauri/target
+src-tauri/gen
+src-tauri/binaries
+.DS_Store
+*.log
+.env
+.env.*

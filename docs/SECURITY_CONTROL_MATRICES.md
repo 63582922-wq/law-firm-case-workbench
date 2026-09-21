@@ -37,6 +37,7 @@
 | `EXPORT_SUBMISSION` | current 指针有效、未 `STALE/REVOKED`、导出权限与再认证 | 审计、Manifest 或权限异常即拒绝 |
 | `DELETE_ORIGINAL` | 法定/保全检查、双人或高风险批准、保留策略满足 | Agent 永远无权调用 |
 | `SEND_EXTERNAL_REQUEST` | 有效 preflight、字段最小化、成本/次数上限、供应商/地域允许 | `UNKNOWN_SUBMISSION` 禁止自动重试 |
+| `ENQUEUE/REGISTER_EVIDENCE_INTAKE` | 当前已批准扫描、有效 OS folder grant、Manifest 重验；登记还需本机恶意文件扫描谱系、源哈希和静态 PDF 检查 | grant/路径不落库；变化、扫描器不可用、活动/加密/损坏 PDF 均 fail closed；非 PDF 进入转换/人工处理 |
 
 ## 4. 外部处理 Preflight 契约
 
@@ -54,3 +55,15 @@ authorization_actor / authorized_at / expires_at / status
 ## 5. 验收样例
 
 每次实现控制面都必须至少验证：跨律所、跨案件、离职账号、撤销委托、助理批准、旧版本审批、失效提交包导出、审计不可写、越过 preflight、未知外部提交和错误签名 URL 均被服务端拒绝，并在允许审计的情况下留下最小化事件。
+
+## 6. 桌面本机会话与 sidecar 控制
+
+| 控制点 | 已实现 | 仍需放行门 |
+|---|---|---|
+| 本机 API 启动 | Tauri Rust 主进程启动随应用分发的自包含 sidecar；前端无 Shell execute/spawn/kill 权限 | 安装器签名、公证、升级与回滚验收 |
+| 父子进程绑定 | 64 个十六进制字符的随机挑战只经 stdin 发送；sidecar 回执必须匹配协议、挑战摘要、有效 PID 和动态端口 | 对发布签名和 sidecar 文件哈希增加启动前证明 |
+| 网络边界 | 仅绑定数值型 `127.0.0.1` 动态端口；持久 API CORS 只允许 `tauri://localhost` 的 GET/POST、必要请求头与最小响应头；默认 sidecar 无 OpenAPI/Docs/案件路由 | 速率限制、统一安全响应头、休眠/网络切换与渗透验收 |
+| 身份会话 | 律所 Ed25519 签名登记、严格字段、30 天有效期上限、设备摘要绑定；门限签名信任目录阻断过期、回滚、混链并区分活动/退休/撤销签发公钥；Tauri 原生 Keychain API 可初始化/回读安装秘密、只停用本机，只从系统文件选择器读取 `.lawenroll`，或以无参数命令在 macOS `NSSecureTextField` 收集一次性激活码；父进程私有令牌请求 sidecar，在线激活由 sidecar 读取安装绑定并拒绝覆盖已有登记，离线导入核对精确字节、安装绑定与当前凭证哈希，二者均在验签后 CAS 保存；每次启动重新验签有效登记后才一次性交换最长 30 分钟会话，普通状态不含令牌/session ID；WebView 正式案件请求经原生 grant 注入短时 Bearer，不能覆盖身份头或持久化令牌，Rust 返回前清除过期会话；激活/续期/撤销请求前将 UUID 操作号、类型、原凭据哈希和设备绑定写入第三个 Keychain 项，未知结果不重试；固定状态端点仅接受 PENDING/REJECTED/SUCCEEDED，成功结果重新验签并与凭据 CAS、待决标记清除共同提交；数据库未配置时 grant 关闭，数据库每次仍复核 active user 与未撤销本案角色 | 真实服务与生产根保管/轮换仪式、TLS SPKI 轮换、状态保留/审计、撤销清单、休眠重验与专用 PostgreSQL 整链；不得由浏览器请求角色 |
+| 生命周期 | 桌面退出时终止 sidecar；sidecar 同时监测父 PID 与 stdin；实测退出后无残留进程 | 崩溃恢复、休眠/唤醒、升级中断和多窗口/单实例策略 |
+
+OS 当前登录会话只证明本机进程上下文，不证明执业身份、律所归属或案件授权。三者必须分层验证；在登记身份和专用数据库缺失时，sidecar 即使健康也只能报告“案件仍禁用”。

@@ -1,0 +1,30 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "../backend/.venv/bin/python ../backend/scripts/export_case_agent_capability_manifest.py --check && next build",
+    "start": "next start",
+    "lint": "eslint",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build && ../backend/.venv/bin/python ../backend/scripts/finalize_macos_bundle.py",
+    "desktop:check": "cargo check --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "next": "16.3.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "pnpm@11.16.0"
+}

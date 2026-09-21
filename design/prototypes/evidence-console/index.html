@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>谨证｜案件总览 · 证据控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!--
+    合成数据说明：本原型全部人物、案号、金额、日期、文件名与审计事件均为严格合成样例，
+    用于展示一审民间借贷被告应诉中的证据控制流程，不代表真实案件、法律结论或可提交文书。
+    方向 B 的取舍：用连续的审查面、表格与来源标签表达精度；不用聊天界面、渐变或卡片网格。
+  -->
+  <div class="app-shell">
+    <aside class="side-rail" aria-label="案件内导航">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">证</div>
+        <div>
+          <span class="brand-name">谨证</span>
+          <span class="brand-caption">EVIDENCE CONTROL</span>
+        </div>
+      </div>
+
+      <section class="matter-chip" aria-label="当前合成案件">
+        <span class="matter-kicker">SYNTHETIC MATTER · M-26-0048</span>
+        <strong class="matter-name">原告甲诉被告乙<br>民间借贷纠纷</strong>
+        <span class="matter-meta">被告一审应诉 · 人民币</span>
+      </section>
+
+      <nav class="case-nav">
+        <span class="rail-label">案件工作流</span>
+        <a class="active" href="index.html" aria-current="page"><span>案件总览</span><span class="nav-count">01</span></a>
+        <a href="evidence-workbench.html"><span>材料与证据</span><span class="nav-count">94</span></a>
+        <a href="evidence-workbench.html"><span>主体与身份</span><span class="nav-count">03</span></a>
+        <a href="evidence-workbench.html"><span>诉请与争点</span><span class="nav-count">02</span></a>
+        <a href="evidence-workbench.html"><span>事实与时间线</span><span class="nav-count">12</span></a>
+        <a href="evidence-workbench.html"><span>交易台账</span><span class="nav-count">08</span></a>
+        <a href="evidence-workbench.html"><span>法律依据</span><span class="nav-count">待审</span></a>
+        <a href="evidence-workbench.html"><span>利息计算</span><span class="nav-count">失效</span></a>
+        <a href="evidence-workbench.html"><span>文书工作室</span><span class="nav-count">—</span></a>
+        <a href="evidence-workbench.html"><span>提交中心</span><span class="nav-count">—</span></a>
+      </nav>
+
+      <div class="rail-foot">
+        <div class="role-row"><span>当前角色</span><span class="role-name">承办律师</span></div>
+        <span class="environment">INTERNAL SYNTHETIC ALPHA</span>
+      </div>
+    </aside>
+
+    <main class="main-area">
+      <header class="global-bar">
+        <div class="breadcrumb"><strong>案件</strong> / 民间借贷应诉 / M-26-0048</div>
+        <div class="global-actions">
+          <a class="global-link" href="evidence-workbench.html">审计记录</a>
+          <a class="global-link" href="evidence-workbench.html">工作清单</a>
+          <span class="user-stamp">陈律师 · 承办</span>
+        </div>
+      </header>
+
+      <section class="status-bar" aria-label="案件状态">
+        <div class="status-source">
+          <strong>（2026）粤1302民初00000号</strong>
+          <span>合成案号 · 一审被告应诉 · 默认币种 CNY</span>
+        </div>
+        <div class="status-notice"><i class="notice-mark" aria-hidden="true"></i>期限候选待确认：送达日期与适用规则尚未获律师批准</div>
+        <div class="stage-strip" aria-label="案件阶段">
+          <span class="stage done">材料盘点</span>
+          <span class="stage current">证据确认</span>
+          <span class="stage">事实</span>
+          <span class="stage">计算</span>
+          <span class="stage">文书</span>
+          <span class="stage">提交</span>
+        </div>
+      </section>
+
+      <div class="workspace">
+        <header class="page-heading">
+          <div>
+            <div class="eyebrow">MATTER CONTROL · 01</div>
+            <h1>案件总览</h1>
+          </div>
+          <p class="heading-note">当前界面只突出一个可追溯的律师决定。<b>AI 候选</b>、<b>律师批准</b>与<b>失效结果</b>分开呈现。</p>
+        </header>
+
+        <section class="overview-grid" aria-label="案件控制面板">
+          <article class="panel decision-panel">
+            <header class="panel-header">
+              <div>
+                <div class="eyebrow">NEXT LAWYER DECISION</div>
+                <h2>下一项律师决定</h2>
+              </div>
+              <span class="status-tag tag-review">待律师确认</span>
+            </header>
+            <div class="decision-body">
+              <div>
+                <p class="decision-title">确认微信交易记录第 12 页与第 48 页是否为“精确重复”，并决定派生件仅保留其一。</p>
+                <p class="decision-copy">两页的视觉哈希、OCR 文本与版式指纹均一致。该决定不会删除原件；仅影响“相关页派生 PDF”的纳入页面及后续交易台账的候选来源。</p>
+                <a class="source-inline" href="evidence-workbench.html">来源：微信交易记录（合成）· p.12 / p.48 · DUP-G-002</a>
+              </div>
+              <div class="decision-actions">
+                <a class="button" href="evidence-workbench.html">进入证据确认</a>
+                <a class="button secondary" href="evidence-workbench.html">查看影响范围</a>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel stage-panel">
+            <header class="panel-header">
+              <div>
+                <div class="eyebrow">CASE STATE MACHINE</div>
+                <h2>受控流程</h2>
+              </div>
+              <span class="panel-meta">仅代码状态可推动正式阶段</span>
+            </header>
+            <div class="case-rail">
+              <div class="case-step done"><span>01</span><strong>材料盘点</strong></div>
+              <div class="case-step current"><span>02</span><strong>证据确认</strong></div>
+              <div class="case-step"><span>03</span><strong>事实与争点</strong></div>
+              <div class="case-step"><span>04</span><strong>规则与计算</strong></div>
+              <div class="case-step"><span>05</span><strong>文书审查</strong></div>
+              <div class="case-step"><span>06</span><strong>锁定提交版</strong></div>
+            </div>
+          </article>
+
+          <article class="panel table-panel">
+            <header class="panel-header">
+              <div>
+                <div class="eyebrow">CORE CLAIMS &amp; PAYMENTS</div>
+                <h2>核心账目与诉请范围</h2>
+              </div>
+              <a class="source-inline" href="evidence-workbench.html">跳转来源与台账</a>
+            </header>
+            <table class="ledger-table">
+              <caption class="sr-only">合成案件的核心账目与诉请范围</caption>
+              <thead>
+                <tr><th>对象</th><th>金额 / 币种</th><th>本方当前立场</th><th>状态</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>原告本金诉请</td><td class="amount">50,000.00 CNY</td><td>本金范围待与借据、流水核对</td><td><span class="status-tag tag-candidate">候选事实</span></td></tr>
+                <tr><td>已付款项</td><td class="amount">8,000.00 CNY</td><td>付款性质未全部确认，不得纳入正式计算</td><td><span class="status-tag tag-review">待决定</span></td></tr>
+                <tr><td>利息主张</td><td class="amount">待拆分 CNY</td><td>先核对原告起诉范围、规则版本与已付金额</td><td><span class="status-tag tag-blocked">已阻断</span></td></tr>
+                <tr><td>正式计算情景</td><td class="amount">—</td><td class="muted">尚无律师批准的输入参数</td><td><span class="status-tag tag-stale">不可使用</span></td></tr>
+              </tbody>
+            </table>
+          </article>
+
+          <div class="right-stack">
+            <article class="panel">
+              <header class="panel-header">
+                <div>
+                  <div class="eyebrow">MATERIAL HEALTH</div>
+                  <h2>材料态势</h2>
+                </div>
+                <span class="panel-meta">全量 94 页</span>
+              </header>
+              <ul class="health-list">
+                <li><b>94 / 94</b><div><span>页面已建立处置状态</span><small>不存在被静默忽略的原件页</small></div></li>
+                <li><b>02</b><div><span>精确重复候选页</span><small>需律师确认后才影响派生件</small></div></li>
+                <li><b>03</b><div><span>相关性待复核页</span><small>相似页面不自动排除</small></div></li>
+                <li><b>01</b><div><span>解析异常文件</span><small>保留原件，进入人工处理队列</small></div></li>
+              </ul>
+            </article>
+
+            <article class="panel">
+              <header class="panel-header">
+                <div>
+                  <div class="eyebrow">RECENT AUDIT</div>
+                  <h2>最近变化</h2>
+                </div>
+                <span class="panel-meta">合成审计</span>
+              </header>
+              <ul class="audit-list">
+                <li><time>2026-08-09 10:42 CST</time>页面 p.48 被标记为“精确重复候选”，尚未确认。</li>
+                <li class="stale"><time>2026-08-09 10:39 CST</time>付款性质候选变更，内部计算情景 01 已失效。</li>
+                <li><time>2026-08-09 10:18 CST</time>借据页坐标经复核，来源哈希未变化。</li>
+              </ul>
+            </article>
+
+            <aside class="boundary-note">
+              <h2>当前控制边界</h2>
+              <p>没有律师批准的付款性质、法律规则或利率输入时，系统不显示任何“正式利息总额”，也不允许生成可提交文书。</p>
+            </aside>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
