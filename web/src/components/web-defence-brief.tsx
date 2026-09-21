@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  WEB_BRIEF_CLAIMS,
-  WEB_BRIEF_GROUNDS,
   WEB_BRIEF_STANCES,
+  webBriefClaims,
+  webBriefGrounds,
   emptyWebBriefSelections,
   exportWebBrief,
   generateWebBrief,
@@ -235,11 +235,20 @@ export function WebDefenceBrief({
             <input value={draft.caseNumber} placeholder="（2026）粤XXXX民初XXXX号"
                    onChange={(event) => setDraft({ ...draft, caseNumber: event.target.value })} />
           </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            案由
+            <input value={draft.cause} placeholder="例如：买卖合同纠纷"
+                   onChange={(event) => setDraft({ ...draft, cause: event.target.value })} />
+          </label>
         </div>
+        <p style={{ fontSize: 12, opacity: 0.8, marginTop: 4 }}>
+          案由决定文书的术语：买卖合同用「货款／供货／逾期付款损失」，
+          民间借贷用「借款本金／出借／利息」。填错会把另一类案由的术语写进文书。
+        </p>
 
         <h4 style={{ marginTop: 12 }}>主张哪些抗辩（不勾选则不写进文书）</h4>
         <ul style={{ listStyle: "none", paddingLeft: 0, fontSize: 13 }}>
-          {WEB_BRIEF_GROUNDS.map((ground) => (
+          {webBriefGrounds(draft.cause).map((ground) => (
             <li key={ground.id} style={{ marginBottom: 6 }}>
               <label style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                 <input type="checkbox" checked={Boolean(draft.grounds[ground.id])}
@@ -260,7 +269,7 @@ export function WebDefenceBrief({
         <h4>对各项诉请的态度</h4>
         <table style={{ fontSize: 13, borderCollapse: "collapse" }}>
           <tbody>
-            {WEB_BRIEF_CLAIMS.map((claim) => (
+            {webBriefClaims(draft.cause).map((claim) => (
               <tr key={claim.id}>
                 <td style={{ paddingRight: 12 }}>{claim.label}</td>
                 <td>

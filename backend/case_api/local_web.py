@@ -1171,12 +1171,14 @@ class LocalWebStore:
             if row["agent_error"]:
                 review.append(f"分析曾报告：{str(row['agent_error'])[:200]}")
         blanked = 0
+        blanked_names = 0
         path = self.brief_markdown_path(case_id)
         if path is not None:
-            from case_kernel.matter_documents import gate_marker_count
+            from case_kernel.matter_documents import gate_marker_count, stored_file_name_count
 
             draft = path.read_text(encoding="utf-8")
             blanked = gate_marker_count(draft)
+            blanked_names = stored_file_name_count(draft)
             for line in draft.splitlines():
                 if line.strip().startswith("- [ ]"):
                     review.append(line.strip()[5:].strip())
@@ -1185,6 +1187,8 @@ class LocalWebStore:
             materials=self.deliverable_materials(case_id),
             engine_numbers=engine, review_items=review[:20],
             blanked_amount_count=blanked,
+            evidence_index=self._brief_evidence_index(case_id),
+            blanked_name_count=blanked_names,
         )
 
     def deliverable_docx(self, case_id: str, item_path: str) -> tuple[str, bytes] | None:
@@ -1283,15 +1287,29 @@ class LocalWebStore:
         with self._connect() as db:
             return db.execute("SELECT * FROM brief_runs WHERE case_id=?", (case_id,)).fetchone()
 
+    def _matter_cause(self, case_id: str) -> str:
+        """交付清单里已填的案由；供答辩状页面回填，不触发 read_deliverables 递归。"""
+        row = self._deliverable_row(case_id)
+        if row is None:
+            return ""
+        try:
+            parties = json.loads(str(row["parties_json"]) or "{}")
+        except ValueError:
+            return ""
+        return str((parties or {}).get("cause") or "").strip()
+
     def read_brief(self, case_id: str) -> dict[str, object]:
         """答辩状状态 + 律师已保存的选择。上一轮上游变化后按 STALE 处理。"""
         from case_kernel.defence_brief import BriefSelections
 
         case = self._case(case_id)
         row = self._brief_row(case_id)
+        cause = self._matter_cause(case_id)
         if row is None:
+            selections = BriefSelections()
+            selections.cause = cause
             return {
-                "selections": BriefSelections().to_dict(),
+                "selections": selections.to_dict(),
                 "state": {
                     "status": "NOT_RUN", "progress": 0, "stage": "", "gate_level": "",
                     "cost_cny": "0.000000", "calls": 0, "error": "",
@@ -1309,8 +1327,11 @@ class LocalWebStore:
         stale = stored_status == "STALE" or upstream_changed
         status = "STALE" if (stale and stored_status != "RUNNING") else stored_status
         path = Path(str(row["markdown_path"])) if row["markdown_path"] else None
+        selections = BriefSelections.from_dict(json.loads(str(row["selections_json"]) or "{}"))
+        if not selections.cause:
+            selections.cause = cause
         return {
-            "selections": json.loads(str(row["selections_json"]) or "{}"),
+            "selections": selections.to_dict(),
             "state": {
                 "status": status,
                 "progress": int(row["progress"]),
@@ -1361,6 +1382,36 @@ class LocalWebStore:
         path = Path(str(row["markdown_path"]))
         return path if path.is_file() else None
 
+    def _brief_evidence_index(self, case_id: str) -> str:
+        """把律师标注过的材料编成「原告证据N / 我方证据N」清单，供文书正文引用。
+
+        正文引用材料只能落到证据编号上；存储层文件名（哈希命名或带扩展名）
+        一旦写进提交件，法官看不懂，律师也要返工。
+        """
+        from case_kernel.matter_documents import evidence_display_name
+
+        state = self.read_deliverables(case_id)
+        roles = state.get("material_roles") or {}
+        ours: list[str] = []
+        plaintiff: list[str] = []
+        for material in state.get("materials") or []:
+            role = roles.get(str(material.get("material_id"))) or {}
+            if not role:
+                continue
+            pages = int(material.get("page_count") or 0)
+            suffix = f"第1-{pages}页" if pages > 1 else ("第1页" if pages == 1 else "页数待登记")
+            name = evidence_display_name(material)
+            # 材料不是法源：引用用证据编号，名称不加书名号（《》专用于法条）
+            line = (f"{name}，{suffix}" if name and name.strip("＿")
+                    else f"材料名称待律师登记，{suffix}")
+            if role.get("plaintiff"):
+                plaintiff.append(line)
+            if role.get("ours"):
+                ours.append(line)
+        lines = [f"原告证据{index}：{line}" for index, line in enumerate(plaintiff, start=1)]
+        lines += [f"我方证据{index}：{line}" for index, line in enumerate(ours, start=1)]
+        return "\n".join(lines)
+
     def start_brief_generation(
         self,
         case_id: str,
@@ -1386,6 +1437,7 @@ class LocalWebStore:
             for item in self._case_materials(case_id)
         ]
         env_file = self._resolve_model_env_file()
+        evidence_index = self._brief_evidence_index(case_id)
         preflight_path = self._write_brief_preflight(
             case_id, run_dir, case_number, selections, budget_cny, env_file)
 
@@ -1433,6 +1485,7 @@ class LocalWebStore:
                     env_file=env_file,
                     budget_cny=budget_cny,
                     materials=materials,
+                    evidence_index=evidence_index,
                     progress=progress,
                 ))
                 self._set_brief_state(

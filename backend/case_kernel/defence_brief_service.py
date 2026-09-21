@@ -18,9 +18,11 @@ from typing import Callable, Mapping
 
 from case_kernel.case_analysis_service import compute_engine_numbers
 from case_kernel.defence_brief import (
-    GROUNDS,
     BriefSelections,
+    authority_cause_warnings,
     build_brief_prompt,
+    claim_catalogue,
+    ground_catalogue,
     normalize_brief_output,
     render_brief_markdown,
 )
@@ -33,7 +35,8 @@ STATUS_FAILED = "FAILED"
 
 ProgressCallback = Callable[[str, int], None]
 
-_GROUND_TEXT = {ground_id: description for ground_id, _title, description in GROUNDS}
+def _ground_text(cause: str) -> dict[str, str]:
+    return {ground_id: description for ground_id, _title, description in ground_catalogue(cause)}
 
 
 @dataclass
@@ -48,6 +51,7 @@ class BriefRequest:
     env_file: Path | None = None
     budget_cny: Decimal = Decimal("2")
     materials: list[dict] = field(default_factory=list)
+    evidence_index: str = ""
     progress: ProgressCallback | None = None
     transport: object | None = None
     allow_image_identifiers: bool = False
@@ -91,6 +95,9 @@ def _preflight_review(request: BriefRequest, engine_amounts: dict) -> list[str]:
         items.append("律师尚未登记法源：正文中的法条位置保留占位，需律师填写。")
     if not any(request.selections.grounds.get(ground) for ground in request.selections.grounds):
         items.append("律师尚未选择任何主张：事实与理由各节为空，请先在页面上勾选。")
+    if not request.selections.cause.strip():
+        items.append("律师尚未填写案由：术语与分节标题只能按中性表述生成，请填写案由后重新生成。")
+    items.extend(authority_cause_warnings(request.selections.authorities, request.selections.cause))
     return items
 
 
@@ -105,7 +112,7 @@ def _degraded(request: BriefRequest, engine_amounts: dict, reason: str,
                 f"【本节论证待律师补写】{description}",
             ],
         }
-        for ground_id, title, description in GROUNDS
+        for ground_id, title, description in ground_catalogue(request.selections.cause)
         if request.selections.grounds.get(ground_id)
     ]
     review_items = [
@@ -120,6 +127,7 @@ def _degraded(request: BriefRequest, engine_amounts: dict, reason: str,
         review_items=review_items,
         gate_level="MODEL_NOT_CONFIGURED",
         materials=request.materials,
+        evidence_index=request.evidence_index,
         proposal_source="未调用模型（确定性骨架）",
         generated_at=_now(),
     )
@@ -194,6 +202,7 @@ def run_brief(request: BriefRequest) -> BriefResult:
             engine_amounts=engine_amounts,
             claim_summary=summary,
             analysis_context=context,
+            evidence_index=request.evidence_index,
         )
         raw = getattr(transport, "call_analysis")(
             instruction=instruction, ledger=ledger, purpose="defence-brief",
@@ -235,6 +244,7 @@ def run_brief(request: BriefRequest) -> BriefResult:
         review_items=review_items,
         gate_level=gate.level,
         materials=request.materials,
+        evidence_index=request.evidence_index,
         proposal_source=f"{preflight.get('model', 'qwen')}（真实调用）",
         generated_at=_now(),
     )

@@ -167,5 +167,38 @@ class ChecklistAndPackageTests(unittest.TestCase):
         self.assertEqual(sanitize_filename("   "), "应诉材料包")
 
 
+class TableWidthTests(unittest.TestCase):
+    """固定列宽必须真正写进 docx（真实踩过：tblW 是 auto，表格只有半个版心宽）。"""
+
+    def test_table_width_is_fixed_and_ordered(self) -> None:
+        import io
+        import re
+        import zipfile
+        from case_api.legal_docx import Paragraph, Table, render_legal_document
+
+        spec = type("S", (), {
+            "path": "t.docx", "title": "证据目录",
+            "blocks": [
+                Table(header=["序号", "证据名称", "页数", "证明内容"],
+                      rows=[["1", "购销合同", "3", ""]], widths=[1.3, 6.0, 1.4, 6.3]),
+            ],
+        })()
+        payload = render_legal_document(spec)
+        xml = zipfile.ZipFile(io.BytesIO(payload)).read("word/document.xml").decode("utf-8")
+
+        tbl_w = re.findall(r"<w:tblW[^/]*/>", xml)
+        self.assertEqual(len(tbl_w), 1, "只能有一个 tblW，否则 Word 取到 auto")
+        self.assertIn('w:type="dxa"', tbl_w[0])
+        self.assertNotIn('w:type="auto"', tbl_w[0])
+        self.assertEqual(int(re.search(r'w:w="(\d+)"', tbl_w[0]).group(1)), round(15.0 * 567))
+
+        tbl_pr = re.search(r"<w:tblPr>.*?</w:tblPr>", xml, re.S).group(0)
+        self.assertLess(tbl_pr.index("w:tblW"), tbl_pr.index("w:tblLayout"),
+                        "tblW 必须在 tblLayout 之前（OOXML 元素顺序）")
+        grid = re.search(r"<w:tblGrid>.*?</w:tblGrid>", xml, re.S).group(0)
+        self.assertEqual([int(v) for v in re.findall(r'w:w="(\d+)"', grid)],
+                         [round(w * 567) for w in (1.3, 6.0, 1.4, 6.3)])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,17 @@ class LegalDocSpec:
     needs_client_signature: bool = False
 
 
+_CN_NUMBERS = ("零", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
+
+
+def _cn_number(value: int) -> str:
+    if 0 < value < len(_CN_NUMBERS):
+        return _CN_NUMBERS[value]
+    if 10 < value < 20:
+        return "十" + _CN_NUMBERS[value - 10]
+    return str(value)
+
+
 def _or(value: str, blank: str = BLANK) -> str:
     return value.strip() if value and value.strip() else blank
 
@@ -51,8 +62,40 @@ _GATE_MARKERS = ("[见计算表]", "［见计算表］", "（见计算表）", "
 _AUTHORITY_MARKERS = ("[依据待律师登记]", "［依据待律师登记］", "【依据待律师登记】")
 
 
-def _strip_gate_markers(text: str) -> str:
+# 存储层文件名（哈希命名或带扩展名）不是证据名称：
+# 正式文书里出现 12207299bbcf….jpg 只会让法官看不懂，必须留空由律师填写。
+_STORED_FILE_NAME = re.compile(
+    r"[0-9a-zA-Z_\-\u4e00-\u9fff]{0,60}?\.(?:jpg|jpeg|png|gif|bmp|webp|pdf|docx?|xlsx?|txt|zip)",
+    re.IGNORECASE,
+)
+# 「《＿＿＿＿》第3页」是把材料引用误当成法条引用的排版；材料引用不加书名号
+_BLANK_CITATION_WITH_PAGE = re.compile(r"《(＿{2,})》\s*(第[一二三四五六七八九十百零〇\d、至\-—～]+页)")
+
+
+def scrub_stored_file_names(text: str) -> str:
+    """把存储层文件名（含哈希命名）替换为空白，提交件里不留机器命名。"""
     cleaned = str(text)
+    cleaned = _STORED_FILE_NAME.sub(SHORT_BLANK, cleaned)
+    return cleaned
+
+
+def stored_file_name_count(text: str) -> int:
+    """统计正文里出现过的存储层文件名数量（供内部文件如实登记留空处）。"""
+    return len(_STORED_FILE_NAME.findall(str(text)))
+
+
+# 「计算表」是内部产物：提交件里不能出现「以计算表为准」这类话，
+# 换成法院看得懂的表述。真实踩过：答辩请求原文写成「（以计算表逐笔核定为准）」。
+_INTERNAL_JARGON_REPAIRS = (
+    ("以计算表逐笔核定为准", "以本案证据逐笔核定为准"),
+    ("以计算表核定为准", "以本案证据核定为准"),
+    ("以计算表为准", "以本案证据核定为准"),
+    ("计算表", "本案证据"),
+)
+
+
+def _strip_gate_markers(text: str) -> str:
+    cleaned = scrub_stored_file_names(str(text))
     for marker in _GATE_MARKERS:
         cleaned = cleaned.replace(marker, SHORT_BLANK)
     for marker in _AUTHORITY_MARKERS:
@@ -60,6 +103,11 @@ def _strip_gate_markers(text: str) -> str:
     # 连续下划线收敛为固定宽度，读起来像表单而不是一堆横线
     cleaned = re.sub(r"_{6,}", SHORT_BLANK, cleaned)
     cleaned = re.sub(r"＿{6,}", SHORT_BLANK, cleaned)
+    # 材料引用后面跟页码时去掉书名号：「《＿＿＿＿》第3页」→「＿＿＿＿第3页」
+    cleaned = _BLANK_CITATION_WITH_PAGE.sub(r"\1\2", cleaned)
+    # 内部词汇不得进提交件
+    for internal, replacement in _INTERNAL_JARGON_REPAIRS:
+        cleaned = cleaned.replace(internal, replacement)
     return cleaned
 
 
@@ -178,15 +226,17 @@ def build_answer_document(parties: MatterParties, *, answer_markdown: str = "",
     for index, item in enumerate(requests, start=1):
         blocks.append(Paragraph(f"{index}. {item}", indent=True))
     blocks.append(Paragraph("二、事实与理由", indent=True, bold=True))
+    # 案件基本事实只能由律师/当事人陈述，系统不代写；留出显式位置，
+    # 否则律师拿到的文书直接从抗辩理由开始，缺少事实陈述段落。
+    blocks.append(Paragraph("（一）基本事实", indent=True, bold=True))
+    blocks.append(Paragraph(
+        f"答辩人与被答辩人之间的交易经过、货款形成过程及答辩人的意见：{BLANK}", indent=True))
     if sections:
-        for index, (title, paragraphs) in enumerate(sections, start=1):
+        for index, (title, paragraphs) in enumerate(sections, start=2):
             label = "一二三四五六七八九十"[index - 1] if index <= 10 else str(index)
             blocks.append(Paragraph(f"（{label}）{title}", indent=True, bold=True))
             for paragraph in paragraphs:
                 blocks.append(Paragraph(paragraph, indent=True))
-    else:
-        blocks.append(Paragraph(f"（一）{BLANK}", indent=True, bold=True))
-        blocks.append(Paragraph(BLANK, indent=True))
     blocks += [
         Paragraph("此致", indent=False),
         Paragraph(f"{_or(parties.court)}", indent=False),
@@ -212,6 +262,11 @@ def _evidence_name(material: Mapping) -> str:
         if name.endswith(suffix):
             return name[: -len(suffix)]
     return name
+
+
+def evidence_display_name(material: Mapping) -> str:
+    """公开的证据名称清洗（API 层拼证据编号清单时复用）。"""
+    return _evidence_name(material)
 
 
 def build_evidence_list_document(parties: MatterParties,
@@ -504,6 +559,8 @@ def build_internal_checklist_document(
     review_items: Sequence[str] | None = None,
     contract_summary: str = "",
     blanked_amount_count: int = 0,
+    evidence_index: str = "",
+    blanked_name_count: int = 0,
 ) -> LegalDocSpec:
     """内部文件（不提交）：交付清单、填写指引、数字来源与待核事项。
 
@@ -544,27 +601,42 @@ def build_internal_checklist_document(
         Paragraph("9. 调解意见确认：选择的调解方案、授权底线、签名与日期。", indent=True),
         Paragraph("10. 申请书：申请事项与事实理由，按需选用。", indent=True),
     ]
+    sections: list[tuple[str, list[object]]] = []
     if numbers:
-        blocks += [
-            Paragraph("三、本文书所引用的正式数字（来自计算表）", indent=True, bold=True),
-        ]
-        for key, value in numbers.items():
-            blocks.append(Paragraph(f"{key}：{value}", indent=True))
+        body = [Paragraph(f"{key}：{value}", indent=True) for key, value in numbers.items()]
+        sections.append(("本文书所引用的正式数字（来自计算表）", body))
     if contract_summary:
-        blocks += [
-            Paragraph("四、计算口径", indent=True, bold=True),
-            Paragraph(contract_summary, indent=True),
-        ]
-    if blanked_amount_count:
-        blocks += [
-            Paragraph("四、答辩状中留空的数字", indent=True, bold=True),
-            Paragraph(f"答辩状正文有 {blanked_amount_count} 处原为模型自算数字，"
-                      "已留空为下划线。请按计算表核对后填写，不要沿用模型给出的数字。",
+        sections.append(("计算口径", [Paragraph(contract_summary, indent=True)]))
+    if evidence_index:
+        body = [
+            Paragraph("答辩状正文按下列编号引用材料；正文与证据目录的编号必须一致：",
                       indent=True),
         ]
+        body += [Paragraph("· " + line.strip(), indent=True)
+                 for line in str(evidence_index).splitlines() if line.strip()]
+        sections.append(("证据编号（材料归属由律师标注）", body))
+    else:
+        sections.append((
+            "证据编号（尚未标注材料归属）",
+            [Paragraph("律师尚未在页面上标注哪些材料是原告证据、哪些是我方证据，"
+                       "答辩状无法引用具体材料，正文中的材料位置一律留空。"
+                       "标注后重新生成即可自动填入编号。", indent=True)],
+        ))
+    if blanked_amount_count or blanked_name_count:
+        notes = []
+        if blanked_amount_count:
+            notes.append(f"答辩状正文有 {blanked_amount_count} 处原为模型自算数字，"
+                         "已留空为下划线。请按计算表核对后填写，不要沿用模型给出的数字。")
+        if blanked_name_count:
+            notes.append(f"答辩状正文有 {blanked_name_count} 处原为上传文件的存储文件名"
+                         "（哈希命名或带扩展名），已留空为下划线。"
+                         "请按证据目录的材料名称填写。")
+        sections.append(("答辩状中留空的位置", [Paragraph(text, indent=True) for text in notes]))
     if review_items:
-        blocks += [Paragraph("五、提交前需要确认的事项", indent=True, bold=True)]
-        for item in review_items:
-            blocks.append(Paragraph("· " + str(item), indent=True))
+        sections.append(("提交前需要确认的事项",
+                         [Paragraph("· " + str(item), indent=True) for item in review_items]))
+    for index, (title, body) in enumerate(sections, start=3):
+        blocks.append(Paragraph(f"{_cn_number(index)}、{title}", indent=True, bold=True))
+        blocks += body
     return LegalDocSpec(path="内部文件（不提交）/交付清单与填写指引.docx",
                         title="交付清单与填写指引", blocks=blocks)

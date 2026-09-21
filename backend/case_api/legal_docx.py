@@ -183,6 +183,23 @@ def _set_table_borders(table) -> None:
     tbl_pr.append(borders)
 
 
+# OOXML 要求 tblPr 子元素按固定顺序出现；顺序不对时 Word 会忽略或修复文件。
+_TBL_PR_ORDER = (
+    "tblStyle", "tblpPr", "tblOverlap", "bidiVisual", "tblStyleRowBandSize",
+    "tblStyleColBandSize", "tblW", "jc", "tblCellSpacing", "tblInd", "tblBorders",
+    "shd", "tblLayout", "tblCellMar", "tblLook", "tblCaption", "tblDescription",
+)
+
+
+def _order_table_properties(tbl_pr) -> None:
+    def rank(element) -> int:
+        tag = element.tag.split("}")[-1]
+        return _TBL_PR_ORDER.index(tag) if tag in _TBL_PR_ORDER else len(_TBL_PR_ORDER)
+
+    for element in sorted(list(tbl_pr), key=rank):
+        tbl_pr.append(element)
+
+
 def _apply_table_widths(table, block: Table) -> None:
     """固定表格布局：逐单元格宽度 + tblGrid + tblLayout=fixed。
 
@@ -198,13 +215,24 @@ def _apply_table_widths(table, block: Table) -> None:
     table.autofit = False
 
     tbl_pr = table._tbl.tblPr
+    # python-docx 建表时已经写入 <w:tblW w:type="auto" w:w="0"/>。
+    # 直接 append 新的 tblW 会留下两个 tblW，Word 取的是第一个（auto），
+    # 于是固定列宽失效、表格缩成内容宽度。真实踩过：证据目录表格只有半个版心宽。
+    for existing in tbl_pr.findall(qn("w:tblW")):
+        tbl_pr.remove(existing)
+    table_width = OxmlElement("w:tblW")
+    # 与 python-docx 的 Cm(...).twips 保持同一取整方式，否则 gridCol 与 tcW
+    # 会差 1 twip，Word 可能据此微调列宽。
+    table_width.set(qn("w:w"), str(round(total * 567)))   # 厘米 → twips
+    table_width.set(qn("w:type"), "dxa")
+    tbl_pr.insert(0, table_width)
+
+    for existing in tbl_pr.findall(qn("w:tblLayout")):
+        tbl_pr.remove(existing)
     layout = OxmlElement("w:tblLayout")
     layout.set(qn("w:type"), "fixed")
     tbl_pr.append(layout)
-    table_width = OxmlElement("w:tblW")
-    table_width.set(qn("w:w"), str(int(total * 567)))   # 厘米 → twips
-    table_width.set(qn("w:type"), "dxa")
-    tbl_pr.append(table_width)
+    _order_table_properties(tbl_pr)
 
     grid = table._tbl.find(qn("w:tblGrid"))
     if grid is not None:
@@ -212,7 +240,7 @@ def _apply_table_widths(table, block: Table) -> None:
     grid = OxmlElement("w:tblGrid")
     for width in widths:
         column = OxmlElement("w:gridCol")
-        column.set(qn("w:w"), str(int(width * 567)))
+        column.set(qn("w:w"), str(round(width * 567)))
         grid.append(column)
     table._tbl.insert(list(table._tbl).index(tbl_pr) + 1, grid)
 

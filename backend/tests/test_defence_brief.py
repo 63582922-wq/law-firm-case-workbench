@@ -17,18 +17,33 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from case_kernel.defence_brief import (
+    _AUTHORITY_PLACEHOLDER,
     BriefSelections,
+    authority_cause_warnings,
+    build_brief_prompt,
     build_request_paragraphs,
+    cause_family,
+    claim_catalogue,
+    ground_catalogue,
     normalize_brief_output,
     render_brief_markdown,
     scrub_citations,
     scrub_figures,
+)
+from case_kernel.matter_documents import (
+    SHORT_BLANK,
+    _strip_gate_markers,
+    build_answer_document,
+    build_internal_checklist_document,
+    scrub_stored_file_names,
+    stored_file_name_count,
 )
 from case_kernel.defence_brief_service import (
     STATUS_BLOCKED,
     STATUS_COMPLETED,
     STATUS_MODEL_NOT_CONFIGURED,
     BriefRequest,
+    _preflight_review,
     run_brief,
 )
 
@@ -46,6 +61,7 @@ def _selections(**overrides) -> BriefSelections:
         claimant="测试甲",
         court="合成测试人民法院",
         case_number="（2026）合成民初1号",
+        cause="民间借贷纠纷",
         grounds={"cap": True, "lawyer_fee": True, "offset": False, "limitation": False,
                  "delivery": False, "amount": False},
         stances={"principal": "部分认可", "interest": "不认可",
@@ -171,7 +187,9 @@ class RenderTests(unittest.TestCase):
         selections = _selections(grounds={"cap": True, "offset": True})
         requests = build_request_paragraphs(selections=selections, engine_amounts=ENGINE)
         joined = " ".join(requests)
-        self.assertIn("经律师确认后由计算表计算净额", joined)
+        # 提交件不写内部词汇；未确认付款时只作原则性主张
+        self.assertIn("由律师确认后核定净额", joined)
+        self.assertNotIn("计算表", joined)
 
     def test_requests_pending_when_nothing_selected(self) -> None:
         empty = BriefSelections()
@@ -190,7 +208,9 @@ class RenderTests(unittest.TestCase):
         )
         self.assertIn("不得提交法院", markdown)
         self.assertIn("依据待律师登记", markdown)
-        self.assertIn("合成起诉状.pdf", markdown)
+        # 工作稿不写存储层文件名；材料名称去掉扩展名后仍要认得出是哪份
+        self.assertIn("合成起诉状", markdown)
+        self.assertNotIn("合成起诉状.pdf", markdown)
         self.assertIn("122350.00", markdown)
         self.assertIn("答辩人（签名）", markdown)
 
@@ -344,6 +364,219 @@ class SelectionTests(unittest.TestCase):
         original = _selections()
         restored = BriefSelections.from_dict(original.to_dict())
         self.assertEqual(restored.to_dict(), original.to_dict())
+
+
+class EvidenceCitationTests(unittest.TestCase):
+    """证据编号引用不能被法条清洗器吃掉（真实踩过：原告证据1［依据待律师登记］）。"""
+
+    def test_evidence_reference_survives_citation_scrub(self) -> None:
+        text, removed = scrub_citations(
+            "原告主张的货款（见原告证据1《起诉状》第1、2页），依据《中华人民共和国合同法》第二百条。",
+            [],
+        )
+        self.assertIn("原告证据1《起诉状》第1、2页", text)
+        self.assertNotIn("原告证据1［依据待律师登记］", text)
+        self.assertEqual(removed, ["《中华人民共和国合同法》第二百条"])
+
+    def test_unregistered_law_citation_still_scrubbed(self) -> None:
+        text, removed = scrub_citations("依据《中华人民共和国民法典》第五百七十七条。", [])
+        self.assertIn(_AUTHORITY_PLACEHOLDER, text)
+        self.assertEqual(removed, ["《中华人民共和国民法典》第五百七十七条"])
+
+    def test_registered_law_citation_kept(self) -> None:
+        authority = "《中华人民共和国民法典》第五百七十七条"
+        text, removed = scrub_citations(f"依据{authority}。", [authority])
+        self.assertEqual(removed, [])
+        self.assertIn(authority, text)
+
+
+class CauseFamilyTests(unittest.TestCase):
+    """案由决定术语：买卖合同不得出现借贷概念（真实踩过：买卖合同引民间借贷规定）。"""
+
+    SALES = "买卖合同纠纷"
+    LOAN = "民间借贷纠纷"
+
+    def test_catalogue_switches_wording(self) -> None:
+        sales = {title for _id, title, _d in ground_catalogue(self.SALES)}
+        loan = {title for _id, title, _d in ground_catalogue(self.LOAN)}
+        self.assertIn("货款数额与证据不符", sales)
+        self.assertIn("供货与交付事实证据不足", sales)
+        self.assertIn("逾期付款损失的计算依据有误", sales)
+        self.assertTrue(all("借贷" not in title and "出借" not in title for title in sales))
+        self.assertIn("本金数额与证据不符", loan)
+        self.assertIn("出借事实与款项交付证据不足", loan)
+
+    def test_claim_labels_switch_wording(self) -> None:
+        self.assertEqual(dict(claim_catalogue(self.SALES))["interest"], "逾期付款损失")
+        self.assertEqual(dict(claim_catalogue(self.SALES))["principal"], "货款本金")
+        self.assertEqual(dict(claim_catalogue(self.LOAN))["interest"], "利息")
+
+    def test_prompt_states_cause_and_forbids_foreign_terms(self) -> None:
+        prompt = build_brief_prompt(
+            selections=BriefSelections(cause=self.SALES, grounds={"cap": True}),
+            engine_amounts={}, claim_summary="", analysis_context="",
+            evidence_index="原告证据1：《购销合同》第1-3页",
+        )
+        self.assertIn("案由：买卖合同纠纷", prompt)
+        self.assertIn("禁止出现「借贷」「出借」「借款」「利息」", prompt)
+        self.assertIn("原告证据1：《购销合同》第1-3页", prompt)
+        self.assertIn("严禁写文件名、扩展名", prompt)
+
+    def test_prompt_without_cause_demands_neutral_wording(self) -> None:
+        prompt = build_brief_prompt(
+            selections=BriefSelections(), engine_amounts={}, claim_summary="",
+            analysis_context="", evidence_index="",
+        )
+        self.assertIn("案由未填写", prompt)
+        self.assertIn("不要引用具体材料", prompt)
+
+    def test_foreign_authority_is_flagged_not_deleted(self) -> None:
+        authority = "《最高人民法院关于审理民间借贷案件适用法律若干问题的规定》第二十五条"
+        warnings = authority_cause_warnings([authority], self.SALES)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("法源与案由可能不匹配", warnings[0])
+        # 提示而已：法源仍按律师登记原文保留
+        self.assertIn(authority, warnings[0])
+        # 同族法源不提示
+        self.assertEqual(authority_cause_warnings([authority], self.LOAN), [])
+        self.assertEqual(authority_cause_warnings([authority], ""), [])
+
+    def test_preflight_reports_missing_cause(self) -> None:
+        request = BriefRequest(case_id="c", output_root=Path("/tmp"),
+                               selections=BriefSelections(grounds={"cap": True}))
+        items = _preflight_review(request, {"合计本金": "1.00"})
+        self.assertTrue(any("尚未填写案由" in item for item in items))
+
+    def test_sales_request_has_no_loan_wording_and_no_doubled_an(self) -> None:
+        requests = build_request_paragraphs(
+            selections=BriefSelections(cause=self.SALES,
+                                       stances={"principal": "不认可", "interest": "不认可"}),
+            engine_amounts={
+                "未付货款本金": "10000.00",
+                "逾期付款损失（净额）": "197.26",
+                "损失口径": "按一年期 LPR",
+                "暂计截止日": "2026-04-15",
+            },
+        )
+        text = "".join(requests)
+        self.assertIn("应付货款本金为 10000.00 元", text)
+        self.assertNotIn("按按", text)          # 口径标签自带「按」时不再重复
+        self.assertIn("按一年期 LPR", text)
+        for term in ("借款本金", "出借", "借贷"):
+            self.assertNotIn(term, text)
+
+    def test_loan_request_untouched_when_cause_is_loan(self) -> None:
+        requests = build_request_paragraphs(
+            selections=BriefSelections(cause=self.LOAN, stances={"principal": "部分认可"}),
+            engine_amounts={"合计本金": "150000.00"},
+        )
+        self.assertIn("借款本金为 150000.00 元", "".join(requests))
+
+    def test_sales_requests_keep_lawyer_fee_and_costs(self) -> None:
+        """买卖分支曾提前 return，律师费/诉讼费请求被吃掉。"""
+        requests = build_request_paragraphs(
+            selections=BriefSelections(
+                cause="买卖合同纠纷",
+                stances={"principal": "部分认可", "interest": "不认可",
+                         "lawyer_fee": "不认可", "costs": "不认可"},
+            ),
+            engine_amounts={"未付货款本金": "10000.00", "逾期付款损失（净额）": "197.26"},
+        )
+        joined = " ".join(requests)
+        self.assertIn("诉讼费用由原告负担", joined)
+        self.assertIn("承担律师费", joined)
+        self.assertIn("货款本金", joined)
+        self.assertEqual(len(requests), 4)
+
+    def test_sales_section_titles_come_from_sales_catalogue(self) -> None:
+        raw = {"sections": [{"ground_id": "amount", "title": "模型自己起的标题",
+                             "paragraphs": ["论证段落。"]}],
+               "review_notes": []}
+        payload, _gate = normalize_brief_output(
+            raw,
+            selections=BriefSelections(cause=self.SALES, grounds={"amount": True}),
+            engine_amounts={},
+        )
+        self.assertEqual(payload["sections"][0]["title"], "货款数额与证据不符")
+
+
+class InternalJargonTests(unittest.TestCase):
+    """内部词汇不得进提交件（真实踩过：答辩请求写成「以计算表逐笔核定为准」）。"""
+
+    def test_count_sheet_wording_is_replaced(self) -> None:
+        self.assertEqual(_strip_gate_markers("（以计算表逐笔核定为准）"), "（以本案证据逐笔核定为准）")
+        self.assertEqual(_strip_gate_markers("具体数额以计算表为准。"), "具体数额以本案证据核定为准。")
+        self.assertNotIn("计算表", _strip_gate_markers("其余以计算表为据。"))
+
+    def test_requests_never_mention_count_sheet(self) -> None:
+        requests = build_request_paragraphs(
+            selections=BriefSelections(cause="买卖合同纠纷",
+                                       stances={"principal": "不认可", "interest": "不认可"}),
+            engine_amounts={"未付货款本金": "10000.00", "逾期付款损失（净额）": "197.26",
+                            "损失口径": "按一年期 LPR", "暂计截止日": "2026-06-22"},
+        )
+        for item in requests:
+            self.assertNotIn("计算表", _strip_gate_markers(item))
+            self.assertNotIn("计算表", item)
+
+    def test_offset_request_has_no_count_sheet(self) -> None:
+        requests = build_request_paragraphs(
+            selections=BriefSelections(cause="民间借贷纠纷", grounds={"offset": True},
+                                       stances={}),
+            engine_amounts={"已确认付款合计": "100.00", "冲抵后合计本金": "9900.00"},
+        )
+        self.assertTrue(requests)
+        for item in requests:
+            self.assertNotIn("计算表", item)
+
+    def test_answer_document_has_facts_section(self) -> None:
+        from case_kernel.matter_deliverables import MatterParties
+
+        spec = build_answer_document(
+            MatterParties(respondent="测试乙", claimant="某公司", cause="买卖合同纠纷",
+                          case_number="（2026）合成民初1号"),
+            answer_markdown="", engine_numbers={"未付货款本金": "10000.00"})
+        titles = [block.text for block in spec.blocks if hasattr(block, "text")]
+        self.assertTrue(any(text.startswith("（一）基本事实") for text in titles))
+        self.assertTrue(any("交易经过" in text for text in titles))
+
+
+class StoredFileNameTests(unittest.TestCase):
+    """提交件里不得出现存储层文件名（真实踩过：哈希文件名进了答辩状正文）。"""
+
+    def test_hash_file_names_are_blanked(self) -> None:
+        text = scrub_stored_file_names(
+            "原告提交的催收记录见 12207299bbcf203a4d481ebea25c5198.jpg 第22至43页。")
+        self.assertNotIn("12207299bbcf", text)
+        self.assertIn(SHORT_BLANK, text)
+
+    def test_extension_names_are_blanked(self) -> None:
+        self.assertNotIn(".pdf", scrub_stored_file_names("见《微信聊天记录.pdf》。"))
+        self.assertNotIn(".docx", scrub_stored_file_names("附件：购销合同.docx"))
+
+    def test_material_citation_drops_book_marks(self) -> None:
+        # 「《＿＿＿＿》第3页」是把材料引用误排成法条引用
+        self.assertEqual(_strip_gate_markers("原告在《＿＿＿＿》第1、2页中主张"),
+                         "原告在＿＿＿＿第1、2页中主张")
+
+    def test_count_matches_scrub(self) -> None:
+        text = "见 a1b2c3d4e5f60718293a4b5c6d7e8f90.jpg 与 b1c2d3e4f5a60718293a4b5c6d7e8f90.pdf"
+        self.assertEqual(stored_file_name_count(text), 2)
+
+    def test_internal_file_reports_blanked_names(self) -> None:
+        from case_kernel.matter_deliverables import MatterParties
+
+        spec = build_internal_checklist_document(
+            parties=MatterParties(case_number="（2026）合成民初1号", cause="买卖合同纠纷"),
+            states={}, materials=[], engine_numbers={"未付货款本金": "10000.00"},
+            review_items=["法源与案由可能不匹配：…"],
+            blanked_amount_count=2, blanked_name_count=3,
+            evidence_index="原告证据1：《购销合同》第1-3页",
+        )
+        text = "".join(block.text for block in spec.blocks if hasattr(block, "text"))
+        self.assertIn("3 处原为上传文件的存储文件名", text)
+        self.assertIn("原告证据1：《购销合同》第1-3页", text)
+        self.assertIn("四、", text)
 
 
 if __name__ == "__main__":

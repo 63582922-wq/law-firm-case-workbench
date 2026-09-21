@@ -1316,30 +1316,88 @@ export async function exportWebAnalysis(caseId: string, format: "md" | "docx"): 
 
 /* ------------------------------------------------------ 答辩状草稿（律师工作稿） */
 
-/** 与服务端 GROUNDS 一一对应；律师勾选后才进入文书。 */
-export const WEB_BRIEF_GROUNDS: ReadonlyArray<Readonly<{
-  id: string; title: string; description: string;
-}>> = [
-  { id: "cap", title: "利息按司法保护上限核减",
-    description: "主张原告请求的利息超出司法保护上限部分不应支持；上限参数由律师在决策包页面填写。" },
-  { id: "offset", title: "已付款项予以冲抵",
-    description: "主张被告已支付款项应在计算中冲抵；每笔付款的性质需律师确认后才进入计算。" },
-  { id: "lawyer_fee", title: "律师费承担条款不予支持",
-    description: "对原告主张由其负担律师费的请求提出异议。" },
-  { id: "limitation", title: "诉讼时效抗辩",
-    description: "主张原告的请求已超过诉讼时效期间。" },
-  { id: "delivery", title: "出借事实与款项交付证据不足",
-    description: "主张原告提交的材料不足以证明借贷合意与款项实际交付。" },
-  { id: "amount", title: "本金数额与证据不符",
-    description: "主张原告请求的本金数额与其提交的材料不能对应。" },
+/** 与服务端 GROUND_CATALOGUE 一一对应：案由不同，术语与小节标题不同。 */
+type WebBriefTerm = Readonly<Record<string, Readonly<{ title: string; description: string }>>>;
+
+export const WEB_BRIEF_GROUND_IDS: readonly string[] = [
+  "cap", "offset", "lawyer_fee", "limitation", "delivery", "amount",
 ] as const;
 
-export const WEB_BRIEF_CLAIMS: ReadonlyArray<Readonly<{ id: string; label: string }>> = [
-  { id: "principal", label: "借款本金" },
-  { id: "interest", label: "利息" },
-  { id: "lawyer_fee", label: "律师费" },
-  { id: "costs", label: "诉讼费用" },
-] as const;
+const WEB_BRIEF_GROUND_TERMS: Readonly<Record<string, WebBriefTerm>> = {
+  cap: {
+    LOAN: { title: "利息按司法保护上限核减",
+      description: "主张原告请求的利息超出司法保护上限部分不应支持；上限参数由律师在决策包页面填写。" },
+    SALES: { title: "逾期付款损失的计算依据有误",
+      description: "主张原告主张的逾期付款损失在起算日、口径或基数上与约定及证据不符。" },
+    OTHER: { title: "利息或损失的计算依据有误",
+      description: "主张原告主张的利息或损失在起算日、口径或基数上与约定及证据不符。" },
+  },
+  offset: {
+    LOAN: { title: "已付款项予以冲抵",
+      description: "主张被告已支付款项应在计算中冲抵；每笔付款的性质需律师确认后才进入计算。" },
+    SALES: { title: "已付款项予以冲抵",
+      description: "主张被告已支付款项应在计算中冲抵；每笔付款的性质需律师确认后才进入计算。" },
+    OTHER: { title: "已付款项予以冲抵",
+      description: "主张被告已支付款项应在计算中冲抵；每笔付款的性质需律师确认后才进入计算。" },
+  },
+  lawyer_fee: {
+    LOAN: { title: "律师费承担条款不予支持", description: "对原告主张由其负担律师费的请求提出异议。" },
+    SALES: { title: "律师费承担条款不予支持", description: "对原告主张由其负担律师费的请求提出异议。" },
+    OTHER: { title: "律师费承担条款不予支持", description: "对原告主张由其负担律师费的请求提出异议。" },
+  },
+  limitation: {
+    LOAN: { title: "诉讼时效抗辩", description: "主张原告的请求已超过诉讼时效期间。" },
+    SALES: { title: "诉讼时效抗辩", description: "主张原告的请求已超过诉讼时效期间。" },
+    OTHER: { title: "诉讼时效抗辩", description: "主张原告的请求已超过诉讼时效期间。" },
+  },
+  delivery: {
+    LOAN: { title: "出借事实与款项交付证据不足",
+      description: "主张原告提交的材料不足以证明借贷合意与款项实际交付。" },
+    SALES: { title: "供货与交付事实证据不足",
+      description: "主张原告提交的材料不足以证明供货、交付及数量、价款的对应关系。" },
+    OTHER: { title: "交付事实证据不足",
+      description: "主张原告提交的材料不足以证明标的物交付及数量、价款的对应关系。" },
+  },
+  amount: {
+    LOAN: { title: "本金数额与证据不符", description: "主张原告请求的本金数额与其提交的材料不能对应。" },
+    SALES: { title: "货款数额与证据不符", description: "主张原告请求的货款数额与其提交的材料不能对应。" },
+    OTHER: { title: "请求数额与证据不符", description: "主张原告请求的数额与其提交的材料不能对应。" },
+  },
+};
+
+const WEB_BRIEF_CLAIM_TERMS: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+  principal: { LOAN: "借款本金", SALES: "货款本金", OTHER: "本金" },
+  interest: { LOAN: "利息", SALES: "逾期付款损失", OTHER: "利息或损失" },
+  lawyer_fee: { LOAN: "律师费", SALES: "律师费", OTHER: "律师费" },
+  costs: { LOAN: "诉讼费用", SALES: "诉讼费用", OTHER: "诉讼费用" },
+};
+
+/** 案由归族规则与服务端 cause_family 保持一致。 */
+export function webBriefCauseFamily(cause: string): "LOAN" | "SALES" | "OTHER" {
+  const text = String(cause ?? "");
+  if (text.includes("借贷") || text.includes("借款")) return "LOAN";
+  if (text.includes("买卖") || text.includes("货款") || text.includes("购销")
+      || text.includes("供销")) return "SALES";
+  return "OTHER";
+}
+
+export function webBriefGrounds(cause: string): ReadonlyArray<Readonly<{
+  id: string; title: string; description: string;
+}>> {
+  const family = webBriefCauseFamily(cause);
+  return WEB_BRIEF_GROUND_IDS.map((id) => ({
+    id,
+    title: WEB_BRIEF_GROUND_TERMS[id][family].title,
+    description: WEB_BRIEF_GROUND_TERMS[id][family].description,
+  }));
+}
+
+export function webBriefClaims(cause: string): ReadonlyArray<Readonly<{
+  id: string; label: string;
+}>> {
+  const family = webBriefCauseFamily(cause);
+  return Object.entries(WEB_BRIEF_CLAIM_TERMS).map(([id, labels]) => ({ id, label: labels[family] }));
+}
 
 export const WEB_BRIEF_STANCES: readonly string[] = ["不认可", "部分认可", "认可", "不发表意见"];
 
@@ -1348,6 +1406,7 @@ export type WebBriefSelections = Readonly<{
   claimant: string;
   court: string;
   caseNumber: string;
+  cause: string;
   grounds: Readonly<Record<string, boolean>>;
   stances: Readonly<Record<string, string>>;
   authorities: readonly string[];
@@ -1381,9 +1440,9 @@ export type WebBriefPayload = Readonly<{
 
 export function emptyWebBriefSelections(): WebBriefSelections {
   return {
-    respondent: "", claimant: "", court: "", caseNumber: "",
-    grounds: Object.fromEntries(WEB_BRIEF_GROUNDS.map((ground) => [ground.id, false])),
-    stances: Object.fromEntries(WEB_BRIEF_CLAIMS.map((claim) => [claim.id, "不发表意见"])),
+    respondent: "", claimant: "", court: "", caseNumber: "", cause: "",
+    grounds: Object.fromEntries(WEB_BRIEF_GROUND_IDS.map((id) => [id, false])),
+    stances: Object.fromEntries(Object.keys(WEB_BRIEF_CLAIM_TERMS).map((id) => [id, "不发表意见"])),
     authorities: [],
     notes: "",
   };
@@ -1406,12 +1465,13 @@ function parseWebBriefSelections(value: unknown): WebBriefSelections {
     claimant: optionalTextAllowEmpty(record.claimant, 120),
     court: optionalTextAllowEmpty(record.court, 120),
     caseNumber: optionalTextAllowEmpty(record.case_number, 120),
-    grounds: Object.fromEntries(WEB_BRIEF_GROUNDS.map((ground) => [
-      ground.id, optionalBoolean(groundsRaw[ground.id], false, "主张勾选格式不正确"),
+    cause: optionalTextAllowEmpty(record.cause, 120),
+    grounds: Object.fromEntries(WEB_BRIEF_GROUND_IDS.map((id) => [
+      id, optionalBoolean(groundsRaw[id], false, "主张勾选格式不正确"),
     ])),
-    stances: Object.fromEntries(WEB_BRIEF_CLAIMS.map((claim) => {
-      const raw = typeof stancesRaw[claim.id] === "string" ? String(stancesRaw[claim.id]) : "";
-      return [claim.id, statuses.includes(raw) ? raw : "不发表意见"];
+    stances: Object.fromEntries(Object.keys(WEB_BRIEF_CLAIM_TERMS).map((id) => {
+      const raw = typeof stancesRaw[id] === "string" ? String(stancesRaw[id]) : "";
+      return [id, statuses.includes(raw) ? raw : "不发表意见"];
     })),
     authorities,
     notes: optionalTextAllowEmpty(record.notes, 2_000),
@@ -1457,6 +1517,7 @@ function toWebBriefPayload(selections: WebBriefSelections): Record<string, unkno
     claimant: selections.claimant,
     court: selections.court,
     case_number: selections.caseNumber,
+    cause: selections.cause,
     grounds: selections.grounds,
     stances: selections.stances,
     authorities: selections.authorities,
