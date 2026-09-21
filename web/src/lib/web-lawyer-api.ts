@@ -1494,10 +1494,19 @@ export type WebDeliverableParties = Readonly<{
   notes: string;
 }>;
 
+export type WebDeliverableMaterial = Readonly<{
+  materialId: string;
+  displayName: string;
+  pageCount: number;
+  plaintiff: boolean;
+  ours: boolean;
+}>;
+
 export type WebDeliverableState = Readonly<{
   catalogue: readonly WebDeliverableItem[];
   parties: WebDeliverableParties;
   states: Readonly<Record<string, string>>;
+  materials: readonly WebDeliverableMaterial[];
   updatedAt: string;
 }>;
 
@@ -1543,6 +1552,23 @@ function parseWebDeliverableState(payload: unknown, operation: string): WebDeliv
     lawFirm: optionalTextAllowEmpty(partiesRaw.law_firm, 200),
     notes: optionalTextAllowEmpty(partiesRaw.notes, 200),
   };
+  const materialsRaw = record.materials;
+  const rolesRaw = asRecord(record.material_roles ?? {}, "材料角色格式不正确");
+  const materials: WebDeliverableMaterial[] = [];
+  if (Array.isArray(materialsRaw)) {
+    for (const item of materialsRaw) {
+      const row = asRecord(item, "材料格式不正确");
+      const materialId = optionalTextAllowEmpty(row.material_id, 80);
+      const role = asRecord(rolesRaw[materialId] ?? {}, "材料角色格式不正确");
+      materials.push({
+        materialId,
+        displayName: optionalTextAllowEmpty(row.display_name, 240),
+        pageCount: optionalNonNegativeInteger(row.page_count, 100_000) ?? 0,
+        plaintiff: optionalBoolean(role.plaintiff, false, "材料角色格式不正确"),
+        ours: optionalBoolean(role.ours, false, "材料角色格式不正确"),
+      });
+    }
+  }
   const statesRaw = asRecord(record.states ?? {}, "交付状态格式不正确");
   const states: Record<string, string> = {};
   for (const [key, value] of Object.entries(statesRaw)) {
@@ -1553,6 +1579,7 @@ function parseWebDeliverableState(payload: unknown, operation: string): WebDeliv
     catalogue,
     parties,
     states,
+    materials,
     updatedAt: optionalTextAllowEmpty(record.updated_at, 60),
   };
 }
@@ -1567,6 +1594,7 @@ export async function saveWebDeliverables(
   caseId: string,
   parties: WebDeliverableParties,
   states: Readonly<Record<string, string>>,
+  materialRoles: Readonly<Record<string, Readonly<{ plaintiff: boolean; ours: boolean }>>> = {},
 ): Promise<WebDeliverableState> {
   const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
   const response = await webApiFetch(`/api/v1/cases/${normalizedCaseId}/deliverables`, {
@@ -1581,6 +1609,7 @@ export async function saveWebDeliverables(
         notes: parties.notes,
       },
       states,
+      material_roles: materialRoles,
     }),
   });
   return parseWebDeliverableState(await readJsonResponse(response, "保存交付清单"), "保存交付清单");
@@ -1592,6 +1621,25 @@ export async function readWebDeliverableTemplate(caseId: string, itemId: string)
     `/api/v1/cases/${normalizedCaseId}/deliverables/template/${encodeURIComponent(itemId)}`, {});
   const payload = asRecord(await readJsonResponse(response, "读取交付物模板"), "交付物模板格式不正确");
   return optionalMultilineText(payload.markdown, 200_000);
+}
+
+export async function downloadWebDeliverableArchive(caseId: string): Promise<Blob> {
+  const normalizedCaseId = normalizeOpaqueId(caseId, "案件编号");
+  const response = await webApiFetch(
+    `/api/v1/cases/${normalizedCaseId}/deliverables/export?format=zip`, {});
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+    const message = payload && typeof payload.message === "string" ? payload.message : "导出材料包失败";
+    throw new WebLawyerApiError(message, { status: response.status, requestId: null });
+  }
+  return response.blob();
+}
+
+export function webDeliverableDocumentUrl(caseId: string, itemPath: string): string {
+  const prefix = process.env.NEXT_PUBLIC_WEB_API_PREFIX === "/api/local/v1"
+    ? "/api/local/v1" : "/api/v1";
+  return `${prefix}/cases/${encodeURIComponent(caseId)}/deliverables/export`
+    + `?format=docx&item=${encodeURIComponent(itemPath)}`;
 }
 
 export async function exportWebDeliverables(caseId: string, format: "md" | "docx"): Promise<Blob> {

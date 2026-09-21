@@ -146,10 +146,38 @@ class LocalWebDeliverablesTest(unittest.TestCase):
             self.assertIn(marker, text)
         self.assertIn("起诉状.pdf", text)          # 证据目录自动列出本案材料
         self.assertIn("尚未生成答辩状草稿", text)
-        docx = self.client.get(
-            f"/api/local/v1/cases/{self.case_id}/deliverables/export?format=docx")
-        self.assertEqual(docx.status_code, 200)
-        self.assertTrue(docx.content.startswith(b"PK"))
+
+        # 打包：每份文书独立 docx + 内部文件 + 使用顺序
+        archive_response = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export?format=zip")
+        self.assertEqual(archive_response.status_code, 200)
+        self.assertEqual(archive_response.headers["content-type"], "application/zip")
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(archive_response.content)) as archive:
+            names = archive.namelist()
+        for expected in ("01-民事答辩状.docx", "02-证据目录.docx", "03-质证意见.docx",
+                         "04-代理词.docx", "05-授权委托书（当事人签字）.docx",
+                         "06-送达地址确认书（当事人签字）.docx",
+                         "07-当事人陈述（当事人签字）.docx",
+                         "08-证据来源说明（当事人签字）.docx",
+                         "09-调解意见确认（当事人签字）.docx",
+                         "内部文件（不提交）/交付清单与填写指引.docx", "使用顺序.txt"):
+            self.assertTrue(any(name.endswith(expected) for name in names), expected)
+        self.assertTrue(any("/申请书（按需选用）/" in name for name in names))
+        # 不再把全部文书塞进一个 Word
+        self.assertFalse(any(name.endswith("defence-package.docx") for name in names))
+
+        single = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export"
+            "?format=docx&item=01-民事答辩状.docx")
+        self.assertEqual(single.status_code, 200)
+        self.assertTrue(single.content.startswith(b"PK"))
+        unknown = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export"
+            "?format=docx&item=99-不存在.docx")
+        self.assertEqual(unknown.status_code, 422)
 
     def test_export_includes_answer_draft_when_present(self) -> None:
         draft = self.store._analysis_dir(self.case_id) / "答辩状草稿.md"
@@ -195,6 +223,48 @@ class LocalWebDeliverablesTest(unittest.TestCase):
         self.assertIn("交易主体是否为答辩人", exported.text)
         self.assertIn("货款金额是否确定", exported.text)
         self.assertIn("来自决策包，请律师确认", exported.text)
+
+    def test_evidence_documents_follow_lawyer_material_roles(self) -> None:
+        """证据目录只列"我方证据"，质证意见只列"原告证据"——由律师勾选，不自动全列。"""
+        import io
+        import zipfile
+
+        from docx import Document
+
+        materials = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables").json()["materials"]
+        self.assertEqual(len(materials), 1)
+        material_id = materials[0]["material_id"]
+
+        # 未勾选：证据目录里不出现这份材料
+        self.client.put(f"/api/local/v1/cases/{self.case_id}/deliverables",
+                        json={"parties": self._parties(), "states": {},
+                              "material_roles": {}},
+                        headers=self._headers("dev-roles-1"))
+        archive = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export?format=zip").content
+        with zipfile.ZipFile(io.BytesIO(archive)) as pack:
+            evidence = [n for n in pack.namelist() if n.endswith("02-证据目录.docx")][0]
+            body = "\n".join(p.text for p in Document(io.BytesIO(pack.read(evidence))).paragraphs)
+            tables = Document(io.BytesIO(pack.read(evidence))).tables
+            cell_text = "\n".join(c.text for row in tables[0].rows for c in row.cells)
+        self.assertNotIn("起诉状", body + cell_text)
+
+        # 勾选为"我方证据"后出现
+        saved = self.client.put(
+            f"/api/local/v1/cases/{self.case_id}/deliverables",
+            json={"parties": self._parties(), "states": {},
+                  "material_roles": {material_id: {"plaintiff": True, "ours": True}}},
+            headers=self._headers("dev-roles-2"))
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.json()["material_roles"][material_id]["ours"])
+        archive = self.client.get(
+            f"/api/local/v1/cases/{self.case_id}/deliverables/export?format=zip").content
+        with zipfile.ZipFile(io.BytesIO(archive)) as pack:
+            evidence = [n for n in pack.namelist() if n.endswith("02-证据目录.docx")][0]
+            doc = Document(io.BytesIO(pack.read(evidence)))
+            cell_text = "\n".join(c.text for row in doc.tables[0].rows for c in row.cells)
+        self.assertIn("起诉状", cell_text)
 
     def test_parties_prefilled_from_brief_selections(self) -> None:
         self.client.put(f"/api/local/v1/cases/{self.case_id}/brief",

@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 from threading import Lock, Thread
 from typing import AsyncIterable, Mapping
+from urllib.parse import quote
 from uuid import UUID, uuid4
 import zipfile
 
@@ -67,12 +68,13 @@ class AnalysisRunRequest(BaseModel):
 
 
 class DeliverableStateRequest(BaseModel):
-    """交付清单：案件主体信息 + 各项交付物状态（律师维护）。"""
+    """交付清单：案件主体信息 + 交付状态 + 材料角色（律师维护）。"""
 
     model_config = ConfigDict(extra="forbid")
 
     parties: dict[str, object]
     states: dict[str, object]
+    material_roles: dict[str, object] | None = None
 
 
 class BriefSelectionRequest(BaseModel):
@@ -99,6 +101,14 @@ class AnalysisConfigRequest(BaseModel):
 
     case_config: dict[str, object]
 
+
+
+_UNSAFE_NAME = re.compile(r'[\\/:*?"<>|\s]+')
+
+
+def _safe_folder_name(value: str) -> str:
+    cleaned = _UNSAFE_NAME.sub("_", str(value or "")).strip("_")
+    return cleaned[:60] or "应诉材料包"
 
 
 def _resolve_provider_info(env_file: Path | None) -> dict[str, str]:
@@ -265,6 +275,7 @@ class LocalWebStore:
                     case_id TEXT PRIMARY KEY REFERENCES cases(case_id),
                     parties_json TEXT NOT NULL DEFAULT '{}',
                     states_json TEXT NOT NULL DEFAULT '{}',
+                    material_roles_json TEXT NOT NULL DEFAULT '{}',
                     updated_at TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS brief_runs (
@@ -295,7 +306,16 @@ class LocalWebStore:
                     (str(uuid4()), str(uuid4()), _iso(_now())),
                 )
             self._migrate_agent_columns(db)
+            self._migrate_deliverable_columns(db)
         os.chmod(self.db_path, 0o600)
+
+    @staticmethod
+    def _migrate_deliverable_columns(db: sqlite3.Connection) -> None:
+        """交付清单新增材料角色列（幂等，兼容既有数据库）。"""
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(deliverable_states)")}
+        if "material_roles_json" not in columns:
+            db.execute("ALTER TABLE deliverable_states ADD COLUMN material_roles_json "
+                       "TEXT NOT NULL DEFAULT '{}'")
 
     @staticmethod
     def _migrate_agent_columns(db: sqlite3.Connection) -> None:
@@ -1001,7 +1021,7 @@ class LocalWebStore:
                               (case_id,)).fetchone()
 
     def read_deliverables(self, case_id: str) -> dict[str, object]:
-        """交付清单状态 + 案件主体信息（律师维护；签字文件与答辩状共用）。"""
+        """交付清单状态 + 案件主体信息 + 材料角色（律师维护）。"""
         from case_kernel.matter_deliverables import MatterParties, catalogue_payload
 
         self._case(case_id)
@@ -1018,15 +1038,34 @@ class LocalWebStore:
                     for key, source in (("respondent", "respondent"), ("claimant", "claimant"),
                                         ("court", "court"), ("case_number", "caseNumber"))
                 }
+        roles = json.loads(str(row["material_roles_json"]) or "{}") if row is not None else {}
+        materials = [
+            {
+                "material_id": str(item["material_id"]),
+                "display_name": str(item["display_name"]),
+                "page_count": int(item["page_count"] or 0),
+            }
+            for item in self._case_materials_rows(case_id)
+        ]
         return {
             "catalogue": catalogue_payload(),
             "parties": MatterParties.from_dict(parties).to_dict(),
             "states": {str(key): str(value) for key, value in dict(states).items()},
+            "materials": materials,
+            "material_roles": {
+                str(key): {
+                    "plaintiff": bool((value or {}).get("plaintiff")),
+                    "ours": bool((value or {}).get("ours")),
+                }
+                for key, value in dict(roles).items()
+                if isinstance(value, dict)
+            },
             "updated_at": str(row["updated_at"]) if row is not None else "",
         }
 
     def save_deliverables(self, case_id: str, parties: Mapping[str, object],
-                          states: Mapping[str, object]) -> dict[str, object]:
+                          states: Mapping[str, object],
+                          material_roles: Mapping[str, object] | None = None) -> dict[str, object]:
         from case_kernel.matter_deliverables import (
             CATALOGUE_BY_ID,
             DELIVERABLE_STATES,
@@ -1040,25 +1079,150 @@ class LocalWebStore:
             for item_id, status in dict(states).items()
             if str(item_id) in CATALOGUE_BY_ID
         }
+        known_materials = {str(item["material_id"]) for item in self._case_materials_rows(case_id)}
+        normalized_roles = {
+            str(material_id): {
+                "plaintiff": bool((value or {}).get("plaintiff")),
+                "ours": bool((value or {}).get("ours")),
+            }
+            for material_id, value in dict(material_roles or {}).items()
+            if str(material_id) in known_materials and isinstance(value, dict)
+        }
         with self._lock, self._connect() as db:
             db.execute(
-                """INSERT INTO deliverable_states(case_id, parties_json, states_json, updated_at)
-                   VALUES(?,?,?,?)
+                """INSERT INTO deliverable_states(case_id, parties_json, states_json,
+                                                    material_roles_json, updated_at)
+                   VALUES(?,?,?,?,?)
                    ON CONFLICT(case_id) DO UPDATE SET
                      parties_json=excluded.parties_json,
                      states_json=excluded.states_json,
+                     material_roles_json=excluded.material_roles_json,
                      updated_at=excluded.updated_at""",
                 (case_id, json.dumps(normalized_parties, ensure_ascii=False),
-                 json.dumps(normalized_states, ensure_ascii=False), _iso(_now())),
+                 json.dumps(normalized_states, ensure_ascii=False),
+                 json.dumps(normalized_roles, ensure_ascii=False), _iso(_now())),
             )
         return self.read_deliverables(case_id)
 
+    def _case_materials_rows(self, case_id: str):
+        return self._case_materials(case_id)
+
     def deliverable_materials(self, case_id: str) -> list[dict[str, object]]:
         return [
-            {"display_name": str(item["display_name"]),
+            {"material_id": str(item["material_id"]),
+             "display_name": str(item["display_name"]),
              "page_count": int(item["page_count"] or 0)}
             for item in self._case_materials(case_id)
         ]
+
+    def submission_documents(self, case_id: str) -> list:
+        """本次应诉的全部提交件与签字件（按文书体例各自成文）。"""
+        from case_kernel.matter_deliverables import MatterParties
+        from case_kernel.matter_documents import build_submission_documents
+
+        state = self.read_deliverables(case_id)
+        parties = MatterParties.from_dict(state.get("parties"))
+        answer_path = self.brief_markdown_path(case_id)
+        answer = answer_path.read_text(encoding="utf-8") if answer_path else ""
+        engine: dict = {}
+        with self._connect() as db:
+            row = db.execute("SELECT agent_engine_json FROM analysis_runs WHERE case_id=?",
+                             (case_id,)).fetchone()
+        if row is not None and row["agent_engine_json"]:
+            try:
+                engine = json.loads(str(row["agent_engine_json"]))
+            except ValueError:
+                engine = {}
+        materials = self.deliverable_materials(case_id)
+        roles = state.get("material_roles") or {}
+        ours = [item for item in materials
+                if (roles.get(str(item["material_id"])) or {}).get("ours")]
+        plaintiff = [item for item in materials
+                     if (roles.get(str(item["material_id"])) or {}).get("plaintiff")]
+        return build_submission_documents(
+            parties=parties,
+            materials=materials,
+            our_materials=ours,
+            plaintiff_materials=plaintiff,
+            engine_numbers=engine,
+            answer_markdown=answer,
+            issues=self.analysis_issues(case_id),
+        )
+
+    def internal_document(self, case_id: str):
+        """内部文件（不提交）：交付清单、填写指引、数字与待核事项。"""
+        from case_kernel.matter_deliverables import MatterParties
+        from case_kernel.matter_documents import build_internal_checklist_document
+
+        state = self.read_deliverables(case_id)
+        parties = MatterParties.from_dict(state.get("parties"))
+        engine: dict = {}
+        review: list[str] = []
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT agent_engine_json, agent_error FROM analysis_runs WHERE case_id=?",
+                (case_id,)).fetchone()
+        if row is not None:
+            if row["agent_engine_json"]:
+                try:
+                    engine = json.loads(str(row["agent_engine_json"]))
+                except ValueError:
+                    engine = {}
+            if row["agent_error"]:
+                review.append(f"分析曾报告：{str(row['agent_error'])[:200]}")
+        blanked = 0
+        path = self.brief_markdown_path(case_id)
+        if path is not None:
+            from case_kernel.matter_documents import gate_marker_count
+
+            draft = path.read_text(encoding="utf-8")
+            blanked = gate_marker_count(draft)
+            for line in draft.splitlines():
+                if line.strip().startswith("- [ ]"):
+                    review.append(line.strip()[5:].strip())
+        return build_internal_checklist_document(
+            parties=parties, states=state.get("states") or {},
+            materials=self.deliverable_materials(case_id),
+            engine_numbers=engine, review_items=review[:20],
+            blanked_amount_count=blanked,
+        )
+
+    def deliverable_docx(self, case_id: str, item_path: str) -> tuple[str, bytes] | None:
+        """单份文书导出：item_path 必须与打包清单中的相对路径完全一致。"""
+        from case_api.legal_docx import render_legal_document
+
+        candidates = [*self.submission_documents(case_id), self.internal_document(case_id)]
+        for spec in candidates:
+            if spec.path == item_path:
+                return spec.path, render_legal_document(spec)
+        return None
+
+    def deliverable_zip(self, case_id: str) -> bytes:
+        """打包：提交件与签字件放根目录，申请书与内部文件各自一个子目录。"""
+        from io import BytesIO
+        import zipfile
+
+        from case_api.legal_docx import render_legal_document
+
+        case = self._case(case_id)
+        folder = _safe_folder_name(f"应诉材料包_{case['title']}")
+        buffer = BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            for spec in self.submission_documents(case_id):
+                archive.writestr(f"{folder}/{spec.path}", render_legal_document(spec))
+            internal = self.internal_document(case_id)
+            archive.writestr(f"{folder}/{internal.path}", render_legal_document(internal))
+            archive.writestr(
+                f"{folder}/使用顺序.txt",
+                "提交与签字顺序建议（本文件仅作提示，可不随材料提交）：\n"
+                "1. 先打印 05 授权委托书、06 送达地址确认书、07 当事人陈述、"
+                "08 证据来源说明、09 调解意见确认，交当事人本人签署；\n"
+                "2. 01 民事答辩状由答辩人签名或捺印后提交法院；\n"
+                "3. 02 证据目录需补全「证明内容」后与证据副本一并提交；\n"
+                "4. 03 质证意见、04 代理词、10–13 申请书按程序阶段提交；\n"
+                "5. 内部文件（不提交）目录仅供律师使用，不要交给法院或对方。\n",
+            )
+        return buffer.getvalue()
 
     def deliverable_package_markdown(self, case_id: str) -> str:
         """整套应诉材料包：清单 + 签字文件 + 证据目录 + 已有答辩状草稿。"""
@@ -1343,7 +1507,7 @@ class LocalWebStore:
     def _case_materials(self, case_id: str):
         with self._connect() as db:
             return db.execute(
-                """SELECT display_name, page_count FROM materials
+                """SELECT material_id, display_name, page_count FROM materials
                    WHERE case_id=? AND state='COMPLETED' AND media_type IN
                      ('application/pdf','image/jpeg','image/png')
                    ORDER BY created_at""",
@@ -2057,7 +2221,8 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
                                 body: DeliverableStateRequest,
                                 x_lawcase_csrf: str | None = Header(default=None)):
         ensure_write(request, x_lawcase_csrf)
-        return store.save_deliverables(str(case_id), body.parties, body.states)
+        return store.save_deliverables(str(case_id), body.parties, body.states,
+                                      body.material_roles)
 
     @app.get("/api/local/v1/cases/{case_id}/deliverables/template/{item_id}")
     async def deliverable_template(case_id: UUID, item_id: str, request: Request,
@@ -2074,23 +2239,34 @@ def create_local_web_app(store: LocalWebStore | None = None) -> FastAPI:
 
     @app.get("/api/local/v1/cases/{case_id}/deliverables/export")
     async def deliverable_export(case_id: UUID, request: Request, response: Response,
-                                 format: str = "md"):
+                                 format: str = "zip", item: str = ""):
+        """导出应诉材料：默认打包 ZIP（每份文书独立 docx），也可按 item 取单份。"""
         ensure_session(request, response)
-        text = store.deliverable_package_markdown(str(case_id))
-        if format == "md":
-            return Response(content=text, media_type="text/markdown; charset=utf-8",
-                            headers={"Content-Disposition": 'attachment; filename="defence-package.md"'})
-        if format == "docx":
-            from case_api.analysis_export import render_decision_package_docx
-
-            payload = render_decision_package_docx(text)
+        if format == "zip":
+            payload = store.deliverable_zip(str(case_id))
+            case = store._case(str(case_id))
+            name = _safe_folder_name(f"应诉材料包_{case['title']}") + ".zip"
+            return Response(
+                content=payload, media_type="application/zip",
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"},
+            )
+        if format == "docx" and item:
+            found = store.deliverable_docx(str(case_id), item)
+            if found is None:
+                raise LocalWebNotFound("没有这份文书；请按材料包内的文件名请求。")
+            path, payload = found
+            filename = quote(path.rsplit("/", 1)[-1])
             return Response(
                 content=payload,
                 media_type=("application/vnd.openxmlformats-officedocument"
                             ".wordprocessingml.document"),
-                headers={"Content-Disposition": 'attachment; filename="defence-package.docx"'},
+                headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
             )
-        raise LocalWebBlocked("导出格式仅支持 md 或 docx。")
+        if format == "md":      # 兼容：旧的整体 Markdown 草稿（内部核对用）
+            return Response(content=store.deliverable_package_markdown(str(case_id)),
+                            media_type="text/markdown; charset=utf-8",
+                            headers={"Content-Disposition": 'attachment; filename="defence-package.md"'})
+        raise LocalWebBlocked("导出格式仅支持 zip、docx（需指定 item）或 md。")
 
     # ------------------------------------------------------ 答辩状草稿路由
 
