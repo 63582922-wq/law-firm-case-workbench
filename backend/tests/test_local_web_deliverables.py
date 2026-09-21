@@ -73,7 +73,7 @@ class LocalWebDeliverablesTest(unittest.TestCase):
     def _parties(self) -> dict:
         return {
             "respondent": "测试乙", "respondent_address": "合成市测试路1号",
-            "respondent_phone": "13800000000", "claimant": "测试合成木业有限公司",
+            "respondent_phone": "13800000000", "claimant": "合成木业有限公司",
             "court": "合成市测试区人民法院", "case_number": "（2026）测试民初3号",
             "cause": "买卖合同纠纷", "lawyer": "测试律师", "law_firm": "测试律师事务所",
         }

@@ -533,7 +533,7 @@ class InternalJargonTests(unittest.TestCase):
         from case_kernel.matter_deliverables import MatterParties
 
         spec = build_answer_document(
-            MatterParties(respondent="测试乙", claimant="某公司", cause="买卖合同纠纷",
+            MatterParties(respondent="测试乙", claimant="测试甲公司", cause="买卖合同纠纷",
                           case_number="（2026）合成民初1号"),
             answer_markdown="", engine_numbers={"未付货款本金": "10000.00"})
         titles = [block.text for block in spec.blocks if hasattr(block, "text")]
